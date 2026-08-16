@@ -1,0 +1,18 @@
+# UDEV Rules for Greaseweazle
+#
+# To install, type this command in a terminal:
+#   sudo cp 49-greaseweazle.rules /etc/udev/rules.d/.
+#
+# After this file is installed, physically unplug and reconnect Greaseweazle.
+#
+ATTRS{manufacturer}=="Keir Fraser", ATTRS{product}=="Greaseweazle", \
+    ENV{ID_MM_DEVICE_IGNORE}="1"
+ATTRS{manufacturer}=="Keir Fraser", ATTRS{product}=="Greaseweazle", \
+    ENV{MTP_NO_PROBE}="1"
+ATTRS{manufacturer}=="Keir Fraser", ATTRS{product}=="Greaseweazle", \
+    SUBSYSTEMS=="usb", TAG+="uaccess"
+ATTRS{manufacturer}=="Keir Fraser", ATTRS{product}=="Greaseweazle", \
+    KERNEL=="ttyACM*", TAG+="uaccess"
+ACTION=="add", \
+    ATTRS{manufacturer}=="Keir Fraser", ATTRS{product}=="Greaseweazle", \
+    SYMLINK+="greaseweazle"

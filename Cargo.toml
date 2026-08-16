@@ -1,0 +1,11 @@
+[package]
+name = "aligntester-diag"
+version = "0.1.0"
+edition = "2021"
+default-run = "aligntester-diag"
+
+[dependencies]
+ratatui = "0.26"
+crossterm = "0.27"
+crossbeam-channel = "0.5"
+serialport = "4.3"

@@ -1,0 +1,7 @@
+/target
+/backups
+*.tar.gz
+*.zip
+*:Zone.Identifier*
+__pycache__/
+*.pyc
