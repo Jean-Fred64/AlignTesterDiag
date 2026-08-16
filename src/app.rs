@@ -1,17 +1,12 @@
 use crate::hw::DriveStatus;
 
 /// Three-state head selection mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HeadSelection {
+    #[default]
     Head0,
     Head1,
     Both,
-}
-
-impl Default for HeadSelection {
-    fn default() -> Self {
-        Self::Head0
-    }
 }
 
 impl HeadSelection {
@@ -33,18 +28,13 @@ impl HeadSelection {
 }
 
 /// Application level view mode
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ViewMode {
     /// Standard / Normal clean continuous scroll with segmented bar
+    #[default]
     Normal,
     /// Detailed verbose history mode with timing, PLL, RPM, and ribbon
     Verbose,
-}
-
-impl Default for ViewMode {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 /// Represents the result and formatted metrics of a completed diagnostic pass on a physical head
@@ -61,6 +51,7 @@ pub struct DiagnosticPass {
 }
 
 impl DiagnosticPass {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         track: u8,
         head: u8,

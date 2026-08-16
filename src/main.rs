@@ -1018,7 +1018,7 @@ mod tests {
     #[test]
     fn test_get_verbose_line_style_perfect_pass() {
         let style = get_verbose_line_style(
-            "T:79 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK) IL:1:1 200.1ms [299.8 RPM ±0.2%] Gap0:420µs Q:99%",
+            "T:79 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK) IL:1:1 Gap0:1440µs Q:99%",
             18,
         );
         assert_eq!(
@@ -1029,7 +1029,7 @@ mod tests {
         );
 
         let style_dd = get_verbose_line_style(
-            "T:40 H:0 Rate:250k MFM [ ■■■■■■■■■ ]          (9/9 OK) IL:1:1 200.0ms [300.1 RPM ±0.1%] Gap0:410µs Q:98%",
+            "T:40 H:0 Rate:250k MFM [ ■■■■■■■■■ ]          (9/9 OK)   IL:1:1 Gap0:2880µs Q:98%",
             9,
         );
         assert_eq!(
@@ -1043,7 +1043,7 @@ mod tests {
     #[test]
     fn test_get_verbose_line_style_partial_pass() {
         let style_missing = get_verbose_line_style(
-            "T:35 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■ ] (14/15 MISSING: Sec 8) IL:1:1 166.7ms [360.0 RPM]",
+            "T:35 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■ ] (14/15 MISSING: Sec 8) IL:1:1 Gap0:1440µs Q:90%",
             15,
         );
         assert_eq!(
@@ -1054,7 +1054,7 @@ mod tests {
         );
 
         let style_off = get_verbose_line_style(
-            "T:00 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OFF-TRK: T10: 18 sect) IL:1:1 200.0ms",
+            "T:00 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OFF-TRK: T10: 18 sect) IL:1:1 Gap0:1440µs Q:85%",
             18,
         );
         assert_eq!(
@@ -1068,7 +1068,7 @@ mod tests {
     #[test]
     fn test_get_verbose_line_style_missing_or_poor_pass() {
         let style_missing = get_verbose_line_style(
-            "T:80 H:0 Rate:---k --- [ ? ]                   (0/0 NO DATA / MISSING) 200.3ms [299.5 RPM]",
+            "T:80 H:0 Rate:---k --- [ ? ]                  (0/0 NO DATA / MISSING) IL:--- Gap0:---- Q:--%",
             18,
         );
         assert_eq!(
@@ -1079,7 +1079,7 @@ mod tests {
         );
 
         let style_crc = get_verbose_line_style(
-            "T:35 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (17/18 CRC-DAT: Sec 15) IL:1:1 200.2ms [299.7 RPM] Q:84%",
+            "T:35 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (17/18 CRC-DAT: Sec 15) IL:1:1 Gap0:1440µs Q:84%",
             18,
         );
         assert_eq!(
@@ -1092,7 +1092,7 @@ mod tests {
 
     #[test]
     fn test_build_verbose_line_spans_individual_coloring() {
-        let line_all_ok = "T:79 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK) IL:1:1 200.1ms [299.8 RPM ±0.2%] Gap0:420µs Q:99%";
+        let line_all_ok = "T:79 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK) IL:1:1 Gap0:1440µs Q:99%";
         let spans = build_verbose_line_spans(line_all_ok, 18);
         assert!(!spans.is_empty());
         // Check ribbon blocks are green
@@ -1102,7 +1102,7 @@ mod tests {
             .count();
         assert_eq!(green_blocks, 18);
 
-        let line_crc_15 = "T:35 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (17/18 CRC-DAT: Sec 15) IL:1:1 200.2ms [299.7 RPM] Q:84%";
+        let line_crc_15 = "T:35 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (17/18 CRC-DAT: Sec 15) IL:1:1 Gap0:1440µs Q:84%";
         let spans_crc = build_verbose_line_spans(line_crc_15, 18);
         let red_blocks = spans_crc
             .iter()
@@ -1115,7 +1115,7 @@ mod tests {
         assert_eq!(red_blocks, 1);
         assert_eq!(ok_blocks, 17);
 
-        let line_missing_8 = "T:40 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■ ] (14/15 MISSING: Sec 8) IL:1:1 166.7ms";
+        let line_missing_8 = "T:40 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■ ] (14/15 MISSING: Sec 8) IL:1:1 Gap0:1440µs Q:90%";
         let spans_miss = build_verbose_line_spans(line_missing_8, 15);
         let dark_blocks = spans_miss
             .iter()
@@ -1365,7 +1365,7 @@ mod tests {
             0,
             500,
             "T:40 H:0  500k  [ ██████████████████ ]  (18/18 OK)".to_string(),
-            "T:40 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK) IL:1:1 200.0ms".to_string(),
+            "T:40 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK) IL:1:1 Gap0:1440µs Q:99%".to_string(),
             18,
             18,
             true,
@@ -1376,7 +1376,7 @@ mod tests {
             1,
             500,
             "T:40 H:1  500k  [ ██████████░░░░░░░░ ]  (10/18 BAD)".to_string(),
-            "T:40 H:1 Rate:500k MFM [ ■■■■■■■■■■░░░░░░░░ ] (10/18 BAD) IL:1:1 200.1ms".to_string(),
+            "T:40 H:1 Rate:500k MFM [ ■■■■■■■■■■░░░░░░░░ ] (10/18 BAD) IL:1:1 Gap0:1440µs Q:70%".to_string(),
             10,
             18,
             false,
@@ -1416,7 +1416,7 @@ mod tests {
             0,
             500,
             "T:40 H:0  500k  [ ██████████████████ ]  (18/18 OK)".to_string(),
-            "T:40 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK)".to_string(),
+            "T:40 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK) IL:1:1 Gap0:1440µs Q:99%".to_string(),
             18,
             18,
             true,
@@ -1427,7 +1427,7 @@ mod tests {
             1,
             500,
             "T:40 H:1  500k  [ ██████████░░░░░░░░ ]  (10/18 BAD)".to_string(),
-            "T:40 H:1 Rate:500k MFM [ ■■■■■■■■■■░░░░░░░░ ] (10/18 BAD)".to_string(),
+            "T:40 H:1 Rate:500k MFM [ ■■■■■■■■■■░░░░░░░░ ] (10/18 BAD) IL:1:1 Gap0:1440µs Q:70%".to_string(),
             10,
             18,
             false,

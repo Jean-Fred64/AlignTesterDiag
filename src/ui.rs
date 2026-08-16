@@ -485,21 +485,29 @@ pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'st
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                     }
                 } else if token.starts_with("IL:") {
-                    Style::default().fg(Color::LightCyan)
-                } else if token.ends_with("ms") {
-                    Style::default().fg(Color::White)
-                } else if token.starts_with('[') || token.ends_with(']') || token.contains("RPM") {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                } else if token.starts_with("Gap0:") {
-                    Style::default().fg(Color::LightMagenta)
-                } else if token.starts_with("Q:") {
-                    let num: u8 = token[2..].trim_end_matches('%').parse().unwrap_or(0);
-                    if num >= 95 {
-                        Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
-                    } else if num >= 85 {
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    if token == "IL:---" {
+                        Style::default().fg(Color::DarkGray)
                     } else {
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                        Style::default().fg(Color::LightCyan)
+                    }
+                } else if token.starts_with("Gap0:") {
+                    if token == "Gap0:----" {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        Style::default().fg(Color::LightMagenta)
+                    }
+                } else if let Some(stripped) = token.strip_prefix("Q:") {
+                    if token == "Q:--%" {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        let num: u8 = stripped.trim_end_matches('%').parse().unwrap_or(0);
+                        if num >= 85 {
+                            Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+                        } else if num >= 60 {
+                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                        }
                     }
                 } else {
                     Style::default().fg(Color::White)
@@ -658,6 +666,7 @@ pub fn format_head_header_str(head_select: HeadSelection, active_head: u8) -> St
 /// Builds the dedicated 2-line fixed persistent display for Both mode:
 /// - Line 1: Result for Head 0
 /// - Line 2: Result for Head 1
+///
 /// An active pointer `► ` is placed on the head currently under acquisition (`status.head`), while inactive head uses `"  "`.
 pub fn build_both_mode_display_lines(status: &crate::hw::DriveStatus) -> Vec<Line<'static>> {
     let mut lines = Vec::with_capacity(2);
@@ -702,7 +711,7 @@ pub fn build_both_mode_display_lines(status: &crate::hw::DriveStatus) -> Vec<Lin
             let status_col = format!("( 0/{})", expected);
             let line_str = if status.verbose_mode {
                 format!(
-                    "T:{:02} H:{} Rate:{}k MFM {} {}",
+                    "T:{:02} H:{} Rate:{}k MFM {}  {} IL:--- Gap0:---- Q:--%",
                     status.track, head_idx, status.bitrate, ribbon_col, status_col
                 )
             } else {

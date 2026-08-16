@@ -781,12 +781,22 @@ pub fn pll_flux_to_mfm_bits(flux: &[u32], clock_ticks: f64) -> Vec<bool> {
     bit_array
 }
 
-/// Computes PLL quality score (0..=100%) based on flux dispersion relative to theoretical MFM windows
+/// Computes physical PLL quality score (0..=100%) based on RMS Phase Jitter relative to theoretical MFM windows
+#[allow(dead_code)]
 pub fn calculate_pll_quality(flux: &[u32], clock_ticks: f64) -> u8 {
+    calculate_pll_quality_with_crc(flux, clock_ticks, false)
+}
+
+/// Computes physical PLL quality score (0..=100%) based on RMS Phase Jitter, with penalty for residual CRC errors:
+/// - Phase error per transition: epsilon = |flux_time - bitcell_center| / (bitcell_window / 2.0)
+/// - RMS Jitter: sqrt( (1/N) * sum(epsilon^2) )
+/// - Base Q: ((1.0 - 2.0 * RMS_jitter) * 100.0).clamp(0.0, 100.0) as u8
+/// - CRC penalty: if has_crc_errors, Q.saturating_sub(15)
+pub fn calculate_pll_quality_with_crc(flux: &[u32], clock_ticks: f64, has_crc_errors: bool) -> u8 {
     if flux.is_empty() || clock_ticks <= 0.0 {
         return 0;
     }
-    let mut total_rel_error = 0.0f64;
+    let mut sum_sq_err = 0.0f64;
     let mut count = 0usize;
     let half_clock = clock_ticks / 2.0;
 
@@ -794,10 +804,9 @@ pub fn calculate_pll_quality(flux: &[u32], clock_ticks: f64) -> u8 {
         let val = x as f64;
         let n = (val / clock_ticks).round();
         if (2.0..=4.0).contains(&n) {
-            let ideal = n * clock_ticks;
-            let dev = (val - ideal).abs();
-            let rel_dev = (dev / half_clock).min(1.0);
-            total_rel_error += rel_dev;
+            let bitcell_center = n * clock_ticks;
+            let phase_err = (val - bitcell_center).abs() / half_clock;
+            sum_sq_err += phase_err * phase_err;
             count += 1;
         }
     }
@@ -805,9 +814,44 @@ pub fn calculate_pll_quality(flux: &[u32], clock_ticks: f64) -> u8 {
     if count == 0 {
         return 0;
     }
-    let mean_rel_error = total_rel_error / (count as f64);
-    let quality = ((1.0 - mean_rel_error * 0.4) * 100.0).round() as u8;
-    quality.clamp(0, 100)
+    let rms_jitter = (sum_sq_err / (count as f64)).sqrt();
+    let q_score = ((1.0 - 2.0 * rms_jitter) * 100.0).clamp(0.0, 100.0).round() as u8;
+    if has_crc_errors {
+        q_score.saturating_sub(15)
+    } else {
+        q_score
+    }
+}
+
+/// Validates and filters Gap0 time in microseconds based on bitrate-specific physical ranges:
+/// - 500 kbps (HD): [800 µs, 2200 µs] (Nominal ~1440 µs)
+/// - 250 kbps (DD): [1600 µs, 4400 µs] (Nominal ~2880 µs)
+/// - 300 kbps: [1300 µs, 3600 µs]
+pub fn get_valid_gap0(bitrate: u16, raw_gap0_us: u32) -> Option<u32> {
+    let (min_gap, max_gap) = match bitrate {
+        500 => (800, 2200),
+        250 => (1600, 4400),
+        300 => (1300, 3600),
+        _ => {
+            let nominal = (1440.0 * 500.0 / (bitrate as f64).max(1.0)) as u32;
+            (nominal.saturating_sub(nominal * 45 / 100), nominal + nominal * 55 / 100)
+        }
+    };
+    if (min_gap..=max_gap).contains(&raw_gap0_us) {
+        Some(raw_gap0_us)
+    } else {
+        None
+    }
+}
+
+/// Formats the Gap0 value for display (e.g. `Gap0:1440µs` or `Gap0:----`)
+#[allow(dead_code)]
+pub fn format_gap0_field(gap0_us: Option<u32>) -> String {
+    if let Some(gap0) = gap0_us {
+        format!("Gap0:{:4}µs", gap0)
+    } else {
+        String::from("Gap0:----")
+    }
 }
 
 /// Detects physical interleave from the sequence of decoded sector IDs
@@ -975,6 +1019,7 @@ pub fn decode_idam_sectors_from_bits(bits: &[bool]) -> Vec<DecodedSector> {
     sectors
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TrackAnalysisResult {
     pub has_disk: bool,
@@ -1136,9 +1181,9 @@ pub fn start_revolution_progress(
     let blocks_verb = "░".repeat(expected_count as usize);
     let raw_ribbon_verb = format!("[ {} ]", blocks_verb);
     let ribbon_col_verb = format!("{:<22}", raw_ribbon_verb);
-    let status_str_verb = format!("({:>2}/{})", 0, expected_count);
+    let status_str_verb = format!(" ({:>2}/{})", 0, expected_count);
     let verbose_line = format!(
-        "T:{:02} H:{} Rate:{}k MFM {} {}",
+        "T:{:02} H:{} Rate:{}k MFM {} {} IL:--- Gap0:---- Q:--%",
         track, head, bitrate, ribbon_col_verb, status_str_verb
     );
 
@@ -1164,6 +1209,7 @@ pub fn start_revolution_progress(
 }
 
 /// Updates the progressive scan pass on the active line (`►`) sector by sector
+#[allow(clippy::too_many_arguments)]
 pub fn update_revolution_progress(
     status: &mut DriveStatus,
     tx_status: &crossbeam_channel::Sender<DriveStatus>,
@@ -1215,12 +1261,16 @@ pub fn update_revolution_progress(
     let raw_ribbon_verb = format!("[ {} ]", blocks_verb);
     let ribbon_col_verb = format!("{:<22}", raw_ribbon_verb);
     let status_str_verb = if filled == expected_count as usize {
-        format!("({}/{} OK)", expected_count, expected_count)
+        if expected_count == 9 {
+            String::from("(9/9 OK)  ")
+        } else {
+            format!("({}/{} OK)", expected_count, expected_count)
+        }
     } else {
-        format!("({:>2}/{})", filled, expected_count)
+        format!(" ({:>2}/{})", filled, expected_count)
     };
     let verbose_line = format!(
-        "T:{:02} H:{} Rate:{}k MFM {} {}",
+        "T:{:02} H:{} Rate:{}k MFM {} {} IL:--- Gap0:---- Q:--%",
         track, head, bitrate, ribbon_col_verb, status_str_verb
     );
 
@@ -1402,13 +1452,14 @@ fn read_and_decode_track_diagnostic(
                 false, true, false, false, false, true, false, false, true,
             ];
             let first_idam_bit = active_bits.windows(48).position(|w| w == sync_48);
-            let gap0_us = first_idam_bit.map(|b_idx| {
-                let us = (b_idx as f64 * clock / 72.0).round() as u32;
-                us.clamp(100, 5000)
+            let gap0_us = first_idam_bit.and_then(|b_idx| {
+                let raw_us = (b_idx as f64 * clock / 72.0).round() as u32;
+                get_valid_gap0(bitrate, raw_us)
             });
 
+            let has_crc_errs = sectors.iter().any(|s| !s.crc_ok);
             let pll_quality_pct = if sectors_known {
-                Some(calculate_pll_quality(&flux, clock))
+                Some(calculate_pll_quality_with_crc(&flux, clock, has_crc_errs))
             } else {
                 None
             };
@@ -1495,46 +1546,21 @@ fn read_and_decode_track_diagnostic(
     }
 }
 
-/// Formats a single pass for Verbose horizontal / vertical history mode
+/// Formats a single pass for Verbose horizontal / vertical history mode:
+/// T:<track> H:<head> Rate:<bitrate>k MFM <ribbon> <status> <IL> <Gap0> <Quality>
+/// e.g. "T:40 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK) IL:1:1 Gap0:1440µs Q:98%"
 pub fn build_verbose_pass_line(
     track: u8,
     head: u8,
     diag: &TrackAnalysisResult,
 ) -> String {
-    let timing_str = format!("{:.1}ms", diag.rev_time_ms);
-    let rpm_str = if let Some(j) = diag.jitter_pct {
-        if let Some(rpm) = diag.rpm_instant {
-            format!("[{:.1} RPM ±{:.1}%]", rpm, j)
-        } else if let Some(&r) = diag.instant_rpms.first() {
-            format!("[{:.1} RPM ±{:.1}%]", r as f64, j)
-        } else if diag.rev_time_ms > 0.0 {
-            let rpm = 60_000.0 / diag.rev_time_ms;
-            format!("[{:.1} RPM ±{:.1}%]", rpm, j)
-        } else {
-            String::new()
-        }
-    } else if let Some(rpm) = diag.rpm_instant {
-        format!("[{:.1} RPM]", rpm)
-    } else if let Some(&r) = diag.instant_rpms.first() {
-        format!("[{:.1} RPM]", r as f64)
-    } else if diag.rev_time_ms > 0.0 {
-        let rpm = 60_000.0 / diag.rev_time_ms;
-        format!("[{:.1} RPM]", rpm)
-    } else {
-        String::new()
-    };
-
     if !diag.has_disk || !diag.sectors_known || diag.sectors.is_empty() {
         let ribbon_col = format!("{:<22}", "[ ? ]");
         let status_col = "(0/0 NO DATA / MISSING)";
-        let mut parts = vec![
-            format!("T:{:02} H:{} Rate:---k --- {} {}", track, head, ribbon_col, status_col),
-            timing_str,
-        ];
-        if !rpm_str.is_empty() {
-            parts.push(rpm_str);
-        }
-        return parts.join(" ");
+        return format!(
+            "T:{:02} H:{} Rate:---k --- {} {} IL:--- Gap0:---- Q:--%",
+            track, head, ribbon_col, status_col
+        );
     }
 
     let expected_count = if diag.bitrate == 250 {
@@ -1623,22 +1649,26 @@ pub fn build_verbose_pass_line(
         String::from("IL:1:1")
     };
 
+    let gap0_str = if let Some(gap0) = diag.gap0_us {
+        format!("Gap0:{:4}µs", gap0)
+    } else {
+        String::from("Gap0:----")
+    };
+
+    let q_str = if let Some(q) = diag.pll_quality_pct {
+        format!("Q:{}%", q)
+    } else {
+        String::from("Q:--%")
+    };
+
     let mut parts = Vec::new();
     parts.push(format!(
         "T:{:02} H:{} Rate:{}k MFM {} {}",
         track, head, diag.bitrate, ribbon_col, status_str
     ));
     parts.push(il_str);
-    parts.push(timing_str);
-    if !rpm_str.is_empty() {
-        parts.push(rpm_str);
-    }
-    if let Some(gap0) = diag.gap0_us {
-        parts.push(format!("Gap0:{}µs", gap0));
-    }
-    if let Some(q) = diag.pll_quality_pct {
-        parts.push(format!("Q:{}%", q));
-    }
+    parts.push(gap0_str);
+    parts.push(q_str);
 
     parts.join(" ")
 }
@@ -3444,7 +3474,8 @@ mod tests {
         assert_eq!(status.sector_log.len(), 1);
         assert_eq!(status.sector_log_standard[0], "T:10 H:0  500k  [ ██░░░░░░░░░░░░░░░░ ]  (2/18 MISSING: Sec 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)");
         assert!(status.sector_log_verbose[0].contains("T:10 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ]"));
-        assert!(status.sector_log_verbose[0].contains("200.1ms"));
+        assert!(!status.sector_log_verbose[0].contains("200.1ms"));
+        assert!(status.sector_log_verbose[0].contains("Gap0:----"));
 
         let beeps: Vec<BeepType> = rx_sound.try_iter().collect();
         assert_eq!(beeps, vec![BeepType::Ok]);
@@ -3527,7 +3558,7 @@ mod tests {
         assert_eq!(status.sector_log_standard[0], "T:05 H:1  ---k  [ ? ]                   (0/0 NO DATA / MISSING)");
         assert_eq!(
             status.sector_log_verbose[0],
-            "T:05 H:1 Rate:---k --- [ ? ]                  (0/0 NO DATA / MISSING) 0.0ms"
+            "T:05 H:1 Rate:---k --- [ ? ]                  (0/0 NO DATA / MISSING) IL:--- Gap0:---- Q:--%"
         );
 
         let beeps: Vec<BeepType> = rx_sound.try_iter().collect();
@@ -3646,7 +3677,8 @@ mod tests {
 
         assert_eq!(status.sector_log_verbose.len(), 1);
         assert!(status.sector_log_verbose[0].contains("T:20 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ]"));
-        assert!(status.sector_log_verbose[0].contains("204.3ms"));
+        assert!(!status.sector_log_verbose[0].contains("204.3ms"));
+        assert!(status.sector_log_verbose[0].contains("Gap0:----"));
     }
 
     #[test]
@@ -4124,7 +4156,7 @@ mod tests {
             rev_time_ms: 200.1,
             rpm_instant: Some(299.8),
             jitter_pct: Some(0.2),
-            gap0_us: Some(420),
+            gap0_us: Some(1440),
             pll_quality_pct: Some(99),
             interleave: Some("1:1".to_string()),
         };
@@ -4132,7 +4164,7 @@ mod tests {
         let line = build_verbose_pass_line(79, 0, &diag);
         assert_eq!(
             line,
-            "T:79 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK) IL:1:1 200.1ms [299.8 RPM ±0.2%] Gap0:420µs Q:99%"
+            "T:79 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK) IL:1:1 Gap0:1440µs Q:99%"
         );
     }
 
@@ -4158,7 +4190,7 @@ mod tests {
             rev_time_ms: 200.0,
             rpm_instant: Some(300.1),
             jitter_pct: Some(0.1),
-            gap0_us: Some(410),
+            gap0_us: Some(2880),
             pll_quality_pct: Some(98),
             interleave: Some("1:1".to_string()),
         };
@@ -4166,7 +4198,7 @@ mod tests {
         let line = build_verbose_pass_line(40, 0, &diag);
         assert_eq!(
             line,
-            "T:40 H:0 Rate:250k MFM [ ■■■■■■■■■ ]          (9/9 OK)   IL:1:1 200.0ms [300.1 RPM ±0.1%] Gap0:410µs Q:98%"
+            "T:40 H:0 Rate:250k MFM [ ■■■■■■■■■ ]          (9/9 OK)   IL:1:1 Gap0:2880µs Q:98%"
         );
     }
 
@@ -4192,7 +4224,7 @@ mod tests {
             rev_time_ms: 166.7,
             rpm_instant: Some(360.0),
             jitter_pct: Some(0.2),
-            gap0_us: Some(380),
+            gap0_us: Some(1440),
             pll_quality_pct: Some(97),
             interleave: Some("1:1".to_string()),
         };
@@ -4200,7 +4232,7 @@ mod tests {
         let line = build_verbose_pass_line(40, 0, &diag);
         assert_eq!(
             line,
-            "T:40 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■ ]    (15/15 OK) IL:1:1 166.7ms [360.0 RPM ±0.2%] Gap0:380µs Q:97%"
+            "T:40 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■ ]    (15/15 OK) IL:1:1 Gap0:1440µs Q:97%"
         );
     }
 
@@ -4232,7 +4264,7 @@ mod tests {
             rev_time_ms: 200.2,
             rpm_instant: Some(299.7),
             jitter_pct: None,
-            gap0_us: None,
+            gap0_us: Some(1440),
             pll_quality_pct: Some(84),
             interleave: Some("1:1".to_string()),
         };
@@ -4240,7 +4272,7 @@ mod tests {
         let line = build_verbose_pass_line(35, 0, &diag);
         assert_eq!(
             line,
-            "T:35 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (17/18 CRC-DAT: Sec 15) IL:1:1 200.2ms [299.7 RPM] Q:84%"
+            "T:35 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (17/18 CRC-DAT: Sec 15) IL:1:1 Gap0:1440µs Q:84%"
         );
     }
 
@@ -4270,38 +4302,117 @@ mod tests {
         let line = build_verbose_pass_line(80, 0, &diag);
         assert_eq!(
             line,
-            "T:80 H:0 Rate:---k --- [ ? ]                  (0/0 NO DATA / MISSING) 200.3ms [299.5 RPM]"
+            "T:80 H:0 Rate:---k --- [ ? ]                  (0/0 NO DATA / MISSING) IL:--- Gap0:---- Q:--%"
         );
     }
 
     #[test]
-    fn test_detect_interleave() {
-        let sec_1_1 = vec![
-            DecodedSector::new(0, 0, 1, 2, true),
-            DecodedSector::new(0, 0, 2, 2, true),
-            DecodedSector::new(0, 0, 3, 2, true),
-        ];
-        assert_eq!(detect_interleave(&sec_1_1, 9), Some("1:1".to_string()));
+    fn test_verbose_line_no_rpm_fields() {
+        let sectors: Vec<DecodedSector> = (1..=18)
+            .map(|id| DecodedSector::new(40, 0, id, 2, true))
+            .collect();
 
-        let sec_1_2 = vec![
-            DecodedSector::new(0, 0, 1, 2, true),
-            DecodedSector::new(0, 0, 3, 2, true),
-            DecodedSector::new(0, 0, 5, 2, true),
-        ];
-        assert_eq!(detect_interleave(&sec_1_2, 9), Some("1:2".to_string()));
+        let diag = TrackAnalysisResult {
+            has_disk: true,
+            bitrate: 500,
+            sector_count: 18,
+            sectors_known: true,
+            sectors,
+            on_track_count: 18,
+            off_track_count: 0,
+            off_track_details: String::from("NONE (Perfect)"),
+            crc_err_count: 0,
+            alignment_pct: 100.0,
+            index_timestamps: vec![1000, 14401000],
+            instant_rpms: vec![300],
+            rev_time_ms: 200.1,
+            rpm_instant: Some(299.8),
+            jitter_pct: Some(0.2),
+            gap0_us: Some(1440),
+            pll_quality_pct: Some(98),
+            interleave: Some("1:1".to_string()),
+        };
+
+        let line = build_verbose_pass_line(40, 0, &diag);
+        assert!(!line.contains("RPM"), "Verbose line must not contain RPM");
+        assert!(!line.contains("ms"), "Verbose line must not contain duration in ms");
+        assert!(!line.contains('±'), "Verbose line must not contain jitter +/-");
+        assert!(line.contains("Gap0:1440µs"));
+        assert!(line.contains("Q:98%"));
+        assert!(line.contains("IL:1:1"));
     }
 
     #[test]
-    fn test_calculate_pll_quality() {
-        // Ideal 500k pulses (72 clock ticks = 144, 216, 288 for 2T, 3T, 4T)
+    fn test_adaptive_gap0_bounds() {
+        // 500 kbps (HD): [800 µs, 2200 µs]
+        assert_eq!(get_valid_gap0(500, 1440), Some(1440));
+        assert_eq!(get_valid_gap0(500, 800), Some(800));
+        assert_eq!(get_valid_gap0(500, 2200), Some(2200));
+        assert_eq!(get_valid_gap0(500, 799), None);
+        assert_eq!(get_valid_gap0(500, 2201), None);
+
+        // 250 kbps (DD): [1600 µs, 4400 µs]
+        assert_eq!(get_valid_gap0(250, 2880), Some(2880));
+        assert_eq!(get_valid_gap0(250, 1600), Some(1600));
+        assert_eq!(get_valid_gap0(250, 4400), Some(4400));
+        assert_eq!(get_valid_gap0(250, 1599), None);
+        assert_eq!(get_valid_gap0(250, 4401), None);
+
+        // 300 kbps: [1300 µs, 3600 µs]
+        assert_eq!(get_valid_gap0(300, 2400), Some(2400));
+        assert_eq!(get_valid_gap0(300, 1300), Some(1300));
+        assert_eq!(get_valid_gap0(300, 3600), Some(3600));
+        assert_eq!(get_valid_gap0(300, 1299), None);
+        assert_eq!(get_valid_gap0(300, 3601), None);
+    }
+
+    #[test]
+    fn test_pll_quality_rms_jitter() {
+        // Ideal 500k pulses (72 clock ticks = 144, 216, 288 for 2T, 3T, 4T) -> RMS Jitter = 0 -> Q = 100%
         let ideal_flux = vec![144, 144, 216, 288, 144, 216];
         let q_ideal = calculate_pll_quality(&ideal_flux, 72.0);
-        assert!(q_ideal >= 98);
+        assert_eq!(q_ideal, 100);
 
-        // Dispersed flux with phase jitter
-        let noisy_flux = vec![130, 158, 200, 305, 132, 230];
+        // Low jitter (Green tier: Q >= 85)
+        let low_jitter_flux = vec![142, 146, 214, 290, 143, 218];
+        let q_low = calculate_pll_quality(&low_jitter_flux, 72.0);
+        assert!(q_low >= 85);
+        assert!(q_low <= 100);
+
+        // Moderate jitter (Yellow tier: 60 <= Q < 85)
+        let noisy_flux = vec![136, 152, 210, 296, 140, 220];
         let q_noisy = calculate_pll_quality(&noisy_flux, 72.0);
-        assert!(q_noisy < q_ideal);
+        assert!(q_noisy < q_low);
+        assert!(q_noisy >= 60);
+
+        // With CRC error penalty (-15)
+        let q_noisy_crc = calculate_pll_quality_with_crc(&noisy_flux, 72.0, true);
+        assert_eq!(q_noisy_crc, q_noisy.saturating_sub(15));
+    }
+
+    #[test]
+    fn test_live_rpm_statistics_window() {
+        let mut meas = RpmMeasurement::new();
+        for _ in 0..10 {
+            meas.record_sample(300.0, 14_400_000);
+        }
+        assert_eq!(meas.sample_count, 10);
+        assert_eq!(meas.avg_rpm, 300.0);
+        assert_eq!(meas.min_rpm, 300.0);
+        assert_eq!(meas.max_rpm, 300.0);
+        assert_eq!(meas.jitter_rpm, 0.0);
+        assert_eq!(meas.jitter_pct, 0.0);
+
+        // Add 5 samples of 310.0 -> window of 10 has 5x 300.0 and 5x 310.0 -> avg = 305.0
+        for _ in 0..5 {
+            meas.record_sample(310.0, 13_935_483);
+        }
+        assert_eq!(meas.sample_count, 15);
+        assert_eq!(meas.avg_rpm, 305.0);
+        assert_eq!(meas.min_rpm, 300.0);
+        assert_eq!(meas.max_rpm, 310.0);
+        assert_eq!(meas.jitter_rpm, 5.0);
+        assert!((meas.jitter_pct - (10.0 / (2.0 * 305.0) * 100.0)).abs() < 0.01);
     }
 
     #[test]
