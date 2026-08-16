@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 use crate::app::{DiagnosticPass, HeadSelection};
+use crate::audio::{evaluate_alignment_audio_event, sound_worker, AudioEvent};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisplayMode {
@@ -26,12 +27,6 @@ pub enum HwActivity {
     Idle,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BeepType {
-    Ok,
-    Error,
-}
-
 /// Hardware flux reading status for diskette presence & index resilience
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum DriveReadStatus {
@@ -42,33 +37,6 @@ pub enum DriveReadStatus {
     Aborted,
 }
 
-#[cfg(windows)]
-mod sound {
-    extern "system" {
-        fn Beep(dwFreq: u32, dwDuration: u32) -> i32;
-    }
-
-    pub fn play_beep(freq: u32, duration_ms: u32) {
-        unsafe {
-            Beep(freq, duration_ms);
-        }
-    }
-}
-
-#[cfg(not(windows))]
-mod sound {
-    use std::io::{stdout, Write};
-
-    pub fn play_beep(_freq: u32, duration_ms: u32) {
-        if duration_ms <= 20 {
-            print!("\x07");
-        } else {
-            print!("\x07\x07");
-        }
-        let _ = stdout().flush();
-    }
-}
-
 /// Minimal electronic head switch settle time (1 ms) for SIDE1 selection.
 pub const HEAD_SWITCH_SETTLE_MS: u64 = 1;
 /// Stepper motor driver electronic wake-up delay (15 ms) for 26-pin FFC drives (e.g. TEAC FD-05HG).
@@ -76,7 +44,10 @@ pub const STEPPER_WAKEUP_DELAY_MS: u64 = 15;
 /// Electromechanical Head Settle Time (15 ms to 30 ms) after track stepping.
 /// Standard floppy disk controller specification requires 15-30 ms for physical head carriage vibration dampening.
 pub const HEAD_SETTLE_TIME_MS: u64 = 30;
-pub const SPIN_UP_DELAY_MS: u64 = 350;
+/// Nominal serial read timeout (1000 ms) for USB flux capture margin.
+pub const DEFAULT_SERIAL_TIMEOUT_MS: u64 = 1000;
+/// Motor spin-up delay (300 ms) before reading flux.
+pub const SPIN_UP_DELAY_MS: u64 = 300;
 pub const SYNC_DELAY_MS: u64 = 30;
 
 /// Dwell time at track 0 during recalibration before stepping back to original track.
@@ -87,15 +58,6 @@ pub const SEEK_TRK0_TIMEOUT_MS: u64 = 3000;
 /// Recalibrate / Track 0 stabilization delay: 1 full disk revolution (~200 ms @ 300 RPM / 166.7 ms @ 360 RPM).
 /// Allows the mechanical end-stop shock to dissipate and spindle index to stabilize before MFM / PLL decoding.
 pub const RECALIBRATE_WAIT_MS: u64 = 200;
-
-fn sound_worker(rx: Receiver<BeepType>) {
-    while let Ok(beep) = rx.recv() {
-        match beep {
-            BeepType::Ok => sound::play_beep(1000, 15),
-            BeepType::Error => sound::play_beep(350, 40),
-        }
-    }
-}
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
@@ -191,6 +153,7 @@ pub struct DriveStatus {
     pub rpm_display: String,
     pub rpm_measure: RpmMeasurement,
     pub track: u8,
+    pub target_track: u8,
     pub head_select: HeadSelection,
     pub head: u8,
     pub motor_on: bool,
@@ -236,6 +199,7 @@ impl Default for DriveStatus {
             rpm_display: String::from("... RPM"),
             rpm_measure: RpmMeasurement::default(),
             track: 0,
+            target_track: 0,
             head_select: HeadSelection::Head0,
             head: 0,
             motor_on: false,
@@ -274,6 +238,12 @@ impl Default for DriveStatus {
     }
 }
 
+impl DriveStatus {
+    pub fn display_mode(&self) -> DisplayMode {
+        self.mode
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum HwCmd {
@@ -289,6 +259,7 @@ pub enum HwCmd {
     SetHeadSelection(HeadSelection),
     ToggleHead,
     Analyze,
+    StartAnalysis,
     ReadData,
     ToggleVerbose,
     ToggleBeep,
@@ -312,7 +283,7 @@ fn find_greaseweazle() -> Option<String> {
 
     for port in &["COM2", "COM10", "/dev/ttyACM0", "/dev/ttyS2"] {
         if let Ok(mut p) = serialport::new(*port, 115_200)
-            .timeout(Duration::from_millis(500))
+            .timeout(Duration::from_millis(100))
             .open()
         {
             let _ = p.write_data_terminal_ready(true);
@@ -341,9 +312,9 @@ fn safe_read_exact(
         }
         match port.read(&mut buf[total_read..]) {
             Ok(n) if n > 0 => total_read += n,
-            Ok(_) => thread::sleep(Duration::from_millis(2)),
+            Ok(_) => thread::sleep(Duration::from_millis(1)),
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                thread::sleep(Duration::from_millis(2));
+                thread::sleep(Duration::from_millis(1));
             }
             Err(e) => return Err(e),
         }
@@ -377,7 +348,7 @@ fn gw_send_raw(
     cmd: &[u8],
     extra_read: usize,
 ) -> Result<(u8, Vec<u8>), Box<dyn std::error::Error>> {
-    gw_send_raw_timeout(port, cmd, extra_read, Duration::from_millis(500))
+    gw_send_raw_timeout(port, cmd, extra_read, Duration::from_millis(100))
 }
 
 fn ensure_unit_active(
@@ -423,7 +394,7 @@ fn gw_send(
     motor_on: bool,
     head: u8,
 ) -> Result<(u8, Vec<u8>), Box<dyn std::error::Error>> {
-    gw_send_timeout(port, cmd, extra_read, unit, motor_on, head, Duration::from_millis(500))
+    gw_send_timeout(port, cmd, extra_read, unit, motor_on, head, Duration::from_millis(100))
 }
 
 /// Performs a motor-gated seek operation.
@@ -478,11 +449,83 @@ pub fn query_write_protect(
         unit,
         motor_on,
         head,
-        Duration::from_millis(150),
+        Duration::from_millis(100),
     ) {
         Ok((0, extra)) if !extra.is_empty() => Some(extra[0] == 0),
         _ => None,
     }
+}
+
+/// Sets spindle motor state on the specified drive unit
+pub fn gw_set_motor(
+    port: &mut Box<dyn serialport::SerialPort>,
+    unit: u8,
+    motor_on: bool,
+) -> Result<(u8, Vec<u8>), Box<dyn std::error::Error>> {
+    let state = if motor_on { 0x01 } else { 0x00 };
+    gw_send_raw_timeout(port, &[0x06, 0x04, unit, state], 0, Duration::from_millis(100))
+}
+
+/// Reads raw flux stream directly from Greaseweazle via CMD_READ_FLUX (0x07) without intrusive pre-checks
+pub fn gw_read_flux(
+    port: &mut Box<dyn serialport::SerialPort>,
+    revs: u16,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let _ = port.clear(serialport::ClearBuffer::All);
+    let _ = port.set_timeout(Duration::from_millis(DEFAULT_SERIAL_TIMEOUT_MS));
+
+    let b_revs = revs.to_le_bytes();
+    let read_cmd = [0x07, 0x08, 0x00, 0x00, 0x00, 0x00, b_revs[0], b_revs[1]];
+    port.write_all(&read_cmd)?;
+    port.flush()?;
+
+    let mut ack = [0u8; 2];
+    safe_read_exact(port, &mut ack, Duration::from_millis(DEFAULT_SERIAL_TIMEOUT_MS))?;
+
+    if ack[1] == 7 {
+        // Greaseweazle ACK_BUSY (code 7) -> wait 30 ms, retry once
+        thread::sleep(Duration::from_millis(30));
+        let _ = port.clear(serialport::ClearBuffer::All);
+        port.write_all(&read_cmd)?;
+        port.flush()?;
+        safe_read_exact(port, &mut ack, Duration::from_millis(DEFAULT_SERIAL_TIMEOUT_MS))?;
+    }
+
+    if ack[1] != 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut dat = Vec::with_capacity(131072);
+    let mut tmp_buf = [0u8; 4096];
+    let start = Instant::now();
+
+    // Standard serial timeout margin to never cut valid packets
+    while start.elapsed() < Duration::from_millis(DEFAULT_SERIAL_TIMEOUT_MS) {
+        match port.read(&mut tmp_buf) {
+            Ok(n) if n > 0 => {
+                dat.extend_from_slice(&tmp_buf[..n]);
+                if !dat.is_empty() && dat[dat.len() - 1] == 0 {
+                    break;
+                }
+            }
+            Ok(_) => thread::sleep(Duration::from_millis(1)),
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                if !dat.is_empty() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(_) => break,
+        }
+    }
+
+    // GetFluxStatus (0x09)
+    let _ = port.write_all(&[0x09, 0x02]);
+    let _ = port.flush();
+    let mut status_ack = [0u8; 2];
+    let _ = safe_read_exact(port, &mut status_ack, Duration::from_millis(50));
+
+    Ok(dat)
 }
 
 fn shutdown_drive(port: &mut Box<dyn serialport::SerialPort>, unit: u8) {
@@ -1129,78 +1172,18 @@ fn read_motor_rpm_diagnostic(
     motor_on: bool,
     head: u8,
 ) -> Result<DecodedGwFlux, Box<dyn std::error::Error>> {
-    let _ = port.clear(serialport::ClearBuffer::All);
-
-    // ReadFlux: Cmd.ReadFlux (0x07), 8 bytes, ticks=0 (4 bytes), revs=2 (2 bytes: 0x02, 0x00)
-    let read_cmd = [0x07, 0x08, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00];
-    port.write_all(&read_cmd)?;
-    port.flush()?;
-
-    let mut ack = [0u8; 2];
-    if let Err(e) = safe_read_exact(port, &mut ack, Duration::from_millis(400)) {
-        let _ = port.clear(serialport::ClearBuffer::All);
-        let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
-        ensure_unit_active(port, unit, motor_on, head);
-        return Err(Box::new(e));
-    }
-
-    if ack[1] == 7 {
-        // Greaseweazle ACK_BUSY (code 7) -> wait 30 ms, ensure unit active, retry once
-        thread::sleep(Duration::from_millis(30));
-        ensure_unit_active(port, unit, motor_on, head);
-        let _ = port.clear(serialport::ClearBuffer::All);
-        port.write_all(&read_cmd)?;
-        port.flush()?;
-        if let Err(e) = safe_read_exact(port, &mut ack, Duration::from_millis(400)) {
+    match gw_read_flux(port, 2) {
+        Ok(dat) => {
+            let decoded_gw = decode_gw_flux_with_index(&dat);
+            Ok(decoded_gw)
+        }
+        Err(e) => {
             let _ = port.clear(serialport::ClearBuffer::All);
             let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
             ensure_unit_active(port, unit, motor_on, head);
-            return Err(Box::new(e));
+            Err(e)
         }
     }
-
-    if ack[1] != 0 {
-        let _ = port.clear(serialport::ClearBuffer::All);
-        let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
-        ensure_unit_active(port, unit, motor_on, head);
-        return Ok(DecodedGwFlux {
-            flux: Vec::new(),
-            index_timestamps: Vec::new(),
-        });
-    }
-
-    let mut dat = Vec::with_capacity(65536);
-    let mut tmp_buf = [0u8; 4096];
-    let start = Instant::now();
-
-    // Strict hardware timeout (max 400 ms)
-    while start.elapsed() < Duration::from_millis(400) {
-        match port.read(&mut tmp_buf) {
-            Ok(n) if n > 0 => {
-                dat.extend_from_slice(&tmp_buf[..n]);
-                if !dat.is_empty() && dat[dat.len() - 1] == 0 {
-                    break;
-                }
-            }
-            Ok(_) => thread::sleep(Duration::from_millis(2)),
-            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                if !dat.is_empty() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(2));
-            }
-            Err(_) => break,
-        }
-    }
-
-    // GetFluxStatus (0x09)
-    let _ = port.write_all(&[0x09, 0x02]);
-    let _ = port.flush();
-    let mut status_ack = [0u8; 2];
-    let _ = safe_read_exact(port, &mut status_ack, Duration::from_millis(200));
-
-    let decoded_gw = decode_gw_flux_with_index(&dat);
-    Ok(decoded_gw)
 }
 
 /// Initializes a new progressive scan pass on the active line (`►`)
@@ -1294,12 +1277,8 @@ pub fn update_revolution_progress(
     let empty = (expected_count as usize).saturating_sub(filled);
 
     let mut blocks_vec = Vec::with_capacity(expected_count as usize);
-    for _ in 0..filled {
-        blocks_vec.push("■");
-    }
-    for _ in 0..empty {
-        blocks_vec.push("░");
-    }
+    blocks_vec.extend(std::iter::repeat_n("■", filled));
+    blocks_vec.extend(std::iter::repeat_n("░", empty));
 
     let blocks_str = blocks_vec.join(" ");
     let raw_ribbon = format!("[ {} ]", blocks_str);
@@ -1352,37 +1331,10 @@ fn read_and_decode_track_diagnostic(
     status: &mut DriveStatus,
     tx_status: &crossbeam_channel::Sender<DriveStatus>,
 ) -> TrackAnalysisResult {
-    let _ = port.clear(serialport::ClearBuffer::Input);
-
     let pass_start = std::time::Instant::now();
 
-    // ReadFlux: Cmd.ReadFlux (0x07), 8 bytes, ticks=0 (4 bytes), revs=3 (2 bytes)
-    let read_cmd = [0x07, 0x08, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00];
-    if port.write_all(&read_cmd).is_ok() && port.flush().is_ok() {
-        let mut ack = [0u8; 2];
-        if safe_read_exact(port, &mut ack, Duration::from_millis(400)).is_ok() && ack[1] == 0 {
-            let mut dat = Vec::with_capacity(131072);
-            let mut tmp_buf = [0u8; 4096];
-            let start = Instant::now();
-
-            // Strict hardware timeout (max 400 ms)
-            while start.elapsed() < Duration::from_millis(400) {
-                if let Ok(n) = port.read(&mut tmp_buf) {
-                    if n > 0 {
-                        dat.extend_from_slice(&tmp_buf[..n]);
-                        if !dat.is_empty() && dat[dat.len() - 1] == 0 {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // GetFluxStatus
-            let _ = port.write_all(&[0x09, 0x02]);
-            let _ = port.flush();
-            let mut status_ack = [0u8; 2];
-            let _ = safe_read_exact(port, &mut status_ack, Duration::from_millis(200));
-
+    if let Ok(dat) = gw_read_flux(port, 3) {
+        if !dat.is_empty() {
             let decoded_gw = decode_gw_flux_with_index(&dat);
             let instant_rpms =
                 calculate_rpm_from_index_timestamps(&decoded_gw.index_timestamps, 72_000_000.0);
@@ -1582,7 +1534,7 @@ fn read_and_decode_track_diagnostic(
     }
 
     let pass_duration_ms = pass_start.elapsed().as_secs_f64() * 1000.0;
-    let _ = port.clear(serialport::ClearBuffer::Input);
+    let _ = port.clear(serialport::ClearBuffer::All);
     TrackAnalysisResult {
         has_disk: false,
         bitrate: 500,
@@ -1867,7 +1819,7 @@ pub fn build_standard_pass_line(
 pub fn process_track_diagnostic(
     status: &mut DriveStatus,
     diag: &TrackAnalysisResult,
-    tx_sound: &Sender<BeepType>,
+    tx_sound: &Sender<AudioEvent>,
 ) {
     let mut effective_diag = diag.clone();
 
@@ -1958,14 +1910,21 @@ pub fn process_track_diagnostic(
         && effective_diag.off_track_count == 0
         && (effective_diag.sectors.len() >= effective_diag.sector_count as usize || effective_diag.sectors.len() >= 9);
 
+    let quality_pct = effective_diag.pll_quality_pct.unwrap_or(if is_ok { 99 } else { 50 });
+    let crc_errors = effective_diag.crc_err_count.min(255) as u8;
+
     let pass = DiagnosticPass {
         track: status.track,
+        track_id: status.track,
         head: status.head,
         bitrate: effective_diag.bitrate,
         line_standard: standard_line.clone(),
         line_verbose: verbose_line.clone(),
         ok_count,
+        valid_sectors: ok_count,
         expected_count,
+        crc_errors,
+        quality_pct,
         is_ok,
     };
 
@@ -2014,19 +1973,17 @@ pub fn process_track_diagnostic(
         status.sector_log_standard.clone()
     };
 
-    // Standard mode: 1 confirmation beep per full revolution (~200 ms)
-    // High pitch (1000 Hz) if 100% OK, Low pitch (350 Hz) if incomplete / errors
+    // Alignment radar audio variometer feedback
     if status.beep_enabled {
-        let is_perfect = effective_diag.sectors_known
-            && !effective_diag.sectors.is_empty()
-            && effective_diag.crc_err_count == 0
-            && effective_diag.off_track_count == 0
-            && (effective_diag.sectors.len() >= effective_diag.sector_count as usize || effective_diag.sectors.len() >= 9);
-
-        if is_perfect {
-            let _ = tx_sound.send(BeepType::Ok);
-        } else {
-            let _ = tx_sound.send(BeepType::Error);
+        if let Some(event) = evaluate_alignment_audio_event(
+            status.head_select,
+            status.target_track,
+            status.head,
+            status.last_pass_h0.as_ref(),
+            status.last_pass_h1.as_ref(),
+            status.sector_count,
+        ) {
+            let _ = tx_sound.send(event);
         }
     }
 }
@@ -2065,6 +2022,879 @@ impl RpmSampler {
     }
 }
 
+pub fn handle_command(
+    port: &mut Box<dyn serialport::SerialPort>,
+    status: &mut DriveStatus,
+    cmd: HwCmd,
+    rx_cmd: &Receiver<HwCmd>,
+    tx_status: &Sender<DriveStatus>,
+) -> bool {
+    let mut should_exit = false;
+    match cmd {
+        HwCmd::Exit => {
+            should_exit = true;
+        }
+        HwCmd::PanicReset => {
+            // 1. Drain pending command channel
+            while rx_cmd.try_recv().is_ok() {}
+
+            // 2. Clear all port buffers
+            let _ = port.clear(serialport::ClearBuffer::All);
+
+            // 3. Immediate hardware emergency shutdown:
+            // - Cut drive motor: MOTOR_OFF (0x06 with state 0)
+            // - Deselect head: Head 0 (0x03 with head 0)
+            // - Re-sync bus & select unit
+            let _ = gw_send_raw(port, &[0x06, 0x04, status.drive_unit, 0x00], 0);
+            let _ = gw_send_raw(port, &[0x03, 0x03, 0x00], 0);
+            let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
+            let _ = gw_send_raw(port, &[0x0E, 0x03, 0x01], 0);
+            let _ = gw_send_raw(port, &[0x0C, 0x03, status.drive_unit], 0);
+
+            // 4. Reset software state cleanly to safe stopped state
+            status.motor_on = false;
+            status.analyzing = false;
+            status.mode = DisplayMode::None;
+            status.activity = HwActivity::Stopped;
+            status.rpm = 0;
+            status.rpm_display = String::from("--- RPM");
+            status.index = false;
+            status.sectors.clear();
+            status.sectors_known = false;
+            status.head_select = HeadSelection::Head0;
+            status.head = 0;
+            status.log_msg = String::from("*** EMERGENCY STOP (BACKSPACE): Motor stopped & hardware reset ***");
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::Stop => {
+            let _ = port.clear(serialport::ClearBuffer::All);
+            let _ = port.set_timeout(Duration::from_millis(100));
+            let _ = gw_send_raw(
+                port,
+                &[0x06, 0x04, status.drive_unit, 0x00],
+                0,
+            );
+            let _ = port.set_timeout(Duration::from_millis(100));
+            status.motor_on = false;
+            status.analyzing = false;
+            if status.mode == DisplayMode::RpmMeasure && status.rpm_measure.sample_count > 0 {
+                status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
+            }
+            status.mode = DisplayMode::None;
+            status.activity = HwActivity::Stopped;
+            status.index = false;
+            status.log_msg = String::from("Stop / Motor OFF (Safe to change disk)");
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::MeasureRpm => {
+            if status.mode == DisplayMode::RpmMeasure {
+                let _ = port.clear(serialport::ClearBuffer::All);
+                let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
+                ensure_unit_active(port, status.drive_unit, status.motor_on, status.head);
+                if status.rpm_measure.sample_count > 0 {
+                    status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
+                }
+                status.mode = DisplayMode::None;
+                status.activity = if status.motor_on {
+                    HwActivity::Idle
+                } else {
+                    HwActivity::Stopped
+                };
+                status.log_msg = String::from("Live RPM test stopped");
+            } else {
+                let was_motor_off = !status.motor_on;
+                if was_motor_off {
+                    let _ = port.clear(serialport::ClearBuffer::All);
+                    let _ = gw_send_raw(port, &[0x0E, 0x03, 0x01], 0);
+                    let _ = gw_send_raw(port, &[0x0C, 0x03, status.drive_unit], 0);
+                    let _ = gw_send_raw(port, &[0x03, 0x03, status.head], 0);
+                    let _ = gw_set_motor(port, status.drive_unit, true);
+                    status.motor_on = true;
+                    thread::sleep(Duration::from_millis(SPIN_UP_DELAY_MS));
+                    let _ = port.clear(serialport::ClearBuffer::Input);
+                }
+                status.analyzing = false;
+                status.mode = DisplayMode::RpmMeasure;
+                status.activity = HwActivity::MeasuringRpm;
+                status.rpm_measure.clear();
+                status.log_msg = String::from("Live RPM Test: High-precision continuous measurement for fine mechanical tuning");
+            }
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::ToggleMotor => {
+            let new_state = !status.motor_on;
+            let _ = port.clear(serialport::ClearBuffer::All);
+            let _ = gw_send_raw(port, &[0x0E, 0x03, 0x01], 0);
+            let _ = gw_send_raw(port, &[0x0C, 0x03, status.drive_unit], 0);
+            let _ = gw_send_raw(port, &[0x03, 0x03, status.head], 0);
+            let _ = port.clear(serialport::ClearBuffer::Input);
+            let res = gw_set_motor(port, status.drive_unit, new_state);
+
+            match res {
+                Ok((0, _)) => {
+                    status.motor_on = new_state;
+                    if !new_state {
+                        // Non-destructive stop: keep sectors, track, head, and rpm_display intact
+                        status.index = false;
+                        status.analyzing = false;
+                        if status.mode != DisplayMode::None {
+                            if status.mode == DisplayMode::RpmMeasure && status.rpm_measure.sample_count > 0 {
+                                status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
+                            }
+                            status.mode = DisplayMode::None;
+                        }
+                        status.activity = HwActivity::Stopped;
+                        status.log_msg = String::from("Motor OFF (M key)");
+                    } else {
+                        status.drive_select = true;
+                        status.has_disk = true;
+                        status.activity = HwActivity::Idle;
+                        status.log_msg = String::from("Motor ON (M key)");
+                    }
+                }
+                Ok((st, _)) => {
+                    status.log_msg = format!("Motor Toggle Error (code {})", st);
+                }
+                Err(e) => {
+                    status.log_msg = format!("Motor Toggle I/O Error: {}", e);
+                }
+            }
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::Seek(target_track) => {
+            let track = target_track.min(83);
+            let old_track = status.track;
+
+            // 1. Immediately set status.track = track and clear status.sectors
+            status.target_track = track;
+            status.track = track;
+            status.trk0 = track == 0;
+            status.sectors.clear();
+            status.sectors_known = false;
+            status.last_pass_h0 = None;
+            status.last_pass_h1 = None;
+            status.activity = HwActivity::Seeking;
+            let _ = tx_status.send(status.clone());
+
+            // 2. Issue motor-gated SEEK(target) command to Greaseweazle and wait for ACK
+            let adaptive_timeout = if track == 0 {
+                Duration::from_millis(SEEK_TRK0_TIMEOUT_MS)
+            } else {
+                Duration::from_millis(calculate_seek_timeout_ms(old_track, track))
+            };
+            let _ = port.set_timeout(adaptive_timeout);
+
+            let res = perform_motor_gated_seek(
+                port,
+                status.drive_unit,
+                track,
+                status.motor_on,
+                status.head,
+                adaptive_timeout,
+            );
+            let _ = port.set_timeout(Duration::from_millis(100));
+
+            match res {
+                Ok((0, _)) => {
+                    status.log_msg = format!("Seek -> Track {}", track);
+                }
+                Ok((st, _)) => {
+                    status.log_msg = format!("Seek Error (code {})", st);
+                }
+                Err(e) => {
+                    status.log_msg = format!("Seek I/O Error: {}", e);
+                }
+            }
+
+            // 3. Mandatory UART input buffer purge to eliminate residual flux samples from previous track
+            let _ = port.clear(serialport::ClearBuffer::Input);
+
+            // 4. Apply mechanical stabilization delay of 30 ms (HEAD_SETTLE_TIME_MS)
+            thread::sleep(Duration::from_millis(HEAD_SETTLE_TIME_MS));
+
+            // Non-blocking WP query on Seek
+            if let Some(wp) = query_write_protect(
+                port,
+                status.drive_unit,
+                status.motor_on,
+                status.head,
+            ) {
+                status.write_protect = wp;
+                status.write_protected = wp;
+            }
+
+            // Reset sector buffer of the current pass and clear input buffer
+            status.sectors.clear();
+            status.sectors_known = false;
+            let _ = port.clear(serialport::ClearBuffer::Input);
+
+            if status.mode == DisplayMode::RpmMeasure {
+                let _ = port.clear(serialport::ClearBuffer::All);
+                let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
+                ensure_unit_active(port, status.drive_unit, status.motor_on, status.head);
+                if status.rpm_measure.sample_count > 0 {
+                    status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
+                }
+                status.mode = DisplayMode::None;
+                status.activity = if status.motor_on {
+                    HwActivity::Idle
+                } else {
+                    HwActivity::Stopped
+                };
+            } else {
+                status.activity = if status.analyzing {
+                    HwActivity::ReadingAnalyzing
+                } else if status.motor_on {
+                    HwActivity::Idle
+                } else {
+                    HwActivity::Stopped
+                };
+            }
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::RecalibrateSeek => {
+            status.activity = HwActivity::Seeking;
+            let _ = tx_status.send(status.clone());
+
+            // 1. Save starting track
+            let origin = status.track;
+
+            // 2. Purge input buffer
+            let _ = port.clear(serialport::ClearBuffer::Input);
+
+            // 3. Motor-gated seek sequence for recalibration (wakes up stepper if motor is off)
+            let gated = !status.motor_on;
+            if gated {
+                let _ = gw_send_raw(port, &[0x06, 0x04, status.drive_unit, 0x01], 0);
+                thread::sleep(Duration::from_millis(STEPPER_WAKEUP_DELAY_MS));
+            }
+
+            // 4. Seek to Track 0 (SEEK_TRACK0): timeout 3000 ms, track 0 dwell time 60 ms
+            let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
+            let res0 = gw_send_timeout(
+                port,
+                &[0x02, 0x03, 0x00],
+                0,
+                status.drive_unit,
+                true,
+                status.head,
+                Duration::from_millis(SEEK_TRK0_TIMEOUT_MS),
+            );
+            thread::sleep(Duration::from_millis(DWELL_TIME_TRK0_MS));
+
+            // 5. Immediate return to origin track
+            if res0.is_ok() {
+                if origin > 0 {
+                    let t_back = Duration::from_millis(1200 + (origin as u64 * 25));
+                    let _ = port.set_timeout(t_back);
+                    let res_back = gw_send_timeout(
+                        port,
+                        &[0x02, 0x03, origin],
+                        0,
+                        status.drive_unit,
+                        true,
+                        status.head,
+                        t_back,
+                    );
+                    thread::sleep(Duration::from_millis(HEAD_SETTLE_TIME_MS));
+                    match res_back {
+                        Ok((0, _)) => {
+                            status.target_track = origin;
+                            status.track = origin;
+                            status.trk0 = origin == 0;
+                            status.sectors.clear();
+                            status.sectors_known = false;
+                            status.last_pass_h0 = None;
+                            status.last_pass_h1 = None;
+                            status.log_msg = format!(
+                                "Recalibrate Track 0 -> Track {}",
+                                origin
+                            );
+                        }
+                        Ok((st, _)) => {
+                            status.log_msg = format!("Recalibrate Error (code {})", st);
+                        }
+                        Err(e) => {
+                            status.log_msg = format!("Recalibrate I/O Error: {}", e);
+                        }
+                    }
+                } else {
+                    // origin == 0: Step-out clearance cycle: Seek(2) -> wait 30 ms -> Seek(0) -> wait 35 ms
+                    let _ = port.set_timeout(Duration::from_millis(1250));
+                    let _ = gw_send_timeout(
+                        port,
+                        &[0x02, 0x03, 2],
+                        0,
+                        status.drive_unit,
+                        true,
+                        status.head,
+                        Duration::from_millis(1200 + (2 * 25)),
+                    );
+                    thread::sleep(Duration::from_millis(30));
+
+                    let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
+                    let res_zero = gw_send_timeout(
+                        port,
+                        &[0x02, 0x03, 0],
+                        0,
+                        status.drive_unit,
+                        true,
+                        status.head,
+                        Duration::from_millis(SEEK_TRK0_TIMEOUT_MS),
+                    );
+                    thread::sleep(Duration::from_millis(35));
+
+                    match res_zero {
+                        Ok((0, _)) => {
+                            status.target_track = 0;
+                            status.track = 0;
+                            status.trk0 = true;
+                            status.sectors.clear();
+                            status.sectors_known = false;
+                            status.log_msg = String::from("Recalibrate Track 0 -> Track 0");
+                        }
+                        Ok((st, _)) => {
+                            status.log_msg = format!("Recalibrate Error (code {})", st);
+                        }
+                        Err(e) => {
+                            status.log_msg = format!("Recalibrate I/O Error: {}", e);
+                        }
+                    }
+                }
+            } else {
+                match res0 {
+                    Ok((st, _)) => {
+                        status.log_msg = format!("Recalibrate Track 0 Error (code {})", st);
+                    }
+                    Err(e) => {
+                        status.log_msg = format!("Recalibrate Track 0 I/O Error: {}", e);
+                    }
+                }
+            }
+            let _ = port.set_timeout(Duration::from_millis(100));
+
+            if gated {
+                let _ = gw_send_raw(port, &[0x06, 0x04, status.drive_unit, 0x00], 0);
+            }
+
+            // 6. Purge buffer and emit tx_status.send(status.clone());
+            let _ = port.clear(serialport::ClearBuffer::Input);
+            status.sectors.clear();
+            status.sectors_known = false;
+
+            // Non-blocking WP query on Recalibrate
+            if let Some(wp) = query_write_protect(
+                port,
+                status.drive_unit,
+                status.motor_on,
+                status.head,
+            ) {
+                status.write_protect = wp;
+                status.write_protected = wp;
+            }
+
+            if status.mode == DisplayMode::RpmMeasure {
+                let _ = port.clear(serialport::ClearBuffer::All);
+                let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
+                ensure_unit_active(port, status.drive_unit, status.motor_on, status.head);
+                status.mode = DisplayMode::None;
+                status.activity = if status.motor_on {
+                    HwActivity::Idle
+                } else {
+                    HwActivity::Stopped
+                };
+            } else {
+                status.activity = if status.analyzing {
+                    HwActivity::ReadingAnalyzing
+                } else if status.motor_on {
+                    HwActivity::Idle
+                } else {
+                    HwActivity::Stopped
+                };
+            }
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::ZeroTrack => {
+            if status.mode == DisplayMode::RpmMeasure {
+                let _ = port.clear(serialport::ClearBuffer::All);
+                let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
+                ensure_unit_active(port, status.drive_unit, status.motor_on, status.head);
+                if status.rpm_measure.sample_count > 0 {
+                    status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
+                }
+                status.mode = DisplayMode::None;
+                status.activity = if status.motor_on {
+                    HwActivity::Idle
+                } else {
+                    HwActivity::Stopped
+                };
+            }
+            status.activity = HwActivity::Seeking;
+            let _ = tx_status.send(status.clone());
+
+            let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
+            let res = perform_motor_gated_seek(
+                port,
+                status.drive_unit,
+                0,
+                status.motor_on,
+                status.head,
+                Duration::from_millis(SEEK_TRK0_TIMEOUT_MS),
+            );
+            let _ = port.set_timeout(Duration::from_millis(100));
+
+            match res {
+                Ok((0, _)) => {
+                    status.target_track = 0;
+                    status.track = 0;
+                    status.trk0 = true;
+                    status.sectors.clear();
+                    status.sectors_known = false;
+                    status.last_pass_h0 = None;
+                    status.last_pass_h1 = None;
+                    status.log_msg = String::from("Zero Track -> Track 00");
+                }
+                Ok((st, _)) => {
+                    status.log_msg = format!("Zero Track Error (code {})", st);
+                }
+                Err(e) => {
+                    status.log_msg = format!("Zero Track I/O Error: {}", e);
+                }
+            }
+
+            // Recalibrate / Track 0 stabilization wait
+            thread::sleep(Duration::from_millis(RECALIBRATE_WAIT_MS));
+
+            // Non-blocking WP query on ZeroTrack
+            if let Some(wp) = query_write_protect(
+                port,
+                status.drive_unit,
+                status.motor_on,
+                status.head,
+            ) {
+                status.write_protect = wp;
+                status.write_protected = wp;
+            }
+
+            // Reset sector buffer and clear input buffer
+            status.sectors.clear();
+            status.sectors_known = false;
+            let _ = port.clear(serialport::ClearBuffer::Input);
+
+            if status.mode == DisplayMode::RpmMeasure {
+                status.mode = DisplayMode::None;
+                status.activity = if status.motor_on {
+                    HwActivity::Idle
+                } else {
+                    HwActivity::Stopped
+                };
+            } else {
+                status.activity = if status.analyzing {
+                    HwActivity::ReadingAnalyzing
+                } else if status.motor_on {
+                    HwActivity::Idle
+                } else {
+                    HwActivity::Stopped
+                };
+            }
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::SetHead(head_val) => {
+            let (selection, head) = if head_val > 0 {
+                (HeadSelection::Head1, 1)
+            } else {
+                (HeadSelection::Head0, 0)
+            };
+            let res = gw_send(
+                port,
+                &[0x03, 0x03, head],
+                0,
+                status.drive_unit,
+                status.motor_on,
+                head,
+            );
+
+            match res {
+                Ok((0, _)) => {
+                    status.head_select = selection;
+                    status.head = head;
+                    status.sectors.clear();
+                    status.sectors_known = false;
+                    status.log_msg = format!("Head set -> {}", head);
+                }
+                Ok((st, _)) => {
+                    status.log_msg = format!("Head {} Error (code {})", head, st);
+                }
+                Err(e) => {
+                    status.log_msg = format!("Head I/O Error: {}", e);
+                }
+            }
+
+            // Head switch settle time (1 ms)
+            thread::sleep(Duration::from_millis(HEAD_SWITCH_SETTLE_MS));
+
+            // Reset sector buffer and clear input buffer
+            status.sectors.clear();
+            status.sectors_known = false;
+            let _ = port.clear(serialport::ClearBuffer::Input);
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::SetHeadSelection(selection) => {
+            status.head_select = selection;
+            let target_physical_head = match status.head_select {
+                HeadSelection::Head0 => 0,
+                HeadSelection::Head1 => 1,
+                HeadSelection::Both => 0,
+            };
+            let res = gw_send(
+                port,
+                &[0x03, 0x03, target_physical_head],
+                0,
+                status.drive_unit,
+                status.motor_on,
+                target_physical_head,
+            );
+
+            match res {
+                Ok((0, _)) => {
+                    status.head = target_physical_head;
+                    status.sectors.clear();
+                    status.sectors_known = false;
+                    status.log_msg = match status.head_select {
+                        HeadSelection::Head0 => String::from("Head selection -> Head 0"),
+                        HeadSelection::Head1 => String::from("Head selection -> Head 1"),
+                        HeadSelection::Both => String::from("Head selection -> BOTH (0+1) [Alternating mode]"),
+                    };
+                }
+                Ok((st, _)) => {
+                    status.log_msg = format!("Head Error (code {})", st);
+                }
+                Err(e) => {
+                    status.log_msg = format!("Head I/O Error: {}", e);
+                }
+            }
+
+            // Head switch settle time (1 ms)
+            thread::sleep(Duration::from_millis(HEAD_SWITCH_SETTLE_MS));
+
+            // Reset sector buffer and clear input buffer
+            status.sectors.clear();
+            status.sectors_known = false;
+            let _ = port.clear(serialport::ClearBuffer::Input);
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::ToggleHead => {
+            status.head_select = status.head_select.toggle_next();
+            let target_physical_head = match status.head_select {
+                HeadSelection::Head0 => 0,
+                HeadSelection::Head1 => 1,
+                HeadSelection::Both => 0,
+            };
+            let res = gw_send(
+                port,
+                &[0x03, 0x03, target_physical_head],
+                0,
+                status.drive_unit,
+                status.motor_on,
+                target_physical_head,
+            );
+
+            match res {
+                Ok((0, _)) => {
+                    status.head = target_physical_head;
+                    status.sectors.clear();
+                    status.sectors_known = false;
+                    status.log_msg = match status.head_select {
+                        HeadSelection::Head0 => String::from("Head selection -> Head 0"),
+                        HeadSelection::Head1 => String::from("Head selection -> Head 1"),
+                        HeadSelection::Both => String::from("Head selection -> BOTH (0+1) [Alternating mode]"),
+                    };
+                }
+                Ok((st, _)) => {
+                    status.log_msg = format!("Head Error (code {})", st);
+                }
+                Err(e) => {
+                    status.log_msg = format!("Head I/O Error: {}", e);
+                }
+            }
+
+            // Head switch settle time (1 ms)
+            thread::sleep(Duration::from_millis(HEAD_SWITCH_SETTLE_MS));
+
+            // Reset sector buffer and clear input buffer
+            status.sectors.clear();
+            status.sectors_known = false;
+            let _ = port.clear(serialport::ClearBuffer::Input);
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::Analyze | HwCmd::StartAnalysis => {
+            let was_motor_off = !status.motor_on;
+            if was_motor_off {
+                let _ = port.clear(serialport::ClearBuffer::All);
+                let _ = gw_send_raw(port, &[0x0E, 0x03, 0x01], 0);
+                let _ = gw_send_raw(port, &[0x0C, 0x03, status.drive_unit], 0);
+                let _ = gw_send_raw(port, &[0x03, 0x03, status.head], 0);
+                let _ = gw_set_motor(port, status.drive_unit, true);
+                status.motor_on = true;
+                status.drive_select = true;
+                thread::sleep(Duration::from_millis(SPIN_UP_DELAY_MS));
+                let _ = port.clear(serialport::ClearBuffer::Input);
+            }
+
+            // Non-blocking WP query at start of Analyze
+            if let Some(wp) = query_write_protect(
+                port,
+                status.drive_unit,
+                status.motor_on,
+                status.head,
+            ) {
+                status.write_protect = wp;
+                status.write_protected = wp;
+            }
+
+            let _ = port.clear(serialport::ClearBuffer::Input);
+            thread::sleep(Duration::from_millis(SYNC_DELAY_MS));
+
+            status.analyzing = true;
+            status.mode = DisplayMode::Analyze;
+            status.activity = HwActivity::ReadingAnalyzing;
+            status.log_msg = String::from("Analyze: Starting alignment diagnostics...");
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::ReadData => {
+            let was_motor_off = !status.motor_on;
+            if was_motor_off {
+                let _ = port.clear(serialport::ClearBuffer::All);
+                let _ = gw_send_raw(port, &[0x0E, 0x03, 0x01], 0);
+                let _ = gw_send_raw(port, &[0x0C, 0x03, status.drive_unit], 0);
+                let _ = gw_send_raw(port, &[0x03, 0x03, status.head], 0);
+                let _ = gw_set_motor(port, status.drive_unit, true);
+                status.motor_on = true;
+                status.drive_select = true;
+                thread::sleep(Duration::from_millis(SPIN_UP_DELAY_MS));
+                let _ = port.clear(serialport::ClearBuffer::Input);
+            }
+
+            // Non-blocking WP query at start of ReadData
+            if let Some(wp) = query_write_protect(
+                port,
+                status.drive_unit,
+                status.motor_on,
+                status.head,
+            ) {
+                status.write_protect = wp;
+                status.write_protected = wp;
+            }
+
+            let _ = port.clear(serialport::ClearBuffer::Input);
+            thread::sleep(Duration::from_millis(SYNC_DELAY_MS));
+
+            status.analyzing = true;
+            status.mode = DisplayMode::ReadData;
+            status.activity = HwActivity::ReadingAnalyzing;
+            status.log_msg = String::from("read Data: Starting sector read...");
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::ToggleVerbose => {
+            status.verbose_mode = !status.verbose_mode;
+            status.sector_log = if status.verbose_mode {
+                status.sector_log_verbose.clone()
+            } else {
+                status.sector_log_standard.clone()
+            };
+            status.log_msg = format!(
+                "Verbose: {}",
+                if status.verbose_mode { "ON" } else { "OFF" }
+            );
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::ToggleBeep => {
+            status.beep_enabled = !status.beep_enabled;
+            status.log_msg = format!(
+                "Beep: {}",
+                if status.beep_enabled { "ON" } else { "OFF" }
+            );
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::SetVerbose(v) => {
+            status.verbose_mode = v;
+            status.sector_log = if status.verbose_mode {
+                status.sector_log_verbose.clone()
+            } else {
+                status.sector_log_standard.clone()
+            };
+            status.log_msg = format!(
+                "Verbose: {}",
+                if status.verbose_mode { "ON" } else { "OFF" }
+            );
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::SetBeep(b) => {
+            status.beep_enabled = b;
+            status.log_msg = format!(
+                "Beep: {}",
+                if status.beep_enabled { "ON" } else { "OFF" }
+            );
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::SetMotor(on) => {
+            if status.motor_on == on {
+                let _ = tx_status.send(status.clone());
+            } else {
+                let _ = port.clear(serialport::ClearBuffer::All);
+                let _ = gw_send_raw(port, &[0x0E, 0x03, 0x01], 0);
+                let _ = gw_send_raw(port, &[0x0C, 0x03, status.drive_unit], 0);
+                let _ = gw_send_raw(port, &[0x03, 0x03, status.head], 0);
+                let res = gw_set_motor(port, status.drive_unit, on);
+
+                match res {
+                    Ok((0, _)) => {
+                        status.motor_on = on;
+                        if !on {
+                            status.index = false;
+                            status.analyzing = false;
+                            if status.mode != DisplayMode::None {
+                                if status.mode == DisplayMode::RpmMeasure && status.rpm_measure.sample_count > 0 {
+                                    status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
+                                }
+                                status.mode = DisplayMode::None;
+                            }
+                            status.activity = HwActivity::Stopped;
+                            status.log_msg = String::from("Motor OFF");
+                        } else {
+                            status.drive_select = true;
+                            status.has_disk = true;
+                            status.activity = HwActivity::Idle;
+                            status.log_msg = String::from("Motor ON");
+                        }
+                    }
+                    Ok((st, _)) => {
+                        status.log_msg = format!("Motor Error (code {})", st);
+                    }
+                    Err(e) => {
+                        status.log_msg = format!("Motor I/O Error: {}", e);
+                    }
+                }
+                let _ = tx_status.send(status.clone());
+            }
+        }
+        HwCmd::ToggleDriveUnit => {
+            let next_unit = if status.drive_unit == 0 { 1 } else { 0 };
+            if status.motor_on {
+                let _ = gw_send_raw(port, &[0x06, 0x04, status.drive_unit, 0x00], 0);
+            }
+            let _ = gw_send_raw(port, &[0x0D, 0x02], 0);
+            status.drive_unit = next_unit;
+            status.unit_id = next_unit;
+            ensure_unit_active(
+                port,
+                status.drive_unit,
+                status.motor_on,
+                status.head,
+            );
+            status.drive_select = true;
+            let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
+            let _ = perform_motor_gated_seek(
+                port,
+                status.drive_unit,
+                0,
+                status.motor_on,
+                status.head,
+                Duration::from_millis(SEEK_TRK0_TIMEOUT_MS),
+            );
+            let _ = port.set_timeout(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(RECALIBRATE_WAIT_MS));
+
+            if let Some(wp) = query_write_protect(
+                port,
+                status.drive_unit,
+                status.motor_on,
+                status.head,
+            ) {
+                status.write_protect = wp;
+                status.write_protected = wp;
+            }
+
+            status.track = 0;
+            status.trk0 = true;
+            status.sectors.clear();
+            status.sectors_known = false;
+            status.last_pass_h0 = None;
+            status.last_pass_h1 = None;
+            status.mode = DisplayMode::None;
+            status.activity = if status.motor_on {
+                HwActivity::Idle
+            } else {
+                HwActivity::Stopped
+            };
+            status.log_msg = format!(
+                "Drive {} ({}) selected & Recalibrated Track 0",
+                status.drive_unit,
+                if status.drive_unit == 0 { "A:" } else { "B:" }
+            );
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::SelectUnit(unit) => {
+            let target_unit = unit.min(1);
+            if target_unit != status.drive_unit {
+                if status.motor_on {
+                    let _ = gw_send_raw(port, &[0x06, 0x04, status.drive_unit, 0x00], 0);
+                }
+                let _ = gw_send_raw(port, &[0x0D, 0x02], 0);
+                status.drive_unit = target_unit;
+                status.unit_id = target_unit;
+            }
+            ensure_unit_active(
+                port,
+                status.drive_unit,
+                status.motor_on,
+                status.head,
+            );
+            status.drive_select = true;
+            let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
+            let _ = perform_motor_gated_seek(
+                port,
+                status.drive_unit,
+                0,
+                status.motor_on,
+                status.head,
+                Duration::from_millis(SEEK_TRK0_TIMEOUT_MS),
+            );
+            let _ = port.set_timeout(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(RECALIBRATE_WAIT_MS));
+
+            if let Some(wp) = query_write_protect(
+                port,
+                status.drive_unit,
+                status.motor_on,
+                status.head,
+            ) {
+                status.write_protect = wp;
+                status.write_protected = wp;
+            }
+
+            status.track = 0;
+            status.trk0 = true;
+            status.sectors.clear();
+            status.sectors_known = false;
+            status.last_pass_h0 = None;
+            status.last_pass_h1 = None;
+            status.mode = DisplayMode::None;
+            status.activity = if status.motor_on {
+                HwActivity::Idle
+            } else {
+                HwActivity::Stopped
+            };
+            status.log_msg = format!(
+                "Select Unit {} & Recalibrate Track 0",
+                status.drive_unit
+            );
+            let _ = tx_status.send(status.clone());
+        }
+    }
+    should_exit
+}
+
 pub fn hw_thread(
     tx_status: Sender<DriveStatus>,
     rx_cmd: Receiver<HwCmd>,
@@ -2076,7 +2906,7 @@ pub fn hw_thread(
     status.unit_id = status.drive_unit;
     let mut rpm_sampler = RpmSampler::new(4);
 
-    let (tx_sound, rx_sound) = crossbeam_channel::unbounded::<BeepType>();
+    let (tx_sound, rx_sound) = crossbeam_channel::unbounded::<AudioEvent>();
     thread::spawn(move || sound_worker(rx_sound));
 
     loop {
@@ -2089,7 +2919,7 @@ pub fn hw_thread(
 
         if let Some(name) = port_name {
             match serialport::new(&name, 115_200)
-                .timeout(Duration::from_millis(500))
+                .timeout(Duration::from_millis(100))
                 .open()
             {
                 Ok(mut port) => {
@@ -2188,7 +3018,7 @@ pub fn hw_thread(
                         status.head,
                         Duration::from_millis(SEEK_TRK0_TIMEOUT_MS),
                     );
-                    let _ = port.set_timeout(Duration::from_millis(500));
+                    let _ = port.set_timeout(Duration::from_millis(100));
 
                     // Wait 1 full rotation (200 ms) after initial recalibration
                     thread::sleep(Duration::from_millis(RECALIBRATE_WAIT_MS));
@@ -2214,1113 +3044,17 @@ pub fn hw_thread(
 
                     loop {
                         while let Ok(cmd) = rx_cmd.try_recv() {
-                            match cmd {
-                                HwCmd::Exit => {
-                                    should_exit = true;
-                                    break;
-                                }
-                                HwCmd::PanicReset => {
-                                    // 1. Drain pending command channel
-                                    while rx_cmd.try_recv().is_ok() {}
-
-                                    // 2. Clear all port buffers
-                                    let _ = port.clear(serialport::ClearBuffer::All);
-
-                                    // 3. Immediate hardware emergency shutdown:
-                                    // - Cut drive motor: MOTOR_OFF (0x06 with state 0)
-                                    // - Deselect head: Head 0 (0x03 with head 0)
-                                    // - Re-sync bus & select unit
-                                    let _ = gw_send_raw(&mut port, &[0x06, 0x04, status.drive_unit, 0x00], 0);
-                                    let _ = gw_send_raw(&mut port, &[0x03, 0x03, 0x00], 0);
-                                    let _ = gw_send_raw(&mut port, &[0x00, 0x03, 0x00], 32);
-                                    let _ = gw_send_raw(&mut port, &[0x0E, 0x03, 0x01], 0);
-                                    let _ = gw_send_raw(&mut port, &[0x0C, 0x03, status.drive_unit], 0);
-
-                                    // 4. Reset software state cleanly to safe stopped state
-                                    status.motor_on = false;
-                                    status.analyzing = false;
-                                    status.mode = DisplayMode::None;
-                                    status.activity = HwActivity::Stopped;
-                                    status.rpm = 0;
-                                    status.rpm_display = String::from("--- RPM");
-                                    status.index = false;
-                                    status.sectors.clear();
-                                    status.sectors_known = false;
-                                    status.head_select = HeadSelection::Head0;
-                                    status.head = 0;
-                                    status.log_msg = String::from("*** EMERGENCY STOP (BACKSPACE): Motor stopped & hardware reset ***");
-                                    let _ = tx_status.send(status.clone());
-                                }
-                                HwCmd::Stop => {
-                                    let _ = port.clear(serialport::ClearBuffer::All);
-                                    let _ = port.set_timeout(Duration::from_millis(300));
-                                    let _ = gw_send_raw(
-                                        &mut port,
-                                        &[0x06, 0x04, status.drive_unit, 0x00],
-                                        0,
-                                    );
-                                    let _ = port.set_timeout(Duration::from_millis(500));
-                                    status.motor_on = false;
-                                    status.analyzing = false;
-                                    if status.mode == DisplayMode::RpmMeasure && status.rpm_measure.sample_count > 0 {
-                                        status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
-                                    }
-                                    status.mode = DisplayMode::None;
-                                    status.activity = HwActivity::Stopped;
-                                    status.index = false;
-                                    status.log_msg =
-                                        String::from("Stop / Motor OFF (Safe to change disk)");
-                                }
-                                HwCmd::MeasureRpm => {
-                                    if status.mode == DisplayMode::RpmMeasure {
-                                        let _ = port.clear(serialport::ClearBuffer::All);
-                                        let _ = gw_send_raw(&mut port, &[0x00, 0x03, 0x00], 32);
-                                        ensure_unit_active(&mut port, status.drive_unit, status.motor_on, status.head);
-                                        if status.rpm_measure.sample_count > 0 {
-                                            status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
-                                        }
-                                        status.mode = DisplayMode::None;
-                                        status.activity = if status.motor_on {
-                                            HwActivity::Idle
-                                        } else {
-                                            HwActivity::Stopped
-                                        };
-                                        status.log_msg = String::from("Live RPM test stopped");
-                                    } else {
-                                        if !status.motor_on {
-                                            let _ = port.clear(serialport::ClearBuffer::All);
-                                            let _ = gw_send_raw(&mut port, &[0x0E, 0x03, 0x01], 0);
-                                            let _ = gw_send_raw(&mut port, &[0x0C, 0x03, status.drive_unit], 0);
-                                            let _ = gw_send_raw(&mut port, &[0x03, 0x03, status.head], 0);
-                                            let _ = gw_send_raw(&mut port, &[0x06, 0x04, status.drive_unit, 0x01], 0);
-                                            status.motor_on = true;
-                                            thread::sleep(Duration::from_millis(200));
-                                        }
-                                        status.analyzing = false;
-                                        status.mode = DisplayMode::RpmMeasure;
-                                        status.activity = HwActivity::MeasuringRpm;
-                                        status.rpm_measure.clear();
-                                        status.log_msg = String::from("Live RPM Test: High-precision continuous measurement for fine mechanical tuning");
-                                    }
-                                }
-                                HwCmd::ToggleMotor => {
-                                    let new_state = !status.motor_on;
-                                    let _ = port.clear(serialport::ClearBuffer::All);
-                                    let _ = gw_send_raw(&mut port, &[0x0E, 0x03, 0x01], 0);
-                                    let _ = gw_send_raw(&mut port, &[0x0C, 0x03, status.drive_unit], 0);
-                                    let _ = gw_send_raw(&mut port, &[0x03, 0x03, status.head], 0);
-                                    let _ = port.clear(serialport::ClearBuffer::Input);
-                                    let res = if new_state {
-                                        gw_send_raw_timeout(&mut port, &[0x06, 0x04, status.drive_unit, 0x01], 0, Duration::from_millis(200))
-                                    } else {
-                                        gw_send_raw_timeout(&mut port, &[0x06, 0x04, status.drive_unit, 0x00], 0, Duration::from_millis(200))
-                                    };
-
-                                    match res {
-                                        Ok((0, _)) => {
-                                            status.motor_on = new_state;
-                                            if !new_state {
-                                                // Non-destructive stop: keep sectors, track, head, and rpm_display intact
-                                                status.index = false;
-                                                status.analyzing = false;
-                                                if status.mode != DisplayMode::None {
-                                                    if status.mode == DisplayMode::RpmMeasure && status.rpm_measure.sample_count > 0 {
-                                                        status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
-                                                    }
-                                                    status.mode = DisplayMode::None;
-                                                }
-                                                status.activity = HwActivity::Stopped;
-                                                status.log_msg = String::from("Motor OFF (M key)");
-                                            } else {
-                                                status.drive_select = true;
-                                                status.has_disk = true;
-                                                status.activity = HwActivity::Idle;
-                                                status.log_msg = String::from("Motor ON (M key)");
-                                            }
-                                        }
-                                        Ok((st, _)) => {
-                                            status.log_msg =
-                                                format!("Motor Toggle Error (code {})", st);
-                                        }
-                                        Err(e) => {
-                                            status.log_msg = format!("Motor Toggle I/O Error: {}", e);
-                                        }
-                                    }
-                                    let _ = tx_status.send(status.clone());
-                                }
-                                HwCmd::Seek(target_track) => {
-                                    let track = target_track.min(83);
-                                    let old_track = status.track;
-
-                                    // 1. Immediately set status.track = track and clear status.sectors
-                                    status.track = track;
-                                    status.trk0 = track == 0;
-                                    status.sectors.clear();
-                                    status.sectors_known = false;
-                                    status.last_pass_h0 = None;
-                                    status.last_pass_h1 = None;
-                                    status.activity = HwActivity::Seeking;
-                                    let _ = tx_status.send(status.clone());
-
-                                    // 2. Issue motor-gated SEEK(target) command to Greaseweazle and wait for ACK
-                                    let adaptive_timeout = if track == 0 {
-                                        Duration::from_millis(SEEK_TRK0_TIMEOUT_MS)
-                                    } else {
-                                        Duration::from_millis(calculate_seek_timeout_ms(old_track, track))
-                                    };
-                                    let _ = port.set_timeout(adaptive_timeout);
-
-                                    let res = perform_motor_gated_seek(
-                                        &mut port,
-                                        status.drive_unit,
-                                        track,
-                                        status.motor_on,
-                                        status.head,
-                                        adaptive_timeout,
-                                    );
-                                    let _ = port.set_timeout(Duration::from_millis(500));
-
-                                    match res {
-                                        Ok((0, _)) => {
-                                            status.log_msg = format!("Seek -> Track {}", track);
-                                        }
-                                        Ok((st, _)) => {
-                                            status.log_msg =
-                                                format!("Seek Error (code {})", st);
-                                        }
-                                        Err(e) => {
-                                            status.log_msg = format!("Seek I/O Error: {}", e);
-                                        }
-                                    }
-
-                                    // 3. Mandatory UART input buffer purge to eliminate residual flux samples from previous track
-                                    let _ = port.clear(serialport::ClearBuffer::Input);
-
-                                    // 4. Apply mechanical stabilization delay of 30 ms (HEAD_SETTLE_TIME_MS)
-                                    thread::sleep(Duration::from_millis(HEAD_SETTLE_TIME_MS));
-
-                                    // Non-blocking WP query on Seek
-                                    if let Some(wp) = query_write_protect(
-                                        &mut port,
-                                        status.drive_unit,
-                                        status.motor_on,
-                                        status.head,
-                                    ) {
-                                        status.write_protect = wp;
-                                        status.write_protected = wp;
-                                    }
-
-                                    // Reset sector buffer of the current pass and clear input buffer
-                                    status.sectors.clear();
-                                    status.sectors_known = false;
-                                    let _ = port.clear(serialport::ClearBuffer::Input);
-
-                                    if status.mode == DisplayMode::RpmMeasure {
-                                        let _ = port.clear(serialport::ClearBuffer::All);
-                                        let _ = gw_send_raw(&mut port, &[0x00, 0x03, 0x00], 32);
-                                        ensure_unit_active(&mut port, status.drive_unit, status.motor_on, status.head);
-                                        if status.rpm_measure.sample_count > 0 {
-                                            status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
-                                        }
-                                        status.mode = DisplayMode::None;
-                                        status.activity = if status.motor_on {
-                                            HwActivity::Idle
-                                        } else {
-                                            HwActivity::Stopped
-                                        };
-                                        let _ = tx_status.send(status.clone());
-                                    } else if status.analyzing && status.motor_on && status.has_disk {
-                                        status.activity = HwActivity::ReadingAnalyzing;
-                                        // Send notification before analysis loop reads the target track
-                                        let _ = tx_status.send(status.clone());
-
-                                        status.io_cycle = status.io_cycle.wrapping_add(1);
-                                        let diag = read_and_decode_track_diagnostic(
-                                             &mut port,
-                                            status.track,
-                                            &mut status,
-                                            &tx_status,
-                                        );
-                                        for &r in &diag.instant_rpms {
-                                            rpm_sampler.add_sample(r);
-                                        }
-                                        if diag.has_disk && !diag.index_timestamps.is_empty() {
-                                            let avg = rpm_sampler.average();
-                                            if avg > 0 {
-                                                status.rpm = avg;
-                                            }
-                                        }
-                                        status.index = !diag.index_timestamps.is_empty();
-                                        process_track_diagnostic(
-                                            &mut status,
-                                            &diag,
-                                            &tx_sound,
-                                        );
-                                    } else {
-                                        status.activity = if status.motor_on {
-                                            HwActivity::Idle
-                                        } else {
-                                            HwActivity::Stopped
-                                        };
-                                        let _ = tx_status.send(status.clone());
-                                    }
-                                }
-                                HwCmd::RecalibrateSeek => {
-                                    status.activity = HwActivity::Seeking;
-                                    let _ = tx_status.send(status.clone());
-
-                                    // 1. Save starting track
-                                    let origin = status.track;
-
-                                    // 2. Purge input buffer
-                                    let _ = port.clear(serialport::ClearBuffer::Input);
-
-                                    // 3. Motor-gated seek sequence for recalibration (wakes up stepper if motor is off)
-                                    let gated = !status.motor_on;
-                                    if gated {
-                                        let _ = gw_send_raw(&mut port, &[0x06, 0x04, status.drive_unit, 0x01], 0);
-                                        thread::sleep(Duration::from_millis(STEPPER_WAKEUP_DELAY_MS));
-                                    }
-
-                                    // 4. Seek to Track 0 (SEEK_TRACK0): timeout 3000 ms, track 0 dwell time 60 ms
-                                    let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
-                                    let res0 = gw_send_timeout(
-                                        &mut port,
-                                        &[0x02, 0x03, 0x00],
-                                        0,
-                                        status.drive_unit,
-                                        true,
-                                        status.head,
-                                        Duration::from_millis(SEEK_TRK0_TIMEOUT_MS),
-                                    );
-                                    thread::sleep(Duration::from_millis(DWELL_TIME_TRK0_MS));
-
-                                    // 5. Immediate return to origin track
-                                    if res0.is_ok() {
-                                        if origin > 0 {
-                                            let t_back = Duration::from_millis(1200 + (origin as u64 * 25));
-                                            let _ = port.set_timeout(t_back);
-                                            let res_back = gw_send_timeout(
-                                                &mut port,
-                                                &[0x02, 0x03, origin],
-                                                0,
-                                                status.drive_unit,
-                                                true,
-                                                status.head,
-                                                t_back,
-                                            );
-                                            thread::sleep(Duration::from_millis(HEAD_SETTLE_TIME_MS));
-                                            match res_back {
-                                                Ok((0, _)) => {
-                                                    status.track = origin;
-                                                    status.trk0 = origin == 0;
-                                                    status.sectors.clear();
-                                                    status.sectors_known = false;
-                                                    status.last_pass_h0 = None;
-                                                    status.last_pass_h1 = None;
-                                                    status.log_msg = format!(
-                                                        "Recalibrate Track 0 -> Track {}",
-                                                        origin
-                                                    );
-                                                }
-                                                Ok((st, _)) => {
-                                                    status.log_msg =
-                                                        format!("Recalibrate Error (code {})", st);
-                                                }
-                                                Err(e) => {
-                                                    status.log_msg =
-                                                        format!("Recalibrate I/O Error: {}", e);
-                                                }
-                                            }
-                                        } else {
-                                            // origin == 0: Step-out clearance cycle: Seek(2) -> wait 30 ms -> Seek(0) -> wait 35 ms
-                                            let _ = port.set_timeout(Duration::from_millis(1250));
-                                            let _ = gw_send_timeout(
-                                                &mut port,
-                                                &[0x02, 0x03, 2],
-                                                0,
-                                                status.drive_unit,
-                                                true,
-                                                status.head,
-                                                Duration::from_millis(1200 + (2 * 25)),
-                                            );
-                                            thread::sleep(Duration::from_millis(30));
-
-                                            let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
-                                            let res_zero = gw_send_timeout(
-                                                &mut port,
-                                                &[0x02, 0x03, 0],
-                                                0,
-                                                status.drive_unit,
-                                                true,
-                                                status.head,
-                                                Duration::from_millis(SEEK_TRK0_TIMEOUT_MS),
-                                            );
-                                            thread::sleep(Duration::from_millis(35));
-
-                                            match res_zero {
-                                                Ok((0, _)) => {
-                                                    status.track = 0;
-                                                    status.trk0 = true;
-                                                    status.sectors.clear();
-                                                    status.sectors_known = false;
-                                                    status.log_msg =
-                                                        String::from("Recalibrate Track 0 -> Track 0");
-                                                }
-                                                Ok((st, _)) => {
-                                                    status.log_msg =
-                                                        format!("Recalibrate Error (code {})", st);
-                                                }
-                                                Err(e) => {
-                                                    status.log_msg =
-                                                        format!("Recalibrate I/O Error: {}", e);
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        match res0 {
-                                            Ok((st, _)) => {
-                                                status.log_msg =
-                                                    format!("Recalibrate Track 0 Error (code {})", st);
-                                            }
-                                            Err(e) => {
-                                                status.log_msg =
-                                                    format!("Recalibrate Track 0 I/O Error: {}", e);
-                                            }
-                                        }
-                                    }
-                                    let _ = port.set_timeout(Duration::from_millis(500));
-
-                                    if gated {
-                                        let _ = gw_send_raw(&mut port, &[0x06, 0x04, status.drive_unit, 0x00], 0);
-                                    }
-
-                                    // 6. Purge buffer and emit tx_status.send(status.clone());
-                                    let _ = port.clear(serialport::ClearBuffer::Input);
-                                    status.sectors.clear();
-                                    status.sectors_known = false;
-
-                                    // Non-blocking WP query on Recalibrate
-                                    if let Some(wp) = query_write_protect(
-                                        &mut port,
-                                        status.drive_unit,
-                                        status.motor_on,
-                                        status.head,
-                                    ) {
-                                        status.write_protect = wp;
-                                        status.write_protected = wp;
-                                    }
-
-                                    if status.mode == DisplayMode::RpmMeasure {
-                                        let _ = port.clear(serialport::ClearBuffer::All);
-                                        let _ = gw_send_raw(&mut port, &[0x00, 0x03, 0x00], 32);
-                                        ensure_unit_active(&mut port, status.drive_unit, status.motor_on, status.head);
-                                        status.mode = DisplayMode::None;
-                                        status.activity = if status.motor_on {
-                                            HwActivity::Idle
-                                        } else {
-                                            HwActivity::Stopped
-                                        };
-                                        let _ = tx_status.send(status.clone());
-                                    } else if status.analyzing && status.motor_on && status.has_disk {
-                                        status.activity = HwActivity::ReadingAnalyzing;
-                                        let _ = tx_status.send(status.clone());
-                                        status.io_cycle = status.io_cycle.wrapping_add(1);
-                                        let diag = read_and_decode_track_diagnostic(
-                                            &mut port,
-                                            status.track,
-                                            &mut status,
-                                            &tx_status,
-                                        );
-                                        for &r in &diag.instant_rpms {
-                                            rpm_sampler.add_sample(r);
-                                        }
-                                        if diag.has_disk && !diag.index_timestamps.is_empty() {
-                                            let avg = rpm_sampler.average();
-                                            if avg > 0 {
-                                                status.rpm = avg;
-                                            }
-                                        }
-                                        status.index = !diag.index_timestamps.is_empty();
-                                        process_track_diagnostic(
-                                            &mut status,
-                                            &diag,
-                                            &tx_sound,
-                                        );
-                                    } else {
-                                        status.activity = if status.motor_on {
-                                            HwActivity::Idle
-                                        } else {
-                                            HwActivity::Stopped
-                                        };
-                                        let _ = tx_status.send(status.clone());
-                                    }
-                                }
-                                HwCmd::ZeroTrack => {
-                                    if status.mode == DisplayMode::RpmMeasure {
-                                        let _ = port.clear(serialport::ClearBuffer::All);
-                                        let _ = gw_send_raw(&mut port, &[0x00, 0x03, 0x00], 32);
-                                        ensure_unit_active(&mut port, status.drive_unit, status.motor_on, status.head);
-                                        if status.rpm_measure.sample_count > 0 {
-                                            status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
-                                        }
-                                        status.mode = DisplayMode::None;
-                                        status.activity = if status.motor_on {
-                                            HwActivity::Idle
-                                        } else {
-                                            HwActivity::Stopped
-                                        };
-                                    }
-                                    status.activity = HwActivity::Seeking;
-                                    let _ = tx_status.send(status.clone());
-
-                                    let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
-                                    let res = perform_motor_gated_seek(
-                                        &mut port,
-                                        status.drive_unit,
-                                        0,
-                                        status.motor_on,
-                                        status.head,
-                                        Duration::from_millis(SEEK_TRK0_TIMEOUT_MS),
-                                    );
-                                    let _ = port.set_timeout(Duration::from_millis(500));
-
-                                    match res {
-                                        Ok((0, _)) => {
-                                            status.track = 0;
-                                            status.trk0 = true;
-                                            status.sectors.clear();
-                                            status.sectors_known = false;
-                                            status.last_pass_h0 = None;
-                                            status.last_pass_h1 = None;
-                                            status.log_msg =
-                                                String::from("Zero Track -> Track 00");
-                                        }
-                                        Ok((st, _)) => {
-                                            status.log_msg =
-                                                format!("Zero Track Error (code {})", st);
-                                        }
-                                        Err(e) => {
-                                            status.log_msg =
-                                                format!("Zero Track I/O Error: {}", e);
-                                        }
-                                    }
-
-                                    // Recalibrate / Track 0 stabilization wait
-                                    thread::sleep(Duration::from_millis(RECALIBRATE_WAIT_MS));
-
-                                    // Non-blocking WP query on ZeroTrack
-                                    if let Some(wp) = query_write_protect(
-                                        &mut port,
-                                        status.drive_unit,
-                                        status.motor_on,
-                                        status.head,
-                                    ) {
-                                        status.write_protect = wp;
-                                        status.write_protected = wp;
-                                    }
-
-                                    // Reset sector buffer and clear input buffer
-                                    status.sectors.clear();
-                                    status.sectors_known = false;
-                                    let _ = port.clear(serialport::ClearBuffer::Input);
-
-                                    if status.mode == DisplayMode::RpmMeasure {
-                                        status.mode = DisplayMode::None;
-                                        status.activity = if status.motor_on {
-                                            HwActivity::Idle
-                                        } else {
-                                            HwActivity::Stopped
-                                        };
-                                        let _ = tx_status.send(status.clone());
-                                    } else if status.analyzing && status.motor_on && status.has_disk {
-                                        status.activity = HwActivity::ReadingAnalyzing;
-                                        let _ = tx_status.send(status.clone());
-                                        status.io_cycle = status.io_cycle.wrapping_add(1);
-                                        let diag = read_and_decode_track_diagnostic(
-                                            &mut port,
-                                            status.track,
-                                            &mut status,
-                                            &tx_status,
-                                        );
-                                        for &r in &diag.instant_rpms {
-                                            rpm_sampler.add_sample(r);
-                                        }
-                                        if diag.has_disk && !diag.index_timestamps.is_empty() {
-                                            let avg = rpm_sampler.average();
-                                            if avg > 0 {
-                                                status.rpm = avg;
-                                            }
-                                        }
-                                        status.index = !diag.index_timestamps.is_empty();
-                                        process_track_diagnostic(
-                                            &mut status,
-                                            &diag,
-                                            &tx_sound,
-                                        );
-                                    } else {
-                                        status.activity = if status.motor_on {
-                                            HwActivity::Idle
-                                        } else {
-                                            HwActivity::Stopped
-                                        };
-                                        let _ = tx_status.send(status.clone());
-                                    }
-                                }
-                                HwCmd::SetHead(head_val) => {
-                                    let (selection, head) = if head_val > 0 {
-                                        (HeadSelection::Head1, 1)
-                                    } else {
-                                        (HeadSelection::Head0, 0)
-                                    };
-                                    let res = gw_send(
-                                        &mut port,
-                                        &[0x03, 0x03, head],
-                                        0,
-                                        status.drive_unit,
-                                        status.motor_on,
-                                        head,
-                                    );
-
-                                    match res {
-                                        Ok((0, _)) => {
-                                            status.head_select = selection;
-                                            status.head = head;
-                                            status.sectors.clear();
-                                            status.sectors_known = false;
-                                            status.log_msg =
-                                                format!("Head set -> {}", head);
-                                        }
-                                        Ok((st, _)) => {
-                                            status.log_msg =
-                                                format!("Head {} Error (code {})", head, st);
-                                        }
-                                        Err(e) => {
-                                            status.log_msg = format!("Head I/O Error: {}", e);
-                                        }
-                                    }
-
-                                    // Head switch settle time (1 ms)
-                                    thread::sleep(Duration::from_millis(HEAD_SWITCH_SETTLE_MS));
-
-                                    // Reset sector buffer and clear input buffer
-                                    status.sectors.clear();
-                                    status.sectors_known = false;
-                                    let _ = port.clear(serialport::ClearBuffer::Input);
-
-                                    if status.mode == DisplayMode::RpmMeasure {
-                                        // Tachometer mode continues measuring
-                                    } else if status.analyzing && status.motor_on && status.has_disk {
-                                        status.activity = HwActivity::ReadingAnalyzing;
-                                        status.io_cycle = status.io_cycle.wrapping_add(1);
-                                        let diag = read_and_decode_track_diagnostic(
-                                            &mut port,
-                                            status.track,
-                                            &mut status,
-                                            &tx_status,
-                                        );
-                                        for &r in &diag.instant_rpms {
-                                            rpm_sampler.add_sample(r);
-                                        }
-                                        if diag.has_disk && !diag.index_timestamps.is_empty() {
-                                            let avg = rpm_sampler.average();
-                                            if avg > 0 {
-                                                status.rpm = avg;
-                                            }
-                                        }
-                                        status.index = !diag.index_timestamps.is_empty();
-                                        process_track_diagnostic(
-                                            &mut status,
-                                            &diag,
-                                            &tx_sound,
-                                        );
-                                    }
-                                }
-                                HwCmd::SetHeadSelection(selection) => {
-                                    status.head_select = selection;
-                                    let target_physical_head = match status.head_select {
-                                        HeadSelection::Head0 => 0,
-                                        HeadSelection::Head1 => 1,
-                                        HeadSelection::Both => 0,
-                                    };
-                                    let res = gw_send(
-                                        &mut port,
-                                        &[0x03, 0x03, target_physical_head],
-                                        0,
-                                        status.drive_unit,
-                                        status.motor_on,
-                                        target_physical_head,
-                                    );
-
-                                    match res {
-                                        Ok((0, _)) => {
-                                            status.head = target_physical_head;
-                                            status.sectors.clear();
-                                            status.sectors_known = false;
-                                            status.log_msg = match status.head_select {
-                                                HeadSelection::Head0 => String::from("Head selection -> Head 0"),
-                                                HeadSelection::Head1 => String::from("Head selection -> Head 1"),
-                                                HeadSelection::Both => String::from("Head selection -> BOTH (0+1) [Alternating mode]"),
-                                            };
-                                        }
-                                        Ok((st, _)) => {
-                                            status.log_msg = format!("Head Error (code {})", st);
-                                        }
-                                        Err(e) => {
-                                            status.log_msg = format!("Head I/O Error: {}", e);
-                                        }
-                                    }
-
-                                    // Head switch settle time (1 ms)
-                                    thread::sleep(Duration::from_millis(HEAD_SWITCH_SETTLE_MS));
-
-                                    // Reset sector buffer and clear input buffer
-                                    status.sectors.clear();
-                                    status.sectors_known = false;
-                                    let _ = port.clear(serialport::ClearBuffer::Input);
-
-                                    if status.mode == DisplayMode::RpmMeasure {
-                                        // Tachometer mode continues measuring
-                                    } else if status.analyzing && status.motor_on && status.has_disk {
-                                        status.activity = HwActivity::ReadingAnalyzing;
-                                        status.io_cycle = status.io_cycle.wrapping_add(1);
-                                        let diag = read_and_decode_track_diagnostic(
-                                            &mut port,
-                                            status.track,
-                                            &mut status,
-                                            &tx_status,
-                                        );
-                                        for &r in &diag.instant_rpms {
-                                            rpm_sampler.add_sample(r);
-                                        }
-                                        if diag.has_disk && !diag.index_timestamps.is_empty() {
-                                            let avg = rpm_sampler.average();
-                                            if avg > 0 {
-                                                status.rpm = avg;
-                                            }
-                                        }
-                                        status.index = !diag.index_timestamps.is_empty();
-                                        process_track_diagnostic(
-                                            &mut status,
-                                            &diag,
-                                            &tx_sound,
-                                        );
-                                    }
-                                }
-                                HwCmd::ToggleHead => {
-                                    status.head_select = status.head_select.toggle_next();
-                                    let target_physical_head = match status.head_select {
-                                        HeadSelection::Head0 => 0,
-                                        HeadSelection::Head1 => 1,
-                                        HeadSelection::Both => 0,
-                                    };
-                                    let res = gw_send(
-                                        &mut port,
-                                        &[0x03, 0x03, target_physical_head],
-                                        0,
-                                        status.drive_unit,
-                                        status.motor_on,
-                                        target_physical_head,
-                                    );
-
-                                    match res {
-                                        Ok((0, _)) => {
-                                            status.head = target_physical_head;
-                                            status.sectors.clear();
-                                            status.sectors_known = false;
-                                            status.log_msg = match status.head_select {
-                                                HeadSelection::Head0 => String::from("Head selection -> Head 0"),
-                                                HeadSelection::Head1 => String::from("Head selection -> Head 1"),
-                                                HeadSelection::Both => String::from("Head selection -> BOTH (0+1) [Alternating mode]"),
-                                            };
-                                        }
-                                        Ok((st, _)) => {
-                                            status.log_msg = format!("Head Error (code {})", st);
-                                        }
-                                        Err(e) => {
-                                            status.log_msg = format!("Head I/O Error: {}", e);
-                                        }
-                                    }
-
-                                    // Head switch settle time (1 ms)
-                                    thread::sleep(Duration::from_millis(HEAD_SWITCH_SETTLE_MS));
-
-                                    // Reset sector buffer and clear input buffer
-                                    status.sectors.clear();
-                                    status.sectors_known = false;
-                                    let _ = port.clear(serialport::ClearBuffer::Input);
-
-                                    if status.mode == DisplayMode::RpmMeasure {
-                                        // Tachometer mode continues measuring
-                                    } else if status.analyzing && status.motor_on && status.has_disk {
-                                        status.activity = HwActivity::ReadingAnalyzing;
-                                        status.io_cycle = status.io_cycle.wrapping_add(1);
-                                        let diag = read_and_decode_track_diagnostic(
-                                            &mut port,
-                                            status.track,
-                                            &mut status,
-                                            &tx_status,
-                                        );
-                                        for &r in &diag.instant_rpms {
-                                            rpm_sampler.add_sample(r);
-                                        }
-                                        if diag.has_disk && !diag.index_timestamps.is_empty() {
-                                            let avg = rpm_sampler.average();
-                                            if avg > 0 {
-                                                status.rpm = avg;
-                                            }
-                                        }
-                                        status.index = !diag.index_timestamps.is_empty();
-                                        process_track_diagnostic(
-                                            &mut status,
-                                            &diag,
-                                            &tx_sound,
-                                        );
-                                    }
-                                }
-                                HwCmd::Analyze => {
-                                    if !status.motor_on {
-                                        let _ = port.clear(serialport::ClearBuffer::All);
-                                        let _ = gw_send_raw(&mut port, &[0x0E, 0x03, 0x01], 0);
-                                        let _ = gw_send_raw(&mut port, &[0x0C, 0x03, status.drive_unit], 0);
-                                        let _ = gw_send_raw(&mut port, &[0x03, 0x03, status.head], 0);
-                                        let _ = gw_send_raw(&mut port, &[0x06, 0x04, status.drive_unit, 0x01], 0);
-                                        status.motor_on = true;
-                                        status.drive_select = true;
-                                        thread::sleep(Duration::from_millis(SPIN_UP_DELAY_MS));
-                                    }
-
-                                    // Non-blocking WP query at start of Analyze
-                                    if let Some(wp) = query_write_protect(
-                                        &mut port,
-                                        status.drive_unit,
-                                        status.motor_on,
-                                        status.head,
-                                    ) {
-                                        status.write_protect = wp;
-                                        status.write_protected = wp;
-                                    }
-
-                                    let _ = port.clear(serialport::ClearBuffer::Input);
-                                    thread::sleep(Duration::from_millis(SYNC_DELAY_MS));
-
-                                    status.analyzing = true;
-                                    status.mode = DisplayMode::Analyze;
-                                    status.activity = HwActivity::ReadingAnalyzing;
-                                    status.io_cycle = status.io_cycle.wrapping_add(1);
-
-                                    let diag = read_and_decode_track_diagnostic(
-                                        &mut port,
-                                        status.track,
-                                        &mut status,
-                                        &tx_status,
-                                    );
-                                    for &r in &diag.instant_rpms {
-                                        rpm_sampler.add_sample(r);
-                                    }
-                                    if diag.has_disk && !diag.index_timestamps.is_empty() {
-                                        let avg = rpm_sampler.average();
-                                        if avg > 0 {
-                                            status.rpm = avg;
-                                        }
-                                    }
-                                    status.index = !diag.index_timestamps.is_empty();
-
-                                    process_track_diagnostic(
-                                        &mut status,
-                                        &diag,
-                                        &tx_sound,
-                                    );
-
-                                    if status.sectors_known {
-                                        status.log_msg = format!(
-                                            "Analyze: {}k ({}) - {} real sectors (Alignment: {:.1}%)",
-                                            diag.bitrate,
-                                            if status.density {
-                                                "1.44M HD"
-                                            } else {
-                                                "720K DD"
-                                            },
-                                            status.sectors.len(),
-                                            diag.alignment_pct
-                                        );
-                                    } else {
-                                        status.log_msg = format!(
-                                            "Analyze: Track {} -> ? (No valid IDAM sector found)",
-                                            status.track
-                                        );
-                                    }
-                                }
-                                HwCmd::ReadData => {
-                                    if !status.motor_on {
-                                        let _ = port.clear(serialport::ClearBuffer::All);
-                                        let _ = gw_send_raw(&mut port, &[0x0E, 0x03, 0x01], 0);
-                                        let _ = gw_send_raw(&mut port, &[0x0C, 0x03, status.drive_unit], 0);
-                                        let _ = gw_send_raw(&mut port, &[0x03, 0x03, status.head], 0);
-                                        let _ = gw_send_raw(&mut port, &[0x06, 0x04, status.drive_unit, 0x01], 0);
-                                        status.motor_on = true;
-                                        status.drive_select = true;
-                                        thread::sleep(Duration::from_millis(SPIN_UP_DELAY_MS));
-                                    }
-
-                                    // Non-blocking WP query at start of ReadData
-                                    if let Some(wp) = query_write_protect(
-                                        &mut port,
-                                        status.drive_unit,
-                                        status.motor_on,
-                                        status.head,
-                                    ) {
-                                        status.write_protect = wp;
-                                        status.write_protected = wp;
-                                    }
-
-                                    let _ = port.clear(serialport::ClearBuffer::Input);
-                                    thread::sleep(Duration::from_millis(SYNC_DELAY_MS));
-
-                                    status.analyzing = true;
-                                    status.mode = DisplayMode::ReadData;
-                                    status.activity = HwActivity::ReadingAnalyzing;
-                                    status.io_cycle = status.io_cycle.wrapping_add(1);
-
-                                    let diag = read_and_decode_track_diagnostic(
-                                        &mut port,
-                                        status.track,
-                                        &mut status,
-                                        &tx_status,
-                                    );
-                                    for &r in &diag.instant_rpms {
-                                        rpm_sampler.add_sample(r);
-                                    }
-                                    if diag.has_disk && !diag.index_timestamps.is_empty() {
-                                        let avg = rpm_sampler.average();
-                                        if avg > 0 {
-                                            status.rpm = avg;
-                                        }
-                                    }
-                                    status.index = !diag.index_timestamps.is_empty();
-
-                                    process_track_diagnostic(
-                                        &mut status,
-                                        &diag,
-                                        &tx_sound,
-                                    );
-
-                                    if status.sectors_known {
-                                        status.log_msg = format!(
-                                            "read Data: {} Sectors read (Diskette {}k {})",
-                                            status.sectors.len(),
-                                            diag.bitrate,
-                                            if status.density {
-                                                "1.44M HD"
-                                            } else {
-                                                "720K DD"
-                                            }
-                                        );
-                                    } else {
-                                        status.log_msg = format!(
-                                            "read Data: Track {} -> ? (Unknown read)",
-                                            status.track
-                                        );
-                                    }
-                                }
-                                HwCmd::ToggleVerbose => {
-                                    status.verbose_mode = !status.verbose_mode;
-                                    status.sector_log = if status.verbose_mode {
-                                        status.sector_log_verbose.clone()
-                                    } else {
-                                        status.sector_log_standard.clone()
-                                    };
-                                    status.log_msg = format!(
-                                        "Verbose: {}",
-                                        if status.verbose_mode { "ON" } else { "OFF" }
-                                    );
-                                }
-                                HwCmd::ToggleBeep => {
-                                    status.beep_enabled = !status.beep_enabled;
-                                    status.log_msg = format!(
-                                        "Beep: {}",
-                                        if status.beep_enabled { "ON" } else { "OFF" }
-                                    );
-                                }
-                                HwCmd::SetVerbose(v) => {
-                                    status.verbose_mode = v;
-                                    status.sector_log = if status.verbose_mode {
-                                        status.sector_log_verbose.clone()
-                                    } else {
-                                        status.sector_log_standard.clone()
-                                    };
-                                    status.log_msg = format!(
-                                        "Verbose: {}",
-                                        if status.verbose_mode { "ON" } else { "OFF" }
-                                    );
-                                }
-                                HwCmd::SetBeep(b) => {
-                                    status.beep_enabled = b;
-                                    status.log_msg = format!(
-                                        "Beep: {}",
-                                        if status.beep_enabled { "ON" } else { "OFF" }
-                                    );
-                                }
-                                HwCmd::SetMotor(on) => {
-                                    if status.motor_on == on {
-                                        let _ = tx_status.send(status.clone());
-                                    } else {
-                                        let _ = port.clear(serialport::ClearBuffer::All);
-                                        let res = if on {
-                                            let _ = gw_send_raw(&mut port, &[0x0E, 0x03, 0x01], 0);
-                                            let _ = gw_send_raw(&mut port, &[0x0C, 0x03, status.drive_unit], 0);
-                                            let _ = gw_send_raw(&mut port, &[0x03, 0x03, status.head], 0);
-                                            gw_send_raw_timeout(&mut port, &[0x06, 0x04, status.drive_unit, 0x01], 0, Duration::from_millis(150))
-                                        } else {
-                                            gw_send_raw_timeout(&mut port, &[0x06, 0x04, status.drive_unit, 0x00], 0, Duration::from_millis(150))
-                                        };
-
-                                        match res {
-                                            Ok((0, _)) => {
-                                                status.motor_on = on;
-                                                if !on {
-                                                    status.index = false;
-                                                    status.analyzing = false;
-                                                    if status.mode != DisplayMode::None {
-                                                        if status.mode == DisplayMode::RpmMeasure && status.rpm_measure.sample_count > 0 {
-                                                            status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
-                                                        }
-                                                        status.mode = DisplayMode::None;
-                                                    }
-                                                    status.activity = HwActivity::Stopped;
-                                                    status.log_msg = String::from("Motor OFF");
-                                                } else {
-                                                    status.drive_select = true;
-                                                    status.has_disk = true;
-                                                    status.activity = HwActivity::Idle;
-                                                    status.log_msg = String::from("Motor ON");
-                                                }
-                                            }
-                                            Ok((st, _)) => {
-                                                status.log_msg =
-                                                    format!("Motor Error (code {})", st);
-                                            }
-                                            Err(e) => {
-                                                status.log_msg = format!("Motor I/O Error: {}", e);
-                                            }
-                                        }
-                                        let _ = tx_status.send(status.clone());
-                                    }
-                                }
-                                HwCmd::ToggleDriveUnit => {
-                                    let next_unit = if status.drive_unit == 0 { 1 } else { 0 };
-                                    if status.motor_on {
-                                        let _ = gw_send_raw(&mut port, &[0x06, 0x04, status.drive_unit, 0x00], 0);
-                                    }
-                                    let _ = gw_send_raw(&mut port, &[0x0D, 0x02], 0);
-                                    status.drive_unit = next_unit;
-                                    status.unit_id = next_unit;
-                                    ensure_unit_active(
-                                        &mut port,
-                                        status.drive_unit,
-                                        status.motor_on,
-                                        status.head,
-                                    );
-                                    status.drive_select = true;
-                                    let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
-                                    let _ = perform_motor_gated_seek(
-                                        &mut port,
-                                        status.drive_unit,
-                                        0,
-                                        status.motor_on,
-                                        status.head,
-                                        Duration::from_millis(SEEK_TRK0_TIMEOUT_MS),
-                                    );
-                                    let _ = port.set_timeout(Duration::from_millis(500));
-                                    thread::sleep(Duration::from_millis(RECALIBRATE_WAIT_MS));
-
-                                    if let Some(wp) = query_write_protect(
-                                        &mut port,
-                                        status.drive_unit,
-                                        status.motor_on,
-                                        status.head,
-                                    ) {
-                                        status.write_protect = wp;
-                                        status.write_protected = wp;
-                                    }
-
-                                    status.track = 0;
-                                    status.trk0 = true;
-                                    status.sectors.clear();
-                                    status.sectors_known = false;
-                                    status.last_pass_h0 = None;
-                                    status.last_pass_h1 = None;
-                                    status.mode = DisplayMode::None;
-                                    status.activity = if status.motor_on {
-                                        HwActivity::Idle
-                                    } else {
-                                        HwActivity::Stopped
-                                    };
-                                    status.log_msg = format!(
-                                        "Drive {} ({}) selected & Recalibrated Track 0",
-                                        status.drive_unit,
-                                        if status.drive_unit == 0 { "A:" } else { "B:" }
-                                    );
-                                }
-                                HwCmd::SelectUnit(unit) => {
-                                    let target_unit = unit.min(1);
-                                    if target_unit != status.drive_unit {
-                                        if status.motor_on {
-                                            let _ = gw_send_raw(&mut port, &[0x06, 0x04, status.drive_unit, 0x00], 0);
-                                        }
-                                        let _ = gw_send_raw(&mut port, &[0x0D, 0x02], 0);
-                                        status.drive_unit = target_unit;
-                                        status.unit_id = target_unit;
-                                    }
-                                    ensure_unit_active(
-                                        &mut port,
-                                        status.drive_unit,
-                                        status.motor_on,
-                                        status.head,
-                                    );
-                                    status.drive_select = true;
-                                    let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
-                                    let _ = perform_motor_gated_seek(
-                                        &mut port,
-                                        status.drive_unit,
-                                        0,
-                                        status.motor_on,
-                                        status.head,
-                                        Duration::from_millis(SEEK_TRK0_TIMEOUT_MS),
-                                    );
-                                    let _ = port.set_timeout(Duration::from_millis(500));
-                                    thread::sleep(Duration::from_millis(RECALIBRATE_WAIT_MS));
-
-                                    if let Some(wp) = query_write_protect(
-                                        &mut port,
-                                        status.drive_unit,
-                                        status.motor_on,
-                                        status.head,
-                                    ) {
-                                        status.write_protect = wp;
-                                        status.write_protected = wp;
-                                    }
-
-                                    status.track = 0;
-                                    status.trk0 = true;
-                                    status.sectors.clear();
-                                    status.sectors_known = false;
-                                    status.last_pass_h0 = None;
-                                    status.last_pass_h1 = None;
-                                    status.mode = DisplayMode::None;
-                                    status.activity = if status.motor_on {
-                                        HwActivity::Idle
-                                    } else {
-                                        HwActivity::Stopped
-                                    };
-                                    status.log_msg = format!(
-                                        "Select Unit {} & Recalibrate Track 0",
-                                        status.drive_unit
-                                    );
-                                }
+                            if handle_command(
+                                &mut port,
+                                &mut status,
+                                cmd,
+                                &rx_cmd,
+                                &tx_status,
+                            ) {
+                                should_exit = true;
+                                break;
                             }
                             last_keepalive = Instant::now();
-                            let _ = tx_status.send(status.clone());
                         }
 
                         if should_exit {
@@ -3357,7 +3091,6 @@ pub fn hw_thread(
                                                     status.log_msg = format!("RPM: {:.1} RPM (Index Pin 8 OK)", status.rpm_measure.instant_rpm);
                                                     rpm_sampler.add_sample(rpm);
                                                     recorded = true;
-                                                    let _ = tx_status.send(status.clone());
                                                 }
                                             }
                                         }
@@ -3373,12 +3106,10 @@ pub fn hw_thread(
                                             status.rpm_display = format!("{:.1} RPM", status.rpm_measure.instant_rpm);
                                             status.log_msg = format!("RPM: {:.1} RPM (MFM header sync - No index Pin 8)", status.rpm_measure.instant_rpm);
                                             rpm_sampler.add_sample(status.rpm);
-                                            let _ = tx_status.send(status.clone());
                                         } else {
                                             status.rpm = 0;
                                             status.index = false;
                                             status.log_msg = String::from("RPM: No Index pulse detected (Pin 8)");
-                                            let _ = tx_status.send(status.clone());
                                         }
                                     }
                                 }
@@ -3388,13 +3119,13 @@ pub fn hw_thread(
                                     ensure_unit_active(&mut port, status.drive_unit, status.motor_on, status.head);
                                     status.index = false;
                                     status.log_msg = format!("RPM Test I/O Error: {}", e);
-                                    let _ = tx_status.send(status.clone());
                                 }
                             }
                             last_keepalive = Instant::now();
+                            let _ = tx_status.send(status.clone());
+                            thread::sleep(Duration::from_millis(15));
                         } else if status.analyzing
                             && status.motor_on
-                            && status.has_disk
                         {
                             if status.head_select == HeadSelection::Both {
                                 let next_head = if status.head == 0 { 1 } else { 0 };
@@ -3428,6 +3159,34 @@ pub fn hw_thread(
                             status.index = !diag.index_timestamps.is_empty();
 
                             process_track_diagnostic(&mut status, &diag, &tx_sound);
+
+                            if status.sectors_known {
+                                if status.mode == DisplayMode::ReadData {
+                                    status.log_msg = format!(
+                                        "read Data: {} Sectors read (Diskette {}k {})",
+                                        status.sectors.len(),
+                                        diag.bitrate,
+                                        if status.density { "1.44M HD" } else { "720K DD" }
+                                    );
+                                } else {
+                                    status.log_msg = format!(
+                                        "Analyze: {}k ({}) - {} real sectors (Alignment: {:.1}%)",
+                                        diag.bitrate,
+                                        if status.density { "1.44M HD" } else { "720K DD" },
+                                        status.sectors.len(),
+                                        diag.alignment_pct
+                                    );
+                                }
+                            } else if !diag.has_disk || diag.read_status == DriveReadStatus::NoDiskOrNoIndex {
+                                status.log_msg = format!("Analyze: Track {} -> No Disk / No Index pulse", status.track);
+                            } else {
+                                status.log_msg = format!("Analyze: Track {} -> ? (No valid IDAM sector found)", status.track);
+                            }
+
+                            if !diag.has_disk || diag.read_status == DriveReadStatus::NoDiskOrNoIndex {
+                                thread::sleep(Duration::from_millis(20));
+                            }
+                            let _ = tx_status.send(status.clone());
                         }
 
                         if !status.motor_on {
@@ -3456,8 +3215,8 @@ pub fn hw_thread(
                             break;
                         }
 
-                        if !status.analyzing {
-                            thread::sleep(Duration::from_millis(20));
+                        if !status.analyzing && status.mode != DisplayMode::RpmMeasure {
+                            thread::sleep(Duration::from_millis(15));
                         }
                     }
 
@@ -3498,6 +3257,8 @@ pub fn hw_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::calculate_radar_pitch;
+
     #[test]
     fn test_write_protect_status_fields() {
         let mut status = DriveStatus::default();
@@ -3574,6 +3335,7 @@ mod tests {
         let (tx_sound, rx_sound) = crossbeam_channel::unbounded();
         let mut status = DriveStatus {
             track: 10,
+            target_track: 10,
             head: 0,
             verbose_mode: false,
             beep_enabled: true,
@@ -3611,8 +3373,8 @@ mod tests {
         assert!(status.sector_log_verbose[0].contains("T:10 H:0 Rate:500k MFM [ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ]"));
         assert!(status.sector_log_verbose[0].contains("CRC-DAT: Sec 2"));
 
-        let beeps: Vec<BeepType> = rx_sound.try_iter().collect();
-        assert_eq!(beeps, vec![BeepType::Error]);
+        let beeps: Vec<AudioEvent> = rx_sound.try_iter().collect();
+        assert_eq!(beeps, vec![AudioEvent::OffTrackOrCrcError]);
     }
 
     #[test]
@@ -3620,6 +3382,7 @@ mod tests {
         let (tx_sound, rx_sound) = crossbeam_channel::unbounded();
         let mut status = DriveStatus {
             track: 10,
+            target_track: 10,
             head: 0,
             verbose_mode: false,
             beep_enabled: true,
@@ -3655,8 +3418,8 @@ mod tests {
         assert!(!status.sector_log_verbose[0].contains("200.1ms"));
         assert!(status.sector_log_verbose[0].contains("Gap0:----"));
 
-        let beeps: Vec<BeepType> = rx_sound.try_iter().collect();
-        assert_eq!(beeps, vec![BeepType::Ok]);
+        let beeps: Vec<AudioEvent> = rx_sound.try_iter().collect();
+        assert_eq!(beeps, vec![AudioEvent::PerfectAlignment { pitch_hz: calculate_radar_pitch(99) }]);
     }
 
     #[test]
@@ -3664,6 +3427,7 @@ mod tests {
         let (tx_sound, rx_sound) = crossbeam_channel::unbounded();
         let mut status = DriveStatus {
             track: 10,
+            target_track: 10,
             head: 0,
             verbose_mode: true,
             beep_enabled: true,
@@ -3698,8 +3462,8 @@ mod tests {
         assert!(status.sector_log[0].contains("T:10 H:0 Rate:500k MFM [ ░ ░ ░ ■ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ]"));
         assert_eq!(status.sector_log_standard[0], "T:10 H:0 Rate:500k MFM [ ░ ░ ░ ■ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] (3/18 MISSING: Sec 1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)");
 
-        let beeps: Vec<BeepType> = rx_sound.try_iter().collect();
-        assert_eq!(beeps, vec![BeepType::Ok]);
+        let beeps: Vec<AudioEvent> = rx_sound.try_iter().collect();
+        assert_eq!(beeps, vec![AudioEvent::PerfectAlignment { pitch_hz: calculate_radar_pitch(99) }]);
     }
 
     #[test]
@@ -3707,7 +3471,9 @@ mod tests {
         let (tx_sound, rx_sound) = crossbeam_channel::unbounded();
         let mut status = DriveStatus {
             track: 5,
+            target_track: 5,
             head: 1,
+            head_select: HeadSelection::Head1,
             verbose_mode: false,
             beep_enabled: true,
             ..Default::default()
@@ -3739,8 +3505,8 @@ mod tests {
             "T:05 H:1 Rate:---k --- [ ? ]                                   (0/0 NO DATA / NO DISK) IL:--- Gap0:---- Q:--%"
         );
 
-        let beeps: Vec<BeepType> = rx_sound.try_iter().collect();
-        assert_eq!(beeps, vec![BeepType::Error]);
+        let beeps: Vec<AudioEvent> = rx_sound.try_iter().collect();
+        assert_eq!(beeps, vec![AudioEvent::OffTrackOrCrcError]);
     }
 
     #[test]
@@ -3748,6 +3514,7 @@ mod tests {
         let (tx_sound, rx_sound) = crossbeam_channel::unbounded();
         let mut status = DriveStatus {
             track: 10,
+            target_track: 10,
             head: 0,
             verbose_mode: true,
             beep_enabled: true,
@@ -3782,8 +3549,8 @@ mod tests {
         assert!(status.sector_log[0].contains("CRC-DAT: Sec 1"));
         assert_eq!(status.sector_log_standard[0], "T:10 H:0 Rate:500k MFM [ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] (1/18 CRC-DAT: Sec 1)");
 
-        let beeps: Vec<BeepType> = rx_sound.try_iter().collect();
-        assert_eq!(beeps, vec![BeepType::Error]);
+        let beeps: Vec<AudioEvent> = rx_sound.try_iter().collect();
+        assert_eq!(beeps, vec![AudioEvent::OffTrackOrCrcError]);
     }
 
     #[test]
@@ -3791,6 +3558,7 @@ mod tests {
         let (tx_sound, rx_sound) = crossbeam_channel::unbounded();
         let mut status = DriveStatus {
             track: 10,
+            target_track: 10,
             head: 0,
             verbose_mode: false,
             beep_enabled: false,
@@ -3817,7 +3585,7 @@ mod tests {
 
         process_track_diagnostic(&mut status, &diag, &tx_sound);
 
-        let beeps: Vec<BeepType> = rx_sound.try_iter().collect();
+        let beeps: Vec<AudioEvent> = rx_sound.try_iter().collect();
         assert!(beeps.is_empty());
     }
 
@@ -4111,8 +3879,10 @@ mod tests {
     #[test]
     fn test_electromechanical_delays_constants() {
         assert_eq!(HEAD_SWITCH_SETTLE_MS, 1);
+        assert_eq!(STEPPER_WAKEUP_DELAY_MS, 15);
         assert_eq!(HEAD_SETTLE_TIME_MS, 30);
-        assert_eq!(SPIN_UP_DELAY_MS, 350);
+        assert_eq!(DEFAULT_SERIAL_TIMEOUT_MS, 1000);
+        assert_eq!(SPIN_UP_DELAY_MS, 300);
         assert_eq!(SYNC_DELAY_MS, 30);
         assert_eq!(DWELL_TIME_TRK0_MS, 60);
         assert_eq!(SEEK_TRK0_TIMEOUT_MS, 3000);
@@ -4125,6 +3895,7 @@ mod tests {
         // Software state is out-of-sync: status.track = 70, but physical head reads track 10
         let mut status = DriveStatus {
             track: 70,
+            target_track: 10,
             head: 0,
             verbose_mode: false,
             beep_enabled: true,
@@ -4176,8 +3947,8 @@ mod tests {
         assert!(status.sector_log_verbose[0].contains("T:10 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK)"));
 
         // 4. Audio confirmation confirms perfect pass
-        let beeps: Vec<BeepType> = rx_sound.try_iter().collect();
-        assert_eq!(beeps, vec![BeepType::Ok]);
+        let beeps: Vec<AudioEvent> = rx_sound.try_iter().collect();
+        assert_eq!(beeps, vec![AudioEvent::PerfectAlignment { pitch_hz: calculate_radar_pitch(99) }]);
     }
 
     #[test]
@@ -4263,7 +4034,7 @@ mod tests {
         // 1. Motor & unit activation
         status.motor_on = true;
         status.drive_select = true;
-        assert_eq!(SPIN_UP_DELAY_MS, 350);
+        assert_eq!(SPIN_UP_DELAY_MS, 300);
         assert_eq!(SYNC_DELAY_MS, 30);
 
         // 2. State transition to Analyze
@@ -4275,6 +4046,89 @@ mod tests {
         assert!(status.drive_select);
         assert!(status.analyzing);
         assert_eq!(status.mode, DisplayMode::Analyze);
+        assert_eq!(status.display_mode(), DisplayMode::Analyze);
+        assert_eq!(status.activity, HwActivity::ReadingAnalyzing);
+    }
+
+    #[test]
+    fn test_start_analysis_synchronous_spinup_sequence() {
+        let mut status = DriveStatus {
+            motor_on: false,
+            analyzing: false,
+            mode: DisplayMode::None,
+            activity: HwActivity::Stopped,
+            drive_unit: 0,
+            unit_id: 0,
+            head: 0,
+            ..Default::default()
+        };
+
+        // Simulating HwCmd::StartAnalysis / HwCmd::Analyze from cold motor
+        let was_motor_off = !status.motor_on;
+        assert!(was_motor_off);
+
+        // 1. Motor activation & drive select
+        status.motor_on = true;
+        status.drive_select = true;
+        // 2. Hardware stabilization delay (300 ms)
+        assert_eq!(SPIN_UP_DELAY_MS, 300);
+        // 3. State transition to Analyze
+        status.analyzing = true;
+        status.mode = DisplayMode::Analyze;
+        status.activity = HwActivity::ReadingAnalyzing;
+
+        assert!(status.motor_on);
+        assert!(status.analyzing);
+        assert_eq!(status.mode, DisplayMode::Analyze);
+        assert_eq!(status.display_mode(), DisplayMode::Analyze);
+        assert_eq!(status.activity, HwActivity::ReadingAnalyzing);
+    }
+
+    #[test]
+    fn test_analysis_persistence_across_isolated_read_failures() {
+        let (tx_sound, _rx_sound) = crossbeam_channel::unbounded();
+        let mut status = DriveStatus {
+            motor_on: true,
+            analyzing: true,
+            mode: DisplayMode::Analyze,
+            activity: HwActivity::ReadingAnalyzing,
+            drive_unit: 0,
+            unit_id: 0,
+            head: 0,
+            track: 40,
+            ..Default::default()
+        };
+
+        // An isolated pass fails or has missing index / no disk
+        let diag_failed = TrackAnalysisResult {
+            has_disk: false,
+            bitrate: 500,
+            sector_count: 0,
+            sectors_known: false,
+            sectors: Vec::new(),
+            on_track_count: 0,
+            off_track_count: 0,
+            off_track_details: String::from("NONE"),
+            crc_err_count: 0,
+            alignment_pct: 0.0,
+            index_timestamps: Vec::new(),
+            instant_rpms: Vec::new(),
+            rev_time_ms: 200.0,
+            rpm_instant: None,
+            jitter_pct: None,
+            gap0_us: None,
+            pll_quality_pct: None,
+            interleave: None,
+            read_status: DriveReadStatus::NoDiskOrNoIndex,
+        };
+
+        process_track_diagnostic(&mut status, &diag_failed, &tx_sound);
+
+        // Verify analysis state is strictly preserved
+        assert!(status.analyzing);
+        assert_eq!(status.mode, DisplayMode::Analyze);
+        assert_eq!(status.display_mode(), DisplayMode::Analyze);
+        assert!(status.motor_on);
         assert_eq!(status.activity, HwActivity::ReadingAnalyzing);
     }
 
@@ -4835,6 +4689,69 @@ mod tests {
         let next_head = if status.head == 0 { 1 } else { 0 };
         status.head = next_head;
         assert_eq!(status.head, 0);
+    }
+
+    #[test]
+    fn test_drive_read_status_no_disk_or_no_index_handling() {
+        let (tx_sound, _rx_sound) = crossbeam_channel::unbounded();
+        let mut status = DriveStatus {
+            track: 10,
+            head: 0,
+            has_disk: true,
+            analyzing: true,
+            motor_on: true,
+            ..Default::default()
+        };
+
+        let diag_no_disk = TrackAnalysisResult {
+            has_disk: false,
+            bitrate: 500,
+            sector_count: 0,
+            sectors_known: false,
+            sectors: Vec::new(),
+            on_track_count: 0,
+            off_track_count: 0,
+            off_track_details: String::from("NONE"),
+            crc_err_count: 0,
+            alignment_pct: 0.0,
+            index_timestamps: Vec::new(),
+            instant_rpms: Vec::new(),
+            rev_time_ms: 200.0,
+            rpm_instant: None,
+            jitter_pct: None,
+            gap0_us: None,
+            pll_quality_pct: None,
+            interleave: None,
+            read_status: DriveReadStatus::NoDiskOrNoIndex,
+        };
+
+        process_track_diagnostic(&mut status, &diag_no_disk, &tx_sound);
+
+        assert!(!status.has_disk);
+        assert!(!status.sectors_known);
+        assert_eq!(status.alignment_pct, 0.0);
+        assert_eq!(status.on_track_count, 0);
+        assert_eq!(status.read_status, DriveReadStatus::NoDiskOrNoIndex);
+    }
+
+    #[test]
+    fn test_nominal_capture_timing_parameters() {
+        assert_eq!(DEFAULT_SERIAL_TIMEOUT_MS, 1000);
+        assert_eq!(SPIN_UP_DELAY_MS, 300);
+        assert_eq!(STEPPER_WAKEUP_DELAY_MS, 15);
+    }
+
+    #[test]
+    fn test_read_flux_cmd_packet_structure() {
+        let revs: u16 = 3;
+        let b_revs = revs.to_le_bytes();
+        let read_cmd = [0x07, 0x08, 0x00, 0x00, 0x00, 0x00, b_revs[0], b_revs[1]];
+        assert_eq!(read_cmd, [0x07, 0x08, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00]);
+
+        let revs2: u16 = 2;
+        let b_revs2 = revs2.to_le_bytes();
+        let read_cmd2 = [0x07, 0x08, 0x00, 0x00, 0x00, 0x00, b_revs2[0], b_revs2[1]];
+        assert_eq!(read_cmd2, [0x07, 0x08, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00]);
     }
 }
 

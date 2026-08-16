@@ -20,11 +20,13 @@ use std::{
 };
 
 mod app;
+mod audio;
 mod hw;
 mod ui;
 
 use crossbeam_channel::unbounded;
 pub use app::*;
+pub use audio::*;
 pub use hw::{hw_thread, DisplayMode, DriveStatus, HwActivity, HwCmd};
 pub use ui::*;
 
@@ -73,17 +75,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
 
     let mut app = App::with_drive_unit(drive_unit);
-    let mut status = DriveStatus {
-        drive_unit,
-        unit_id: drive_unit,
-        ..Default::default()
-    };
 
     loop {
-        while let Ok(new_status) = rx_status.try_recv() {
-            status = new_status;
-            app.status = status.clone();
+        while let Ok(msg) = rx_status.try_recv() {
+            app.handle_hw_message(msg);
         }
+        let status = &app.status;
 
         terminal.draw(|f| {
             let chunks = Layout::default()
@@ -227,7 +224,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Line::from(format!(" RPM  : {}", rpm_display)),
                 Line::from(format!(
                     " BEEP : {}",
-                    if status.beep_enabled { "ON " } else { "OFF" }
+                    format_beep_status(status.beep_enabled)
                 )),
                 Line::from(format!(
                     " VERB : {}",
@@ -580,7 +577,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     )));
 
                     if status.head_select == HeadSelection::Both {
-                        let both_lines = build_both_mode_display_lines(&status);
+                        let both_lines = build_both_mode_display_lines(status);
                         for line in both_lines {
                             right_lines.push(line);
                         }
@@ -681,7 +678,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         "    A = Analyze     : Real-time track analysis & alignment",
                     ));
                     right_lines.push(Line::from(
-                        "    B = Beep        : Toggle audio feedback on/off",
+                        "    B = Beep        : Toggle Audio Radar (Pitch-variometer)",
                     ));
                     right_lines.push(Line::from(
                         "    D = read Data   : Read and test sector CRC integrity",
@@ -730,7 +727,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             f.render_widget(right_panel, lower_chunks[1]);
         })?;
 
-        if event::poll(Duration::from_millis(30))? {
+        if event::poll(Duration::from_millis(15))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
@@ -754,22 +751,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                         break;
                     }
                     KeyCode::Esc => {
-                        status.motor_on = false;
-                        status.analyzing = false;
-                        if status.mode == DisplayMode::RpmMeasure && status.rpm_measure.sample_count > 0 {
-                            status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
-                        }
-                        status.mode = DisplayMode::None;
-                        status.activity = HwActivity::Stopped;
-                        status.index = false;
-                        status.log_msg = String::from("Stop / Motor OFF (Safe to change disk)");
                         let _ = tx_cmd.send(HwCmd::Stop);
                     }
                     KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right | KeyCode::Up => {
-                        let _ = tx_cmd.send(HwCmd::Seek(status.track.saturating_add(1)));
+                        let _ = tx_cmd.send(HwCmd::Seek(app.status.track.saturating_add(1)));
                     }
                     KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Left | KeyCode::Down => {
-                        let _ = tx_cmd.send(HwCmd::Seek(status.track.saturating_sub(1)));
+                        let _ = tx_cmd.send(HwCmd::Seek(app.status.track.saturating_sub(1)));
                     }
                     KeyCode::Char(c) if c.is_ascii_digit() => {
                         let track = (c.to_digit(10).unwrap() as u8) * 10;
@@ -782,24 +770,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let _ = tx_cmd.send(HwCmd::MeasureRpm);
                     }
                     KeyCode::Char('m') | KeyCode::Char('M') => {
-                        status.motor_on = !status.motor_on;
-                        if !status.motor_on {
-                            status.index = false;
-                            status.analyzing = false;
-                            if status.mode != DisplayMode::None {
-                                if status.mode == DisplayMode::RpmMeasure && status.rpm_measure.sample_count > 0 {
-                                    status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
-                                }
-                                status.mode = DisplayMode::None;
-                            }
-                            status.activity = HwActivity::Stopped;
-                            status.log_msg = String::from("Motor OFF (M key)");
-                        } else {
-                            status.drive_select = true;
-                            status.has_disk = true;
-                            status.activity = HwActivity::Idle;
-                            status.log_msg = String::from("Motor ON (M key)");
-                        }
                         let _ = tx_cmd.send(HwCmd::ToggleMotor);
                     }
                     KeyCode::Char('r') | KeyCode::Char('R') => {
@@ -813,6 +783,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let _ = tx_cmd.send(HwCmd::ZeroTrack);
                     }
                     KeyCode::Char('a') | KeyCode::Char('A') => {
+                        app.handle_action(Action::Analyze);
                         let _ = tx_cmd.send(HwCmd::Analyze);
                     }
                     KeyCode::Char('d') | KeyCode::Char('D') => {
@@ -977,6 +948,15 @@ mod tests {
             _ => panic!("Expected key U to match"),
         }
         assert!(matches!(rx_cmd.try_recv().unwrap(), HwCmd::ToggleDriveUnit));
+
+        let key_a = KeyCode::Char('a');
+        match key_a {
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                let _ = tx_cmd.send(HwCmd::Analyze);
+            }
+            _ => panic!("Expected key A to match"),
+        }
+        assert!(matches!(rx_cmd.try_recv().unwrap(), HwCmd::Analyze));
 
         // Backspace PanicReset mapping
         let key_backspace = KeyCode::Backspace;

@@ -109,6 +109,15 @@ pub fn format_rpm_display(motor_on: bool, rpm: u32) -> String {
     }
 }
 
+/// Formats the audio radar beep status string
+pub fn format_beep_status(beep_enabled: bool) -> &'static str {
+    if beep_enabled {
+        "ON (Radar)"
+    } else {
+        "OFF"
+    }
+}
+
 /// Builds the Live RPM continuous measurement metric string:
 /// `RPM: 300.1 (Avg: 300.0 | Min: 299.8 | Max: 300.2 | Jitter: ±0.07%)`
 pub fn format_rpm_metric_line(meas: &crate::hw::RpmMeasurement) -> String {
