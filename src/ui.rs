@@ -276,12 +276,15 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
                 let missing_secs = extract_sector_ids_from_error(line, "MISSING: Sec ");
 
                 let is_unformatted = line.contains("NO DATA") || line.contains("NO DISK") || (line.contains("MISSING") && !line.contains("MISSING: Sec"));
+                let is_misaligned = line.contains("MISALIGNED");
 
                 let mut block_idx = 1usize;
                 for ch in ribbon_inner.chars() {
                     if ch == '█' || ch == '■' {
                         let style = if is_unformatted {
                             Style::default().fg(Color::DarkGray)
+                        } else if is_misaligned {
+                            Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD)
                         } else if crc_dat_secs.contains(&block_idx) || crc_id_secs.contains(&block_idx) {
                             Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
                         } else if no_dam_secs.contains(&block_idx) || del_dam_secs.contains(&block_idx) {
@@ -320,7 +323,9 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
 
             for token in remaining.split_whitespace() {
                 let style = if token.starts_with('(') && token.ends_with(')') {
-                    if token.contains("OK") {
+                    if token.contains("MISALIGNED") {
+                        Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD)
+                    } else if token.contains("OK") {
                         Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
                     } else if token.contains("CRC-") || token.contains("NO DATA") || token.contains("NO DISK") || token.contains("MISSING") || token.contains("BAD") {
                         Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
@@ -330,7 +335,9 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
                         Style::default().fg(Color::White)
                     }
                 } else if token.starts_with('(') {
-                    if token.contains("CRC-") || token.contains("NO") || token.contains("MISSING") || token.contains("BAD") {
+                    if token.contains("MISALIGNED") {
+                        Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD)
+                    } else if token.contains("CRC-") || token.contains("NO") || token.contains("MISSING") || token.contains("BAD") {
                         Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
                     } else if token.contains("NO-DAM") || token.contains("DEL-DAM") || token.contains("OFF-TRK") {
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
@@ -338,13 +345,17 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
                         Style::default().fg(Color::White)
                     }
                 } else if token.ends_with(')') {
-                    if token.contains("OK") {
+                    if token.contains("MISALIGNED") {
+                        Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD)
+                    } else if token.contains("OK") {
                         Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
                     } else if token.contains('/') && !token.contains("CRC") && !token.contains("NO") && !token.contains("MISSING") && !token.contains("BAD") {
                         Style::default().fg(Color::White)
                     } else {
                         Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
                     }
+                } else if token.contains("MISALIGNED") {
+                    Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::White)
                 };
@@ -376,6 +387,10 @@ pub fn get_standard_line_style(line: &str, _expected_count: u8) -> Style {
         || (line.contains("[ ? ]") && (line.contains("MISSING") || line.contains("NO DATA") || line.contains("NO DISK")))
     {
         return Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD);
+    }
+
+    if line.contains("MISALIGNED") {
+        return Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD);
     }
 
     if line.contains("NO-DAM")
@@ -435,12 +450,15 @@ pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'st
                 let missing_secs = extract_sector_ids_from_error(line, "MISSING: Sec ");
 
                 let is_unformatted = line.contains("NO DATA") || line.contains("NO DISK") || (line.contains("MISSING") && !line.contains("MISSING: Sec"));
+                let is_misaligned = line.contains("MISALIGNED");
 
                 let mut block_idx = 1usize;
                 for ch in ribbon_inner.chars() {
                     if ch == '■' || ch == '█' {
                         let style = if is_unformatted {
                             Style::default().fg(Color::DarkGray)
+                        } else if is_misaligned {
+                            Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD)
                         } else if crc_dat_secs.contains(&block_idx) || crc_id_secs.contains(&block_idx) {
                             Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
                         } else if no_dam_secs.contains(&block_idx) || del_dam_secs.contains(&block_idx) {
@@ -479,7 +497,9 @@ pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'st
 
             for token in remaining.split_whitespace() {
                 let style = if token.starts_with('(') && token.ends_with(')') {
-                    if token.contains("OK") {
+                    if token.contains("MISALIGNED") {
+                        Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD)
+                    } else if token.contains("OK") {
                         Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
                     } else if token.contains("CRC-") || token.contains("NO DATA") || token.contains("NO DISK") || token.contains("MISSING") {
                         Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
@@ -489,7 +509,9 @@ pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'st
                         Style::default().fg(Color::White)
                     }
                 } else if token.starts_with('(') {
-                    if token.contains("CRC-") || token.contains("NO") || token.contains("MISSING") {
+                    if token.contains("MISALIGNED") {
+                        Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD)
+                    } else if token.contains("CRC-") || token.contains("NO") || token.contains("MISSING") {
                         Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
                     } else if token.contains("NO-DAM") || token.contains("DEL-DAM") || token.contains("OFF-TRK") {
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
@@ -497,13 +519,17 @@ pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'st
                         Style::default().fg(Color::White)
                     }
                 } else if token.ends_with(')') {
-                    if token.contains("OK") {
+                    if token.contains("MISALIGNED") {
+                        Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD)
+                    } else if token.contains("OK") {
                         Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
                     } else if token.contains('/') && !token.contains("CRC") && !token.contains("NO") && !token.contains("MISSING") {
                         Style::default().fg(Color::White)
                     } else {
                         Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
                     }
+                } else if token.contains("MISALIGNED") {
+                    Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD)
                 } else if token.starts_with("IL:") {
                     if token == "IL:---" {
                         Style::default().fg(Color::DarkGray)
@@ -559,6 +585,10 @@ pub fn get_verbose_line_style(line: &str, _expected_count: u8) -> Style {
         || (line.contains("[ ? ]") && (line.contains("MISSING") || line.contains("NO DATA") || line.contains("NO DISK")))
     {
         return Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD);
+    }
+
+    if line.contains("MISALIGNED") {
+        return Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD);
     }
 
     if line.contains("NO-DAM")

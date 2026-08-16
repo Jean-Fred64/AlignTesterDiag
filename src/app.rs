@@ -119,6 +119,8 @@ pub struct BothModeMetrics {
     pub alignment_pct: f32,
     pub total_expected: u32,
     pub total_ok: u32,
+    pub total_off_track: u32,
+    pub off_track_details: String,
     pub total_crc_err: u32,
     pub crc_integrity_pct: f32,
     pub is_degraded: bool,
@@ -252,31 +254,39 @@ impl App {
             18
         };
 
-        let (h0_ok, h0_exp) = pass_h0
+        let (h0_ok, h0_exp, h0_off) = pass_h0
             .map(|p| {
-                (
-                    p.ok_count as u32,
-                    if p.expected_count > 0 {
-                        p.expected_count as u32
-                    } else {
-                        expected_per_head
-                    },
-                )
+                let exp = if p.expected_count > 0 {
+                    p.expected_count as u32
+                } else {
+                    expected_per_head
+                };
+                let ok = p.ok_count as u32;
+                let off = if p.track_id != p.track {
+                    exp
+                } else {
+                    exp.saturating_sub(ok)
+                };
+                (ok, exp, off)
             })
-            .unwrap_or((0, expected_per_head));
+            .unwrap_or((0, expected_per_head, 0));
 
-        let (h1_ok, h1_exp) = pass_h1
+        let (h1_ok, h1_exp, h1_off) = pass_h1
             .map(|p| {
-                (
-                    p.ok_count as u32,
-                    if p.expected_count > 0 {
-                        p.expected_count as u32
-                    } else {
-                        expected_per_head
-                    },
-                )
+                let exp = if p.expected_count > 0 {
+                    p.expected_count as u32
+                } else {
+                    expected_per_head
+                };
+                let ok = p.ok_count as u32;
+                let off = if p.track_id != p.track {
+                    exp
+                } else {
+                    exp.saturating_sub(ok)
+                };
+                (ok, exp, off)
             })
-            .unwrap_or((0, expected_per_head));
+            .unwrap_or((0, expected_per_head, 0));
 
         let total_ok = h0_ok + h1_ok;
         let total_expected = (h0_exp + h1_exp).max(1);
@@ -285,6 +295,63 @@ impl App {
             (total_ok as f32 / total_expected as f32) * 100.0
         } else {
             0.0
+        };
+
+        let total_off_track = match (pass_h0, pass_h1) {
+            (Some(p0), Some(p1)) => {
+                let mut off = 0;
+                if p0.track_id != p0.track {
+                    off += p0.expected_count as u32;
+                }
+                if p1.track_id != p1.track {
+                    off += p1.expected_count as u32;
+                }
+                if off == 0 {
+                    h0_off + h1_off
+                } else {
+                    off
+                }
+            }
+            (Some(p), None) => {
+                if p.track_id != p.track {
+                    p.expected_count as u32
+                } else {
+                    h0_off
+                }
+            }
+            (None, Some(p)) => {
+                if p.track_id != p.track {
+                    p.expected_count as u32
+                } else {
+                    h1_off
+                }
+            }
+            (None, None) => 0,
+        };
+
+        let off_track_details = match (pass_h0, pass_h1) {
+            (Some(p0), Some(p1)) if p0.track_id != p0.track && p1.track_id != p1.track => {
+                format!("MISMATCH: Track {} on Head 0, Track {} on Head 1", p0.track_id, p1.track_id)
+            }
+            (Some(_), Some(p1)) if p1.track_id != p1.track => {
+                format!("MISMATCH: Track {} on Head 1", p1.track_id)
+            }
+            (Some(p0), Some(_)) if p0.track_id != p0.track => {
+                format!("MISMATCH: Track {} on Head 0", p0.track_id)
+            }
+            (Some(p0), None) if p0.track_id != p0.track => {
+                format!("MISMATCH: Track {} on Head 0", p0.track_id)
+            }
+            (None, Some(p1)) if p1.track_id != p1.track => {
+                format!("MISMATCH: Track {} on Head 1", p1.track_id)
+            }
+            _ => {
+                if total_off_track == 0 {
+                    String::from("NONE (Perfect)")
+                } else {
+                    String::from("OFF-TRK")
+                }
+            }
         };
 
         let h0_is_bad = pass_h0.map(|p| !p.is_ok).unwrap_or(false);
@@ -298,6 +365,8 @@ impl App {
             alignment_pct,
             total_expected,
             total_ok,
+            total_off_track,
+            off_track_details,
             total_crc_err,
             crc_integrity_pct,
             is_degraded,

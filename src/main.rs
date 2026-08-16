@@ -450,7 +450,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     )));
                     right_lines.push(Line::from(""));
 
-                    let (disp_align_pct, disp_expected_sectors, disp_crc_text, disp_crc_color) =
+                    let (disp_align_pct, disp_in_track_sectors, disp_off_track_count, disp_off_track_details, disp_crc_text, disp_crc_color) =
                         if status.head_select == HeadSelection::Both {
                             let both_metrics = app.compute_both_mode_metrics();
                             let crc_txt = if both_metrics.total_crc_err == 0 && both_metrics.alignment_pct >= 99.9 {
@@ -467,7 +467,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                             };
                             (
                                 both_metrics.alignment_pct,
-                                both_metrics.total_expected,
+                                both_metrics.total_ok,
+                                both_metrics.total_off_track,
+                                both_metrics.off_track_details,
                                 crc_txt,
                                 crc_col,
                             )
@@ -485,6 +487,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                             (
                                 status.alignment_pct,
                                 status.on_track_count,
+                                status.off_track_count,
+                                status.off_track_details.clone(),
                                 crc_txt,
                                 crc_col,
                             )
@@ -492,7 +496,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                     let align_color = if disp_align_pct >= 95.0 {
                         Color::Green
-                    } else if disp_align_pct >= 80.0 {
+                    } else if disp_align_pct >= 90.0 {
+                        Color::LightGreen
+                    } else if disp_align_pct >= 70.0 {
                         Color::Yellow
                     } else {
                         Color::Red
@@ -523,14 +529,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                             Style::default().fg(Color::White),
                         ),
                         Span::styled(
-                            format!("{} sectors", disp_expected_sectors),
+                            format!("{} sectors", disp_in_track_sectors),
                             Style::default()
                                 .fg(Color::Green)
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ]));
 
-                    let off_color = if status.off_track_count == 0 {
+                    let off_color = if disp_off_track_count == 0 {
                         Color::Green
                     } else {
                         Color::Red
@@ -541,7 +547,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             Style::default().fg(Color::White),
                         ),
                         Span::styled(
-                            format!("{} ({})", status.off_track_count, status.off_track_details),
+                            format!("{} ({})", disp_off_track_count, disp_off_track_details),
                             Style::default().fg(off_color).add_modifier(Modifier::BOLD),
                         ),
                     ]));
@@ -1608,6 +1614,68 @@ mod tests {
         assert_eq!(app0.drive_unit, 1);
         assert_eq!(app0.status.drive_unit, 1);
         assert_eq!(app0.status.unit_id, 1);
+    }
+
+    #[test]
+    fn test_misaligned_ribbon_spans_coloring() {
+        let std_line = "T:40 H:1 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 MISALIGNED T:41)";
+        let std_spans = build_standard_line_spans(std_line, 18);
+        // Ribbon block spans should have Orange/Red color
+        let misaligned_blocks: Vec<_> = std_spans
+            .iter()
+            .filter(|s| s.content == "■ " && s.style.fg == Some(Color::Rgb(255, 140, 0)))
+            .collect();
+        assert_eq!(misaligned_blocks.len(), 18);
+
+        // Status token should have Orange/Red color
+        let misaligned_tokens: Vec<_> = std_spans
+            .iter()
+            .filter(|s| s.content.contains("MISALIGNED") && s.style.fg == Some(Color::Rgb(255, 140, 0)))
+            .collect();
+        assert!(!misaligned_tokens.is_empty());
+
+        let verb_line = "T:40 H:1 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 MISALIGNED T:41) IL:1:1 Gap0:1440µs Q:95%";
+        let verb_spans = build_verbose_line_spans(verb_line, 18);
+        let verb_misaligned_blocks: Vec<_> = verb_spans
+            .iter()
+            .filter(|s| s.content == "■ " && s.style.fg == Some(Color::Rgb(255, 140, 0)))
+            .collect();
+        assert_eq!(verb_misaligned_blocks.len(), 18);
+
+        // Line styles
+        assert_eq!(
+            get_standard_line_style(std_line, 18),
+            Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(
+            get_verbose_line_style(verb_line, 18),
+            Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn test_both_mode_metrics_50_pct_and_mismatch() {
+        let pass_h0 = DiagnosticPass::with_details(
+            40, 0, 500,
+            "T:40 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK)".into(),
+            "T:40 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK) IL:1:1 Gap0:1440µs Q:98%".into(),
+            18, 18, 0, 98, true,
+        );
+
+        let mut pass_h1 = DiagnosticPass::with_details(
+            40, 1, 500,
+            "T:40 H:1 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 MISALIGNED T:41)".into(),
+            "T:40 H:1 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 MISALIGNED T:41) IL:1:1 Gap0:1440µs Q:95%".into(),
+            0, 18, 0, 95, false,
+        );
+        pass_h1.track_id = 41;
+
+        let metrics = App::compute_both_metrics_from_passes(Some(&pass_h0), Some(&pass_h1), 18);
+        assert_eq!(metrics.alignment_pct, 50.0);
+        assert_eq!(metrics.total_ok, 18);
+        assert_eq!(metrics.total_expected, 36);
+        assert_eq!(metrics.total_off_track, 18);
+        assert_eq!(metrics.off_track_details, "MISMATCH: Track 41 on Head 1");
     }
 }
 

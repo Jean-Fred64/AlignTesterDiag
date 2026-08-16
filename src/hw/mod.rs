@@ -1485,22 +1485,26 @@ fn read_and_decode_track_diagnostic(
                     crc_errs += 1;
                 }
                 if s.cyl == expected_cyl {
-                    on_track += 1;
+                    if s.crc_ok {
+                        on_track += 1;
+                    }
                 } else {
                     off_track += 1;
                     *wrong_cylinders.entry(s.cyl).or_insert(0) += 1;
                 }
             }
 
-            let total_valid = on_track + off_track;
-            let alignment_pct = if total_valid > 0 {
-                (on_track as f32 / total_valid as f32) * 100.0
+            let alignment_pct = if expected_count > 0 {
+                (on_track as f32 / expected_count as f32) * 100.0
             } else {
-                100.0
+                0.0
             };
 
             let off_track_details = if off_track == 0 {
                 String::from("NONE (Perfect)")
+            } else if wrong_cylinders.len() == 1 && on_track == 0 {
+                let (&cyl, _) = wrong_cylinders.iter().next().unwrap();
+                format!("MISALIGNED T:{:02}", cyl)
             } else {
                 let mut parts = Vec::new();
                 for (cyl, cnt) in wrong_cylinders {
@@ -1633,6 +1637,8 @@ pub fn build_verbose_pass_line(
                     blocks_vec.push("░");
                 }
             }
+        } else if diag.sectors.iter().any(|s| s.sec_id == sec_id) {
+            blocks_vec.push("■");
         } else {
             missing_secs.push(sec_id);
             blocks_vec.push("░");
@@ -1642,7 +1648,9 @@ pub fn build_verbose_pass_line(
     let raw_ribbon = format!("[ {} ]", blocks_vec.join(" "));
     let ribbon_col = format!("{:<39}", raw_ribbon);
 
-    let status_str = if ok_count == expected_count as u32 {
+    let status_str = if diag.off_track_count > 0 && diag.off_track_details.starts_with("MISALIGNED") {
+        format!("({}/{} {})", diag.sectors.len(), expected_count, diag.off_track_details)
+    } else if ok_count == expected_count as u32 && diag.crc_err_count == 0 && diag.off_track_count == 0 {
         if expected_count == 9 {
             String::from("(9/9 OK)  ")
         } else {
@@ -1785,7 +1793,9 @@ pub fn build_standard_pass_line(
     let raw_ribbon = format!("[ {} ]", blocks_vec.join(" "));
     let ribbon_col = format!("{:<39}", raw_ribbon);
 
-    let status_str = if ok_count == expected_count as u32 {
+    let status_str = if diag.off_track_count > 0 && diag.off_track_details.starts_with("MISALIGNED") {
+        format!("({}/{} {})", diag.sectors.len(), expected_count, diag.off_track_details)
+    } else if ok_count == expected_count as u32 && diag.crc_err_count == 0 && diag.off_track_count == 0 {
         format!("({}/{} OK)", expected_count, expected_count)
     } else if !crc_dat_secs.is_empty() {
         let list: Vec<String> = crc_dat_secs.iter().map(|s| s.to_string()).collect();
@@ -1823,53 +1833,76 @@ pub fn process_track_diagnostic(
 ) {
     let mut effective_diag = diag.clone();
 
-    // Atomic track auto-realignment (IDAM header detection priority)
-    // If an absolute majority (> 50%) of decoded sectors on a single revolution presents an identical track ID T_read != status.track
-    if !effective_diag.sectors.is_empty() {
+    let target_track = if status.target_track > 0 {
+        status.target_track
+    } else {
+        status.track
+    };
+    status.target_track = target_track;
+    status.track = target_track;
+    status.trk0 = target_track == 0;
+
+    // Determine majority decoded cylinder from sectors if available
+    let detected_track_id = if !effective_diag.sectors.is_empty() {
         let mut cyl_counts: HashMap<u8, usize> = HashMap::new();
         for sec in &effective_diag.sectors {
             *cyl_counts.entry(sec.cyl).or_insert(0) += 1;
         }
+        cyl_counts
+            .into_iter()
+            .max_by_key(|&(_, cnt)| cnt)
+            .map(|(cyl, _)| cyl)
+            .unwrap_or(target_track)
+    } else {
+        target_track
+    };
 
-        let threshold = effective_diag.sectors.len() / 2;
-        if let Some((&t_lu, _)) = cyl_counts.iter().find(|(_, &cnt)| cnt > threshold) {
-            if t_lu != status.track {
-                status.track = t_lu;
-                status.trk0 = t_lu == 0;
+    // Re-evaluate on_track and off_track statistics against target_track if sectors are present
+    if !effective_diag.sectors.is_empty() {
+        let mut on_track: u32 = 0;
+        let mut off_track: u32 = 0;
+        let mut crc_errs: u32 = 0;
+        let mut wrong_cylinders: HashMap<u8, u32> = HashMap::new();
 
-                // Re-calculate on-track / off-track statistics for the new actual cylinder
-                let mut on_track: u32 = 0;
-                let mut off_track: u32 = 0;
-                let mut wrong_cylinders: HashMap<u8, u32> = HashMap::new();
-
-                for s in &effective_diag.sectors {
-                    if s.cyl == t_lu {
-                        on_track += 1;
-                    } else {
-                        off_track += 1;
-                        *wrong_cylinders.entry(s.cyl).or_insert(0) += 1;
-                    }
+        for s in &effective_diag.sectors {
+            if !s.crc_ok {
+                crc_errs += 1;
+            }
+            if s.cyl == target_track {
+                if s.crc_ok {
+                    on_track += 1;
                 }
-
-                let total_valid = on_track + off_track;
-                effective_diag.on_track_count = on_track;
-                effective_diag.off_track_count = off_track;
-                effective_diag.alignment_pct = if total_valid > 0 {
-                    (on_track as f32 / total_valid as f32) * 100.0
-                } else {
-                    100.0
-                };
-                effective_diag.off_track_details = if off_track == 0 {
-                    String::from("NONE (Perfect)")
-                } else {
-                    let mut parts = Vec::new();
-                    for (cyl, c) in wrong_cylinders {
-                        parts.push(format!("T{:02}: {} sect", cyl, c));
-                    }
-                    parts.join(", ")
-                };
+            } else {
+                off_track += 1;
+                *wrong_cylinders.entry(s.cyl).or_insert(0) += 1;
             }
         }
+
+        effective_diag.on_track_count = on_track;
+        effective_diag.off_track_count = off_track;
+        effective_diag.crc_err_count = crc_errs;
+        let expected_count = if effective_diag.sector_count > 0 {
+            effective_diag.sector_count
+        } else {
+            18
+        };
+        effective_diag.alignment_pct = if expected_count > 0 {
+            (on_track as f32 / expected_count as f32) * 100.0
+        } else {
+            0.0
+        };
+        effective_diag.off_track_details = if off_track == 0 {
+            String::from("NONE (Perfect)")
+        } else if wrong_cylinders.len() == 1 && on_track == 0 {
+            let (&cyl, _) = wrong_cylinders.iter().next().unwrap();
+            format!("MISALIGNED T:{:02}", cyl)
+        } else {
+            let mut parts = Vec::new();
+            for (cyl, cnt) in wrong_cylinders {
+                parts.push(format!("T{:02}: {} sect", cyl, cnt));
+            }
+            parts.join(", ")
+        };
     }
 
     status.has_disk = effective_diag.has_disk;
@@ -1895,27 +1928,28 @@ pub fn process_track_diagnostic(
         });
     }
 
-    let verbose_line = build_verbose_pass_line(status.track, status.head, &effective_diag);
-    let standard_line = build_standard_pass_line(status.track, status.head, &effective_diag);
+    let verbose_line = build_verbose_pass_line(target_track, status.head, &effective_diag);
+    let standard_line = build_standard_pass_line(target_track, status.head, &effective_diag);
 
     let ok_count = effective_diag
         .sectors
         .iter()
-        .filter(|s| s.crc_ok && s.cyl == status.track)
+        .filter(|s| s.crc_ok && s.cyl == target_track)
         .count() as u8;
     let expected_count = effective_diag.sector_count;
     let is_ok = effective_diag.sectors_known
         && !effective_diag.sectors.is_empty()
         && effective_diag.crc_err_count == 0
         && effective_diag.off_track_count == 0
-        && (effective_diag.sectors.len() >= effective_diag.sector_count as usize || effective_diag.sectors.len() >= 9);
+        && ok_count >= expected_count
+        && detected_track_id == target_track;
 
     let quality_pct = effective_diag.pll_quality_pct.unwrap_or(if is_ok { 99 } else { 50 });
     let crc_errors = effective_diag.crc_err_count.min(255) as u8;
 
     let pass = DiagnosticPass {
-        track: status.track,
-        track_id: status.track,
+        track: target_track,
+        track_id: detected_track_id,
         head: status.head,
         bitrate: effective_diag.bitrate,
         line_standard: standard_line.clone(),
@@ -1942,6 +1976,8 @@ pub fn process_track_diagnostic(
         );
         status.alignment_pct = both_metrics.alignment_pct;
         status.on_track_count = both_metrics.total_ok;
+        status.off_track_count = both_metrics.total_off_track;
+        status.off_track_details = both_metrics.off_track_details.clone();
         status.crc_err_count = both_metrics.total_crc_err;
     }
 
@@ -3370,7 +3406,7 @@ mod tests {
         assert_eq!(status.sector_log_standard.len(), 1);
         assert_eq!(status.sector_log_verbose.len(), 1);
         assert_eq!(status.sector_log_standard[0], "T:10 H:0 Rate:500k MFM [ ■ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] (1/18 CRC-DAT: Sec 2)");
-        assert!(status.sector_log_verbose[0].contains("T:10 H:0 Rate:500k MFM [ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ]"));
+        assert!(status.sector_log_verbose[0].contains("T:10 H:0 Rate:500k MFM [ ■ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ]"));
         assert!(status.sector_log_verbose[0].contains("CRC-DAT: Sec 2"));
 
         let beeps: Vec<AudioEvent> = rx_sound.try_iter().collect();
@@ -4752,6 +4788,110 @@ mod tests {
         let b_revs2 = revs2.to_le_bytes();
         let read_cmd2 = [0x07, 0x08, 0x00, 0x00, 0x00, 0x00, b_revs2[0], b_revs2[1]];
         assert_eq!(read_cmd2, [0x07, 0x08, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00]);
+    }
+
+    #[test]
+    fn test_track_conformity_single_head_misalignment() {
+        let (tx_sound, _rx_sound) = crossbeam_channel::unbounded();
+        let mut status = DriveStatus {
+            track: 40,
+            target_track: 40,
+            head: 0,
+            sector_count: 18,
+            ..Default::default()
+        };
+
+        // All 18 decoded sectors have cyl: 41 (physical head shifted by +1 track)
+        let sectors_track41: Vec<DecodedSector> = (1..=18)
+            .map(|id| DecodedSector::new(41, 0, id, 2, true))
+            .collect();
+
+        let diag = TrackAnalysisResult {
+            has_disk: true,
+            bitrate: 500,
+            sector_count: 18,
+            sectors_known: true,
+            sectors: sectors_track41,
+            on_track_count: 0,
+            off_track_count: 18,
+            off_track_details: String::from("MISALIGNED T:41"),
+            crc_err_count: 0,
+            alignment_pct: 0.0,
+            index_timestamps: vec![1000, 14401000],
+            instant_rpms: vec![300],
+            rev_time_ms: 200.0,
+            ..Default::default()
+        };
+
+        process_track_diagnostic(&mut status, &diag, &tx_sound);
+
+        assert_eq!(status.on_track_count, 0);
+        assert_eq!(status.off_track_count, 18);
+        assert_eq!(status.off_track_details, "MISALIGNED T:41");
+        assert_eq!(status.alignment_pct, 0.0);
+        assert_eq!(
+            status.sector_log_standard[0],
+            "T:40 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 MISALIGNED T:41)"
+        );
+        assert!(status.sector_log_verbose[0].contains("(18/18 MISALIGNED T:41)"));
+    }
+
+    #[test]
+    fn test_both_mode_dual_head_track_shift_alignment_50_pct() {
+        let (tx_sound, _rx_sound) = crossbeam_channel::unbounded();
+        let mut status = DriveStatus {
+            track: 40,
+            target_track: 40,
+            head_select: HeadSelection::Both,
+            head: 0,
+            sector_count: 18,
+            ..Default::default()
+        };
+
+        // Head 0: 18/18 OK on track 40
+        let sectors_h0: Vec<DecodedSector> = (1..=18)
+            .map(|id| DecodedSector::new(40, 0, id, 2, true))
+            .collect();
+        let diag_h0 = TrackAnalysisResult {
+            has_disk: true,
+            bitrate: 500,
+            sector_count: 18,
+            sectors_known: true,
+            sectors: sectors_h0,
+            on_track_count: 18,
+            off_track_count: 0,
+            off_track_details: String::from("NONE (Perfect)"),
+            crc_err_count: 0,
+            alignment_pct: 100.0,
+            ..Default::default()
+        };
+        process_track_diagnostic(&mut status, &diag_h0, &tx_sound);
+
+        // Head 1: 18/18 on track 41 (shifted to next track)
+        status.head = 1;
+        let sectors_h1: Vec<DecodedSector> = (1..=18)
+            .map(|id| DecodedSector::new(41, 1, id, 2, true))
+            .collect();
+        let diag_h1 = TrackAnalysisResult {
+            has_disk: true,
+            bitrate: 500,
+            sector_count: 18,
+            sectors_known: true,
+            sectors: sectors_h1,
+            on_track_count: 0,
+            off_track_count: 18,
+            off_track_details: String::from("MISALIGNED T:41"),
+            crc_err_count: 0,
+            alignment_pct: 0.0,
+            ..Default::default()
+        };
+        process_track_diagnostic(&mut status, &diag_h1, &tx_sound);
+
+        // Alignment must be 50.0% and off-track counter must indicate MISMATCH on Head 1
+        assert_eq!(status.alignment_pct, 50.0);
+        assert_eq!(status.on_track_count, 18);
+        assert_eq!(status.off_track_count, 18);
+        assert_eq!(status.off_track_details, "MISMATCH: Track 41 on Head 1");
     }
 }
 
