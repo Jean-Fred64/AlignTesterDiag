@@ -2,6 +2,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use crate::app::HeadSelection;
 use crate::hw::HwActivity;
 
 /// Builds the track ruler line with visual highlight for active tracks (0 to 83)
@@ -34,11 +35,11 @@ pub fn build_ruler_line(current_track: u8) -> Line<'static> {
 }
 
 /// Formats hardware access flags block:
-/// - `f`: Format non implémenté (grisé / tiret `-`)
-/// - `w`: Write (`-` si WP actif / écriture verrouillée ; `w` si écriture autorisée)
-/// - `R`: Recalibrate (toujours allumé en surbrillance)
-/// - `z`: Zero Track (toujours allumé en surbrillance)
-/// - `d`: Bascule manuelle de densité réservée (grisé / tiret `-`)
+/// - `f`: Format unimplemented (dimmed / dash `-`)
+/// - `w`: Write (`-` if WP active / write protected; `w` if write enabled)
+/// - `R`: Recalibrate (always highlighted)
+/// - `z`: Zero Track (always highlighted)
+/// - `d`: Manual density toggle reserved (dimmed / dash `-`)
 pub fn format_flags_display(write_protect: bool) -> String {
     let f = "-";
     let w = if write_protect { "-" } else { "w" };
@@ -106,6 +107,101 @@ pub fn format_rpm_display(motor_on: bool, rpm: u32) -> String {
     } else {
         "--- RPM".to_string()
     }
+}
+
+/// Builds the Live RPM continuous measurement metric string:
+/// `RPM: 300.1 (Avg: 300.0 | Min: 299.8 | Max: 300.2 | Jitter: ±0.07%)`
+pub fn format_rpm_metric_line(meas: &crate::hw::RpmMeasurement) -> String {
+    format!(
+        "RPM: {:.1} (Avg: {:.1} | Min: {:.1} | Max: {:.1} | Jitter: ±{:.2}%)",
+        meas.instant_rpm, meas.avg_rpm, meas.min_rpm, meas.max_rpm, meas.jitter_pct
+    )
+}
+
+/// Builds styled spans for the Live RPM continuous measurement metric line
+pub fn build_rpm_metric_spans(meas: &crate::hw::RpmMeasurement, target_rpm: f64) -> Vec<Span<'static>> {
+    let target = if target_rpm > 0.0 { target_rpm } else { 300.0 };
+    let dev_pct = if target > 0.0 {
+        ((meas.instant_rpm - target) / target) * 100.0
+    } else {
+        0.0
+    };
+
+    let rpm_color = if dev_pct.abs() <= 0.5 {
+        Color::LightGreen
+    } else if dev_pct.abs() <= 1.5 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+
+    let jitter_color = if meas.jitter_pct <= 0.20 {
+        Color::LightGreen
+    } else if meas.jitter_pct <= 0.50 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+
+    vec![
+        Span::styled("RPM: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{:.1} ", meas.instant_rpm),
+            Style::default().fg(rpm_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "(Avg: {:.1} | Min: {:.1} | Max: {:.1} | Jitter: ",
+                meas.avg_rpm, meas.min_rpm, meas.max_rpm
+            ),
+            Style::default().fg(Color::LightCyan),
+        ),
+        Span::styled(
+            format!("±{:.2}%", meas.jitter_pct),
+            Style::default().fg(jitter_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(")", Style::default().fg(Color::LightCyan)),
+    ]
+}
+
+/// Builds a 21-character visual centering gauge: `[----|----▼----|----]`
+/// - Green (`Color::LightGreen`) if deviation <= ±0.5%
+/// - Yellow (`Color::Yellow`) if deviation <= ±1.5%
+/// - Red (`Color::Red`) if out of tolerance (> ±1.5%)
+pub fn build_rpm_centering_gauge(current_rpm: f64, target_rpm: f64) -> (String, Color) {
+    let target = if target_rpm > 0.0 { target_rpm } else { 300.0 };
+    let dev_pct = ((current_rpm - target) / target) * 100.0;
+
+    let color = if dev_pct.abs() <= 0.5 {
+        Color::LightGreen
+    } else if dev_pct.abs() <= 1.5 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+
+    // 19 slots inside brackets [0..=18]:
+    // Slot 0 = -2.0%, Slot 4 = -1.0% (|), Slot 9 = 0.0% Nominal (|), Slot 14 = +1.0% (|), Slot 18 = +2.0%
+    let slot = (9.0 + (dev_pct / 2.0) * 9.0).round().clamp(0.0, 18.0) as usize;
+
+    let mut chars: Vec<char> = "----|----|----|----".chars().collect();
+    if slot < chars.len() {
+        chars[slot] = '▼';
+    }
+    let inner: String = chars.into_iter().collect();
+    (format!("[{}]", inner), color)
+}
+
+/// Builds styled spans for the visual centering gauge line
+pub fn build_rpm_gauge_line(current_rpm: f64, target_rpm: f64) -> Line<'static> {
+    let (gauge_str, color) = build_rpm_centering_gauge(current_rpm, target_rpm);
+    Line::from(vec![
+        Span::styled("Centering Gauge: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            gauge_str,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+    ])
 }
 
 /// Builds a text alignment gauge based on percentage
@@ -214,7 +310,7 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
                 let style = if token.starts_with('(') && token.ends_with(')') {
                     if token.contains("OK") {
                         Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
-                    } else if token.contains("CRC-") || token.contains("NO DATA") || token.contains("MISSING") {
+                    } else if token.contains("CRC-") || token.contains("NO DATA") || token.contains("MISSING") || token.contains("BAD") {
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                     } else if token.contains("NO-DAM") || token.contains("DEL-DAM") || token.contains("OFF-TRK") {
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
@@ -222,14 +318,18 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
                         Style::default().fg(Color::White)
                     }
                 } else if token.starts_with('(') {
-                    if token.contains("CRC-") || token.contains("NO") || token.contains("MISSING") {
+                    if token.contains("CRC-") || token.contains("NO") || token.contains("MISSING") || token.contains("BAD") {
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                    } else {
+                    } else if token.contains("NO-DAM") || token.contains("DEL-DAM") || token.contains("OFF-TRK") {
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
                     }
                 } else if token.ends_with(')') {
                     if token.contains("OK") {
                         Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+                    } else if token.contains('/') && !token.contains("CRC") && !token.contains("NO") && !token.contains("MISSING") && !token.contains("BAD") {
+                        Style::default().fg(Color::White)
                     } else {
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                     }
@@ -259,6 +359,7 @@ pub fn get_standard_line_style(line: &str, _expected_count: u8) -> Style {
         || line.contains("NO DATA")
         || line.contains("NO SECTORS")
         || line.contains("ERR(")
+        || line.contains("BAD")
         || (line.contains("[ ? ]") && line.contains("MISSING"))
     {
         return Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
@@ -370,12 +471,16 @@ pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'st
                 } else if token.starts_with('(') {
                     if token.contains("CRC-") || token.contains("NO") || token.contains("MISSING") {
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                    } else {
+                    } else if token.contains("NO-DAM") || token.contains("DEL-DAM") || token.contains("OFF-TRK") {
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
                     }
                 } else if token.ends_with(')') {
                     if token.contains("OK") {
                         Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+                    } else if token.contains('/') && !token.contains("CRC") && !token.contains("NO") && !token.contains("MISSING") {
+                        Style::default().fg(Color::White)
                     } else {
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                     }
@@ -531,3 +636,96 @@ pub fn format_activity_badge(activity: HwActivity, io_cycle: u64) -> (Span<'stat
         ),
     }
 }
+
+/// Formats the head selection display string for status summaries
+pub fn format_head_display(head_select: HeadSelection, active_head: u8) -> String {
+    match head_select {
+        HeadSelection::Head0 => String::from("Head 0"),
+        HeadSelection::Head1 => String::from("Head 1"),
+        HeadSelection::Both => format!("BOTH (0+1) [Active: H:{}]", active_head),
+    }
+}
+
+/// Formats the short head string for the top header banner
+pub fn format_head_header_str(head_select: HeadSelection, active_head: u8) -> String {
+    match head_select {
+        HeadSelection::Head0 => String::from("H0"),
+        HeadSelection::Head1 => String::from("H1"),
+        HeadSelection::Both => format!("HB(H{})", active_head),
+    }
+}
+
+/// Builds the dedicated 2-line fixed persistent display for Both mode:
+/// - Line 1: Result for Head 0
+/// - Line 2: Result for Head 1
+/// An active pointer `► ` is placed on the head currently under acquisition (`status.head`), while inactive head uses `"  "`.
+pub fn build_both_mode_display_lines(status: &crate::hw::DriveStatus) -> Vec<Line<'static>> {
+    let mut lines = Vec::with_capacity(2);
+    let expected = if status.sector_count > 0 { status.sector_count } else { 18 };
+
+    let format_head_line = |head_idx: u8| -> Line<'static> {
+        let is_active = status.head == head_idx && (status.analyzing || status.in_progress_pass);
+        let prefix_span = if is_active {
+            Span::styled(
+                "► ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled("  ", Style::default())
+        };
+
+        let pass_opt = if head_idx == 0 {
+            &status.last_pass_h0
+        } else {
+            &status.last_pass_h1
+        };
+
+        let content_spans = if let Some(pass) = pass_opt {
+            if status.verbose_mode {
+                build_verbose_line_spans(&pass.line_verbose, pass.expected_count)
+            } else {
+                build_standard_line_spans(&pass.line_standard, pass.expected_count)
+            }
+        } else if is_active && !status.sector_log.is_empty() {
+            let last_log = status.sector_log.last().unwrap();
+            if status.verbose_mode {
+                build_verbose_line_spans(last_log, expected)
+            } else {
+                build_standard_line_spans(last_log, expected)
+            }
+        } else {
+            let empty_blocks = "░".repeat(expected as usize);
+            let raw_ribbon = format!("[ {} ]", empty_blocks);
+            let ribbon_col = format!("{:<22}", raw_ribbon);
+            let status_col = format!("( 0/{})", expected);
+            let line_str = if status.verbose_mode {
+                format!(
+                    "T:{:02} H:{} Rate:{}k MFM {} {}",
+                    status.track, head_idx, status.bitrate, ribbon_col, status_col
+                )
+            } else {
+                format!(
+                    "T:{:02} H:{}  {}k  {}   {}",
+                    status.track, head_idx, status.bitrate, ribbon_col, status_col
+                )
+            };
+            if status.verbose_mode {
+                build_verbose_line_spans(&line_str, expected)
+            } else {
+                build_standard_line_spans(&line_str, expected)
+            }
+        };
+
+        let mut spans = vec![prefix_span];
+        spans.extend(content_spans);
+        Line::from(spans)
+    };
+
+    lines.push(format_head_line(0));
+    lines.push(format_head_line(1));
+    lines
+}
+
+

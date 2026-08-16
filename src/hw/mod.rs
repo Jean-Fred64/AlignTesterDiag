@@ -6,6 +6,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use crate::app::{DiagnosticPass, HeadSelection};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisplayMode {
@@ -58,8 +59,10 @@ mod sound {
     }
 }
 
-/// Electromechanical Head Settle Time (15 ms to 20 ms) after track stepping / head change.
-/// Standard floppy disk controller specification requires 15-20 ms for physical head carriage vibration dampening.
+/// Minimal electronic head switch settle time (1 ms) for SIDE1 selection.
+pub const HEAD_SWITCH_SETTLE_MS: u64 = 1;
+/// Electromechanical Head Settle Time (15 ms to 30 ms) after track stepping.
+/// Standard floppy disk controller specification requires 15-30 ms for physical head carriage vibration dampening.
 pub const HEAD_SETTLE_TIME_MS: u64 = 30;
 pub const SPIN_UP_DELAY_MS: u64 = 350;
 pub const SYNC_DELAY_MS: u64 = 30;
@@ -99,8 +102,10 @@ pub struct RpmMeasurement {
     pub max_rpm: f64,
     pub avg_rpm: f64,
     pub jitter_rpm: f64,
+    pub jitter_pct: f64,
     pub sample_count: u32,
     pub recent_samples: Vec<(f64, u32)>,
+    pub rolling_window: VecDeque<f64>,
 }
 
 impl Default for RpmMeasurement {
@@ -111,8 +116,10 @@ impl Default for RpmMeasurement {
             max_rpm: 0.0,
             avg_rpm: 0.0,
             jitter_rpm: 0.0,
+            jitter_pct: 0.0,
             sample_count: 0,
             recent_samples: Vec::new(),
+            rolling_window: VecDeque::with_capacity(10),
         }
     }
 }
@@ -124,28 +131,39 @@ impl RpmMeasurement {
     }
 
     pub fn record_sample(&mut self, rpm: f64, delta_ticks: u32) {
-        self.instant_rpm = rpm;
+        self.instant_rpm = (rpm * 10.0).round() / 10.0;
         if self.sample_count == 0 {
-            self.min_rpm = rpm;
-            self.max_rpm = rpm;
-            self.avg_rpm = rpm;
+            self.min_rpm = self.instant_rpm;
+            self.max_rpm = self.instant_rpm;
         } else {
-            if rpm < self.min_rpm {
-                self.min_rpm = rpm;
+            if self.instant_rpm < self.min_rpm {
+                self.min_rpm = self.instant_rpm;
             }
-            if rpm > self.max_rpm {
-                self.max_rpm = rpm;
+            if self.instant_rpm > self.max_rpm {
+                self.max_rpm = self.instant_rpm;
             }
-            self.avg_rpm = (self.avg_rpm * (self.sample_count as f64) + rpm)
-                / ((self.sample_count + 1) as f64);
         }
-        self.jitter_rpm = (self.max_rpm - self.min_rpm) / 2.0;
+
+        // Rolling average (window of 10 revolutions) to filter micro-vibrations and flutter
+        if self.rolling_window.len() >= 10 {
+            self.rolling_window.pop_front();
+        }
+        self.rolling_window.push_back(self.instant_rpm);
+        let sum: f64 = self.rolling_window.iter().sum();
+        self.avg_rpm = (sum / (self.rolling_window.len() as f64) * 10.0).round() / 10.0;
+
+        self.jitter_rpm = ((self.max_rpm - self.min_rpm) / 2.0 * 10.0).round() / 10.0;
+        self.jitter_pct = if self.avg_rpm > 0.0 {
+            ((self.max_rpm - self.min_rpm) / (2.0 * self.avg_rpm)) * 100.0
+        } else {
+            0.0
+        };
         self.sample_count += 1;
 
         if self.recent_samples.len() >= 20 {
             self.recent_samples.remove(0);
         }
-        self.recent_samples.push((rpm, delta_ticks));
+        self.recent_samples.push((self.instant_rpm, delta_ticks));
     }
 
     pub fn clear(&mut self) {
@@ -161,6 +179,7 @@ pub struct DriveStatus {
     pub rpm_display: String,
     pub rpm_measure: RpmMeasurement,
     pub track: u8,
+    pub head_select: HeadSelection,
     pub head: u8,
     pub motor_on: bool,
     pub drive_select: bool,
@@ -189,6 +208,9 @@ pub struct DriveStatus {
     pub off_track_details: String,
     pub crc_err_count: u32,
     pub alignment_pct: f32,
+    pub in_progress_pass: bool,
+    pub last_pass_h0: Option<DiagnosticPass>,
+    pub last_pass_h1: Option<DiagnosticPass>,
 }
 
 impl Default for DriveStatus {
@@ -200,6 +222,7 @@ impl Default for DriveStatus {
             rpm_display: String::from("... RPM"),
             rpm_measure: RpmMeasurement::default(),
             track: 0,
+            head_select: HeadSelection::Head0,
             head: 0,
             motor_on: false,
             drive_select: false,
@@ -228,6 +251,9 @@ impl Default for DriveStatus {
             off_track_details: String::from("NONE (Perfect)"),
             crc_err_count: 0,
             alignment_pct: 100.0,
+            in_progress_pass: false,
+            last_pass_h0: None,
+            last_pass_h1: None,
         }
     }
 }
@@ -243,6 +269,7 @@ pub enum HwCmd {
     RecalibrateSeek,
     ZeroTrack,
     SetHead(u8),
+    SetHeadSelection(HeadSelection),
     ToggleHead,
     Analyze,
     ReadData,
@@ -1074,9 +1101,150 @@ fn read_motor_rpm_diagnostic(
     Ok(decoded_gw)
 }
 
+/// Initializes a new progressive scan pass on the active line (`►`)
+pub fn start_revolution_progress(
+    status: &mut DriveStatus,
+    tx_status: &crossbeam_channel::Sender<DriveStatus>,
+    track: u8,
+    head: u8,
+    bitrate: u16,
+    expected_count: u8,
+) {
+    status.has_disk = true;
+    status.bitrate = bitrate;
+    status.density = bitrate == 500;
+    status.sector_count = expected_count;
+    status.sectors_known = true;
+    status.track = track;
+    status.head = head;
+    status.in_progress_pass = true;
+
+    // Reset sectors array for the new revolution so top bar starts empty
+    status.sectors.clear();
+
+    // Standard ribbon with all empty blocks
+    let blocks_std = "░".repeat(expected_count as usize);
+    let raw_ribbon_std = format!("[ {} ]", blocks_std);
+    let ribbon_col_std = format!("{:<22}", raw_ribbon_std);
+    let status_str_std = format!("({:>2}/{})", 0, expected_count);
+    let standard_line = format!(
+        "T:{:02} H:{}  {}k  {}   {}",
+        track, head, bitrate, ribbon_col_std, status_str_std
+    );
+
+    // Verbose ribbon with all empty blocks
+    let blocks_verb = "░".repeat(expected_count as usize);
+    let raw_ribbon_verb = format!("[ {} ]", blocks_verb);
+    let ribbon_col_verb = format!("{:<22}", raw_ribbon_verb);
+    let status_str_verb = format!("({:>2}/{})", 0, expected_count);
+    let verbose_line = format!(
+        "T:{:02} H:{} Rate:{}k MFM {} {}",
+        track, head, bitrate, ribbon_col_verb, status_str_verb
+    );
+
+    status.sector_log_standard.push(standard_line);
+    status.sector_log_verbose.push(verbose_line);
+
+    if status.sector_log_standard.len() > 50 {
+        let excess = status.sector_log_standard.len() - 50;
+        status.sector_log_standard.drain(0..excess);
+    }
+    if status.sector_log_verbose.len() > 50 {
+        let excess = status.sector_log_verbose.len() - 50;
+        status.sector_log_verbose.drain(0..excess);
+    }
+
+    status.sector_log = if status.verbose_mode {
+        status.sector_log_verbose.clone()
+    } else {
+        status.sector_log_standard.clone()
+    };
+
+    let _ = tx_status.send(status.clone());
+}
+
+/// Updates the progressive scan pass on the active line (`►`) sector by sector
+pub fn update_revolution_progress(
+    status: &mut DriveStatus,
+    tx_status: &crossbeam_channel::Sender<DriveStatus>,
+    track: u8,
+    head: u8,
+    bitrate: u16,
+    expected_count: u8,
+    sectors_found: usize,
+    last_sector: Option<&DecodedSector>,
+) {
+    if let Some(sec) = last_sector {
+        if !status.sectors.iter().any(|s| s.sec_id == sec.sec_id && s.track == sec.cyl) {
+            status.sectors.push(SectorInfo {
+                track: sec.cyl,
+                sec_id: sec.sec_id,
+                size_code: sec.size_code,
+                status_code: if sec.crc_ok { 0 } else { 1 },
+                crc_ok: sec.crc_ok,
+            });
+        }
+    }
+
+    let filled = sectors_found.min(expected_count as usize);
+    let empty = (expected_count as usize).saturating_sub(filled);
+
+    let blocks_std = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+    let raw_ribbon_std = format!("[ {} ]", blocks_std);
+    let ribbon_col_std = format!("{:<22}", raw_ribbon_std);
+
+    let status_str_std = if filled == expected_count as usize {
+        format!("({}/{} OK)", expected_count, expected_count)
+    } else {
+        format!("({:>2}/{})", filled, expected_count)
+    };
+
+    let standard_line = if filled == expected_count as usize {
+        format!(
+            "T:{:02} H:{}  {}k  {}  {}",
+            track, head, bitrate, ribbon_col_std, status_str_std
+        )
+    } else {
+        format!(
+            "T:{:02} H:{}  {}k  {}   {}",
+            track, head, bitrate, ribbon_col_std, status_str_std
+        )
+    };
+
+    let blocks_verb = format!("{}{}", "■".repeat(filled), "░".repeat(empty));
+    let raw_ribbon_verb = format!("[ {} ]", blocks_verb);
+    let ribbon_col_verb = format!("{:<22}", raw_ribbon_verb);
+    let status_str_verb = if filled == expected_count as usize {
+        format!("({}/{} OK)", expected_count, expected_count)
+    } else {
+        format!("({:>2}/{})", filled, expected_count)
+    };
+    let verbose_line = format!(
+        "T:{:02} H:{} Rate:{}k MFM {} {}",
+        track, head, bitrate, ribbon_col_verb, status_str_verb
+    );
+
+    if let Some(last) = status.sector_log_standard.last_mut() {
+        *last = standard_line;
+    }
+    if let Some(last) = status.sector_log_verbose.last_mut() {
+        *last = verbose_line;
+    }
+
+    status.sector_log = if status.verbose_mode {
+        status.sector_log_verbose.clone()
+    } else {
+        status.sector_log_standard.clone()
+    };
+
+    let _ = tx_status.send(status.clone());
+}
+
 fn read_and_decode_track_diagnostic(
     port: &mut Box<dyn serialport::SerialPort>,
     expected_cyl: u8,
+    status: &mut DriveStatus,
+    tx_status: &crossbeam_channel::Sender<DriveStatus>,
 ) -> TrackAnalysisResult {
     let _ = port.clear(serialport::ClearBuffer::Input);
 
@@ -1112,20 +1280,25 @@ fn read_and_decode_track_diagnostic(
             let instant_rpms =
                 calculate_rpm_from_index_timestamps(&decoded_gw.index_timestamps, 72_000_000.0);
 
+            let sample_rate = 72_000_000.0;
             let (rev_time_ms, rpm_instant) = if decoded_gw.index_timestamps.len() >= 2 {
-                let delta0 = (decoded_gw.index_timestamps[1].wrapping_sub(decoded_gw.index_timestamps[0])) & 0x0FFF_FFFF;
-                let rev_ms = (delta0 as f64 / 72_000_000.0) * 1000.0;
+                let idx_start = decoded_gw.index_timestamps[0];
+                let idx_end = decoded_gw.index_timestamps[1];
+                let delta = (idx_end.wrapping_sub(idx_start)) & 0x0FFF_FFFF;
+                let rev_ms = (delta as f64 / sample_rate) * 1000.0;
                 let rpm = if rev_ms > 0.0 { 60_000.0 / rev_ms } else { 0.0 };
                 (rev_ms, if rpm > 0.0 { Some(rpm) } else { None })
+            } else if let Some((rpm, delta_ticks)) = calculate_rpm_from_mfm_headers(&decoded_gw.flux) {
+                let rev_ms = (delta_ticks as f64 / sample_rate) * 1000.0;
+                (rev_ms, Some(rpm as f64))
             } else {
-                let rev_ms = pass_start.elapsed().as_secs_f64() * 1000.0;
-                let rpm = if rev_ms > 0.0 { 60_000.0 / rev_ms } else { 0.0 };
-                (rev_ms, if rpm > 0.0 { Some(rpm) } else { None })
+                (200.0, None)
             };
 
             let jitter_pct = calculate_jitter_pct(&decoded_gw.index_timestamps);
 
             if dat.len() < 100 || decoded_gw.flux.len() < 100 {
+                start_revolution_progress(status, tx_status, expected_cyl, status.head, 500, 18);
                 return TrackAnalysisResult {
                     has_disk: false,
                     bitrate: 500,
@@ -1185,6 +1358,42 @@ fn read_and_decode_track_diagnostic(
             } else {
                 0
             };
+
+            let expected_count = if bitrate == 250 {
+                if sector_count > 9 { sector_count } else { 9 }
+            } else if sector_count == 15 || (sectors.iter().map(|s| s.sec_id).max().unwrap_or(0) == 15 && sector_count <= 15) {
+                15
+            } else if sector_count > 18 {
+                sector_count
+            } else {
+                18
+            };
+
+            // 1. Initial state at start of revolution (0/expected_count)
+            start_revolution_progress(
+                status,
+                tx_status,
+                expected_cyl,
+                status.head,
+                bitrate,
+                expected_count,
+            );
+
+            // 2. Incremental progressive emission as each sector is validated at native CPU speed
+            if !sectors.is_empty() {
+                for (idx, sec) in sectors.iter().enumerate() {
+                    update_revolution_progress(
+                        status,
+                        tx_status,
+                        expected_cyl,
+                        status.head,
+                        bitrate,
+                        expected_count,
+                        idx + 1,
+                        Some(sec),
+                    );
+                }
+            }
 
             let sync_48 = [
                 false, true, false, false, false, true, false, false, true, false, false, false, true,
@@ -1435,7 +1644,7 @@ pub fn build_verbose_pass_line(
 }
 
 /// Formats a single pass for Standard column mode (Clean segmented bar with strict column alignment)
-/// Format: T:<piste> H:<tête>  <débit>  <barre_segmentée>  <compteur_statut>
+/// Format: T:<track> H:<head>  <bitrate>  <segmented_bar>  <status_counter>
 pub fn build_standard_pass_line(
     track: u8,
     head: u8,
@@ -1553,8 +1762,8 @@ pub fn process_track_diagnostic(
 ) {
     let mut effective_diag = diag.clone();
 
-    // Auto-réalignement atomique de la Piste (Détection d'en-tête IDAM prioritaire)
-    // Si une majorité absolue (> 50%) des secteurs décodés sur un tour présente un ID de piste identique T_lu != status.track
+    // Atomic track auto-realignment (IDAM header detection priority)
+    // If an absolute majority (> 50%) of decoded sectors on a single revolution presents an identical track ID T_read != status.track
     if !effective_diag.sectors.is_empty() {
         let mut cyl_counts: HashMap<u8, usize> = HashMap::new();
         for sec in &effective_diag.sectors {
@@ -1567,7 +1776,7 @@ pub fn process_track_diagnostic(
                 status.track = t_lu;
                 status.trk0 = t_lu == 0;
 
-                // Re-calculer les statistiques on-track / off-track pour le nouveau cylindre réel
+                // Re-calculate on-track / off-track statistics for the new actual cylinder
                 let mut on_track: u32 = 0;
                 let mut off_track: u32 = 0;
                 let mut wrong_cylinders: HashMap<u8, u32> = HashMap::new();
@@ -1627,8 +1836,47 @@ pub fn process_track_diagnostic(
     let verbose_line = build_verbose_pass_line(status.track, status.head, &effective_diag);
     let standard_line = build_standard_pass_line(status.track, status.head, &effective_diag);
 
-    status.sector_log_verbose.push(verbose_line);
-    status.sector_log_standard.push(standard_line);
+    let ok_count = effective_diag
+        .sectors
+        .iter()
+        .filter(|s| s.crc_ok && s.cyl == status.track)
+        .count() as u8;
+    let expected_count = effective_diag.sector_count;
+    let is_ok = effective_diag.sectors_known
+        && !effective_diag.sectors.is_empty()
+        && effective_diag.crc_err_count == 0
+        && effective_diag.off_track_count == 0
+        && (effective_diag.sectors.len() >= effective_diag.sector_count as usize || effective_diag.sectors.len() >= 9);
+
+    let pass = DiagnosticPass {
+        track: status.track,
+        head: status.head,
+        bitrate: effective_diag.bitrate,
+        line_standard: standard_line.clone(),
+        line_verbose: verbose_line.clone(),
+        ok_count,
+        expected_count,
+        is_ok,
+    };
+
+    if status.head == 0 {
+        status.last_pass_h0 = Some(pass);
+    } else {
+        status.last_pass_h1 = Some(pass);
+    }
+
+    if status.in_progress_pass && !status.sector_log_standard.is_empty() && !status.sector_log_verbose.is_empty() {
+        if let Some(last) = status.sector_log_standard.last_mut() {
+            *last = standard_line;
+        }
+        if let Some(last) = status.sector_log_verbose.last_mut() {
+            *last = verbose_line;
+        }
+        status.in_progress_pass = false;
+    } else {
+        status.sector_log_verbose.push(verbose_line);
+        status.sector_log_standard.push(standard_line);
+    }
 
     if status.sector_log_verbose.len() > 50 {
         let excess = status.sector_log_verbose.len() - 50;
@@ -1725,7 +1973,7 @@ pub fn hw_thread(
                     let _ = port.write_request_to_send(true);
                     let _ = port.clear(serialport::ClearBuffer::All);
 
-                    // Séquence de démarrage du worker matériel (1 à 5)
+                    // Hardware worker startup sequence (1 to 5)
                     // 1. INFO (0x00)
                     let info_res = gw_send(
                         &mut port,
@@ -1839,7 +2087,6 @@ pub fn hw_thread(
                     let _ = tx_status.send(status.clone());
 
                     let mut last_keepalive = Instant::now();
-                    let mut last_real_read = Instant::now();
 
                     loop {
                         while let Ok(cmd) = rx_cmd.try_recv() {
@@ -1875,8 +2122,9 @@ pub fn hw_thread(
                                     status.index = false;
                                     status.sectors.clear();
                                     status.sectors_known = false;
+                                    status.head_select = HeadSelection::Head0;
                                     status.head = 0;
-                                    status.log_msg = String::from("*** ARRÊT D'URGENCE (BACKSPACE) : Moteur coupé & matériel réinitialisé ***");
+                                    status.log_msg = String::from("*** EMERGENCY STOP (BACKSPACE): Motor stopped & hardware reset ***");
                                     let _ = tx_status.send(status.clone());
                                 }
                                 HwCmd::Stop => {
@@ -1928,7 +2176,7 @@ pub fn hw_thread(
                                         status.mode = DisplayMode::RpmMeasure;
                                         status.activity = HwActivity::MeasuringRpm;
                                         status.rpm_measure.clear();
-                                        status.log_msg = String::from("Live RPM test started (L)...");
+                                        status.log_msg = String::from("Live RPM Test: High-precision continuous measurement for fine mechanical tuning");
                                     }
                                 }
                                 HwCmd::ToggleMotor => {
@@ -1979,15 +2227,17 @@ pub fn hw_thread(
                                     let track = target_track.min(83);
                                     let old_track = status.track;
 
-                                    // 1. Mettre immédiatement status.track = track et vider status.sectors.clear()
+                                    // 1. Immediately set status.track = track and clear status.sectors
                                     status.track = track;
                                     status.trk0 = track == 0;
                                     status.sectors.clear();
                                     status.sectors_known = false;
+                                    status.last_pass_h0 = None;
+                                    status.last_pass_h1 = None;
                                     status.activity = HwActivity::Seeking;
                                     let _ = tx_status.send(status.clone());
 
-                                    // 2. Émettre la commande SEEK(target) vers la Greaseweazle et attendre l'acquittement 0x00
+                                    // 2. Issue SEEK(target) command to Greaseweazle and wait for 0x00 ACK
                                     let adaptive_timeout = if track == 0 {
                                         Duration::from_millis(SEEK_TRK0_TIMEOUT_MS)
                                     } else {
@@ -2019,10 +2269,10 @@ pub fn hw_thread(
                                         }
                                     }
 
-                                    // 3. Purger obligatoirement le buffer d'entrée UART pour éliminer les échantillons résiduels de l'ancienne piste
+                                    // 3. Mandatory UART input buffer purge to eliminate residual flux samples from previous track
                                     let _ = port.clear(serialport::ClearBuffer::Input);
 
-                                    // 4. Appliquer le délai de stabilisation mécanique de 30 ms (HEAD_SETTLE_TIME_MS)
+                                    // 4. Apply mechanical stabilization delay of 30 ms (HEAD_SETTLE_TIME_MS)
                                     thread::sleep(Duration::from_millis(HEAD_SETTLE_TIME_MS));
 
                                     // Non-blocking WP query on Seek
@@ -2064,6 +2314,8 @@ pub fn hw_thread(
                                         let diag = read_and_decode_track_diagnostic(
                                             &mut port,
                                             status.track,
+                                            &mut status,
+                                            &tx_status,
                                         );
                                         for &r in &diag.instant_rpms {
                                             rpm_sampler.add_sample(r);
@@ -2080,7 +2332,6 @@ pub fn hw_thread(
                                             &diag,
                                             &tx_sound,
                                         );
-                                        last_real_read = Instant::now();
                                     } else {
                                         status.activity = if status.motor_on {
                                             HwActivity::Idle
@@ -2094,13 +2345,13 @@ pub fn hw_thread(
                                     status.activity = HwActivity::Seeking;
                                     let _ = tx_status.send(status.clone());
 
-                                    // 1. Mémoriser la piste de départ
+                                    // 1. Save starting track
                                     let origin = status.track;
 
-                                    // 2. Purger le buffer d'entrée
+                                    // 2. Purge input buffer
                                     let _ = port.clear(serialport::ClearBuffer::Input);
 
-                                    // 3. Aller en piste 0 (SEEK_TRACK0) : timeout 3000 ms, dwell time piste 0 de 60 ms
+                                    // 3. Seek to Track 0 (SEEK_TRACK0): timeout 3000 ms, track 0 dwell time 60 ms
                                     let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
                                     let res0 = gw_send_timeout(
                                         &mut port,
@@ -2113,7 +2364,7 @@ pub fn hw_thread(
                                     );
                                     thread::sleep(Duration::from_millis(DWELL_TIME_TRK0_MS));
 
-                                    // 4. Retour immédiat vers la piste d'origine (origin)
+                                    // 4. Immediate return to origin track
                                     if res0.is_ok() {
                                         if origin > 0 {
                                             let t_back = Duration::from_millis(1200 + (origin as u64 * 25));
@@ -2134,6 +2385,8 @@ pub fn hw_thread(
                                                     status.trk0 = origin == 0;
                                                     status.sectors.clear();
                                                     status.sectors_known = false;
+                                                    status.last_pass_h0 = None;
+                                                    status.last_pass_h1 = None;
                                                     status.log_msg = format!(
                                                         "Recalibrate Track 0 -> Track {}",
                                                         origin
@@ -2149,7 +2402,7 @@ pub fn hw_thread(
                                                 }
                                             }
                                         } else {
-                                            // origin == 0 : Cycle de dégagement : Seek(2) -> pause 30 ms -> Seek(0) -> pause 35 ms
+                                            // origin == 0: Step-out clearance cycle: Seek(2) -> wait 30 ms -> Seek(0) -> wait 35 ms
                                             let _ = port.set_timeout(Duration::from_millis(1250));
                                             let _ = gw_send_timeout(
                                                 &mut port,
@@ -2162,7 +2415,7 @@ pub fn hw_thread(
                                             );
                                             thread::sleep(Duration::from_millis(30));
 
-                                            let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
+                                             let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
                                             let res_zero = gw_send_timeout(
                                                 &mut port,
                                                 &[0x02, 0x03, 0],
@@ -2207,7 +2460,7 @@ pub fn hw_thread(
                                     }
                                     let _ = port.set_timeout(Duration::from_millis(500));
 
-                                    // 5. Purger le buffer et émettre tx_status.send(status.clone());
+                                    // 5. Purge buffer and emit tx_status.send(status.clone());
                                     let _ = port.clear(serialport::ClearBuffer::Input);
                                     status.sectors.clear();
                                     status.sectors_known = false;
@@ -2241,6 +2494,8 @@ pub fn hw_thread(
                                         let diag = read_and_decode_track_diagnostic(
                                             &mut port,
                                             status.track,
+                                            &mut status,
+                                            &tx_status,
                                         );
                                         for &r in &diag.instant_rpms {
                                             rpm_sampler.add_sample(r);
@@ -2257,7 +2512,6 @@ pub fn hw_thread(
                                             &diag,
                                             &tx_sound,
                                         );
-                                        last_real_read = Instant::now();
                                     } else {
                                         status.activity = if status.motor_on {
                                             HwActivity::Idle
@@ -2303,6 +2557,8 @@ pub fn hw_thread(
                                             status.trk0 = true;
                                             status.sectors.clear();
                                             status.sectors_known = false;
+                                            status.last_pass_h0 = None;
+                                            status.last_pass_h1 = None;
                                             status.log_msg =
                                                 String::from("Zero Track -> Track 00");
                                         }
@@ -2350,6 +2606,8 @@ pub fn hw_thread(
                                         let diag = read_and_decode_track_diagnostic(
                                             &mut port,
                                             status.track,
+                                            &mut status,
+                                            &tx_status,
                                         );
                                         for &r in &diag.instant_rpms {
                                             rpm_sampler.add_sample(r);
@@ -2366,7 +2624,6 @@ pub fn hw_thread(
                                             &diag,
                                             &tx_sound,
                                         );
-                                        last_real_read = Instant::now();
                                     } else {
                                         status.activity = if status.motor_on {
                                             HwActivity::Idle
@@ -2377,7 +2634,11 @@ pub fn hw_thread(
                                     }
                                 }
                                 HwCmd::SetHead(head_val) => {
-                                    let head = if head_val > 0 { 1 } else { 0 };
+                                    let (selection, head) = if head_val > 0 {
+                                        (HeadSelection::Head1, 1)
+                                    } else {
+                                        (HeadSelection::Head0, 0)
+                                    };
                                     let res = gw_send(
                                         &mut port,
                                         &[0x03, 0x03, head],
@@ -2389,6 +2650,7 @@ pub fn hw_thread(
 
                                     match res {
                                         Ok((0, _)) => {
+                                            status.head_select = selection;
                                             status.head = head;
                                             status.sectors.clear();
                                             status.sectors_known = false;
@@ -2404,8 +2666,8 @@ pub fn hw_thread(
                                         }
                                     }
 
-                                    // Head switch settle time (25 ms)
-                                    thread::sleep(Duration::from_millis(HEAD_SETTLE_TIME_MS));
+                                    // Head switch settle time (1 ms)
+                                    thread::sleep(Duration::from_millis(HEAD_SWITCH_SETTLE_MS));
 
                                     // Reset sector buffer and clear input buffer
                                     status.sectors.clear();
@@ -2420,6 +2682,8 @@ pub fn hw_thread(
                                         let diag = read_and_decode_track_diagnostic(
                                             &mut port,
                                             status.track,
+                                            &mut status,
+                                            &tx_status,
                                         );
                                         for &r in &diag.instant_rpms {
                                             rpm_sampler.add_sample(r);
@@ -2436,39 +2700,45 @@ pub fn hw_thread(
                                             &diag,
                                             &tx_sound,
                                         );
-                                        last_real_read = Instant::now();
                                     }
                                 }
-                                HwCmd::ToggleHead => {
-                                    let head = if status.head == 0 { 1 } else { 0 };
+                                HwCmd::SetHeadSelection(selection) => {
+                                    status.head_select = selection;
+                                    let target_physical_head = match status.head_select {
+                                        HeadSelection::Head0 => 0,
+                                        HeadSelection::Head1 => 1,
+                                        HeadSelection::Both => 0,
+                                    };
                                     let res = gw_send(
                                         &mut port,
-                                        &[0x03, 0x03, head],
+                                        &[0x03, 0x03, target_physical_head],
                                         0,
                                         status.unit_id,
                                         status.motor_on,
-                                        head,
+                                        target_physical_head,
                                     );
 
                                     match res {
                                         Ok((0, _)) => {
-                                            status.head = head;
+                                            status.head = target_physical_head;
                                             status.sectors.clear();
                                             status.sectors_known = false;
-                                            status.log_msg =
-                                                format!("Head changed -> {}", head);
+                                            status.log_msg = match status.head_select {
+                                                HeadSelection::Head0 => String::from("Head selection -> Head 0"),
+                                                HeadSelection::Head1 => String::from("Head selection -> Head 1"),
+                                                HeadSelection::Both => String::from("Head selection -> BOTH (0+1) [Alternating mode]"),
+                                            };
                                         }
                                         Ok((st, _)) => {
-                                            status.log_msg =
-                                                format!("Head {} Error (code {})", head, st);
+                                            status.log_msg = format!("Head Error (code {})", st);
                                         }
                                         Err(e) => {
                                             status.log_msg = format!("Head I/O Error: {}", e);
                                         }
                                     }
 
-                                    // Head switch settle time (25 ms)
-                                    thread::sleep(Duration::from_millis(HEAD_SETTLE_TIME_MS));
+                                    // Head switch settle time (1 ms)
+                                    thread::sleep(Duration::from_millis(HEAD_SWITCH_SETTLE_MS));
 
                                     // Reset sector buffer and clear input buffer
                                     status.sectors.clear();
@@ -2483,6 +2753,8 @@ pub fn hw_thread(
                                         let diag = read_and_decode_track_diagnostic(
                                             &mut port,
                                             status.track,
+                                            &mut status,
+                                            &tx_status,
                                         );
                                         for &r in &diag.instant_rpms {
                                             rpm_sampler.add_sample(r);
@@ -2499,7 +2771,77 @@ pub fn hw_thread(
                                             &diag,
                                             &tx_sound,
                                         );
-                                        last_real_read = Instant::now();
+                                    }
+                                }
+                                HwCmd::ToggleHead => {
+                                    status.head_select = status.head_select.toggle_next();
+                                    let target_physical_head = match status.head_select {
+                                        HeadSelection::Head0 => 0,
+                                        HeadSelection::Head1 => 1,
+                                        HeadSelection::Both => 0,
+                                    };
+                                    let res = gw_send(
+                                        &mut port,
+                                        &[0x03, 0x03, target_physical_head],
+                                        0,
+                                        status.unit_id,
+                                        status.motor_on,
+                                        target_physical_head,
+                                    );
+
+                                    match res {
+                                        Ok((0, _)) => {
+                                            status.head = target_physical_head;
+                                            status.sectors.clear();
+                                            status.sectors_known = false;
+                                            status.log_msg = match status.head_select {
+                                                HeadSelection::Head0 => String::from("Head selection -> Head 0"),
+                                                HeadSelection::Head1 => String::from("Head selection -> Head 1"),
+                                                HeadSelection::Both => String::from("Head selection -> BOTH (0+1) [Alternating mode]"),
+                                            };
+                                        }
+                                        Ok((st, _)) => {
+                                            status.log_msg = format!("Head Error (code {})", st);
+                                        }
+                                        Err(e) => {
+                                            status.log_msg = format!("Head I/O Error: {}", e);
+                                        }
+                                    }
+
+                                    // Head switch settle time (1 ms)
+                                    thread::sleep(Duration::from_millis(HEAD_SWITCH_SETTLE_MS));
+
+                                    // Reset sector buffer and clear input buffer
+                                    status.sectors.clear();
+                                    status.sectors_known = false;
+                                    let _ = port.clear(serialport::ClearBuffer::Input);
+
+                                    if status.mode == DisplayMode::RpmMeasure {
+                                        // Tachometer mode continues measuring
+                                    } else if status.analyzing && status.motor_on && status.has_disk {
+                                        status.activity = HwActivity::ReadingAnalyzing;
+                                        status.io_cycle = status.io_cycle.wrapping_add(1);
+                                        let diag = read_and_decode_track_diagnostic(
+                                            &mut port,
+                                            status.track,
+                                            &mut status,
+                                            &tx_status,
+                                        );
+                                        for &r in &diag.instant_rpms {
+                                            rpm_sampler.add_sample(r);
+                                        }
+                                        if diag.has_disk && !diag.index_timestamps.is_empty() {
+                                            let avg = rpm_sampler.average();
+                                            if avg > 0 {
+                                                status.rpm = avg;
+                                            }
+                                        }
+                                        status.index = !diag.index_timestamps.is_empty();
+                                        process_track_diagnostic(
+                                            &mut status,
+                                            &diag,
+                                            &tx_sound,
+                                        );
                                     }
                                 }
                                 HwCmd::Analyze => {
@@ -2536,6 +2878,8 @@ pub fn hw_thread(
                                     let diag = read_and_decode_track_diagnostic(
                                         &mut port,
                                         status.track,
+                                        &mut status,
+                                        &tx_status,
                                     );
                                     for &r in &diag.instant_rpms {
                                         rpm_sampler.add_sample(r);
@@ -2572,7 +2916,6 @@ pub fn hw_thread(
                                             status.track
                                         );
                                     }
-                                    last_real_read = Instant::now();
                                 }
                                 HwCmd::ReadData => {
                                     if !status.motor_on {
@@ -2608,6 +2951,8 @@ pub fn hw_thread(
                                     let diag = read_and_decode_track_diagnostic(
                                         &mut port,
                                         status.track,
+                                        &mut status,
+                                        &tx_status,
                                     );
                                     for &r in &diag.instant_rpms {
                                         rpm_sampler.add_sample(r);
@@ -2643,7 +2988,6 @@ pub fn hw_thread(
                                             status.track
                                         );
                                     }
-                                    last_real_read = Instant::now();
                                 }
                                 HwCmd::ToggleVerbose => {
                                     status.verbose_mode = !status.verbose_mode;
@@ -2755,6 +3099,8 @@ pub fn hw_thread(
                                     status.trk0 = true;
                                     status.sectors.clear();
                                     status.sectors_known = false;
+                                    status.last_pass_h0 = None;
+                                    status.last_pass_h1 = None;
                                     status.mode = DisplayMode::None;
                                     status.activity = if status.motor_on {
                                         HwActivity::Idle
@@ -2792,12 +3138,13 @@ pub fn hw_thread(
                                             let t1 = decoded_gw.index_timestamps[i + 1];
                                             let delta = (t1.wrapping_sub(t0)) & 0x0FFF_FFFF;
                                             if delta > 0 {
-                                                let rpm = ((72_000_000.0 * 60.0) / delta as f64).round() as u32;
+                                                let rpm_float = (72_000_000.0 * 60.0) / delta as f64;
+                                                let rpm = rpm_float.round() as u32;
                                                 if (100..=800).contains(&rpm) {
                                                     status.rpm = rpm;
                                                     status.index = true;
                                                     status.has_disk = true;
-                                                    status.rpm_measure.record_sample(rpm as f64, delta);
+                                                    status.rpm_measure.record_sample(rpm_float, delta);
                                                     status.rpm_display = format!("{:.1} RPM", status.rpm_measure.instant_rpm);
                                                     status.log_msg = format!("RPM: {:.1} RPM (Index Pin 8 OK)", status.rpm_measure.instant_rpm);
                                                     rpm_sampler.add_sample(rpm);
@@ -2809,19 +3156,20 @@ pub fn hw_thread(
                                     }
                                     if !recorded {
                                         // Fallback Cas B: MFM sector header timing or No Index
-                                        if let Some((rpm, delta)) = calculate_rpm_from_mfm_headers(&decoded_gw.flux) {
-                                            status.rpm = rpm;
+                                        if let Some((rpm_u32, delta)) = calculate_rpm_from_mfm_headers(&decoded_gw.flux) {
+                                            let rpm = (72_000_000.0 * 60.0) / (delta as f64);
+                                            status.rpm = rpm_u32;
                                             status.index = false;
                                             status.has_disk = true;
-                                            status.rpm_measure.record_sample(rpm as f64, delta);
+                                            status.rpm_measure.record_sample(rpm, delta);
                                             status.rpm_display = format!("{:.1} RPM", status.rpm_measure.instant_rpm);
-                                            status.log_msg = format!("RPM: {:.1} RPM (Détection MFM - Pas d'index Pin 8)", status.rpm_measure.instant_rpm);
-                                            rpm_sampler.add_sample(rpm);
+                                            status.log_msg = format!("RPM: {:.1} RPM (MFM header sync - No index Pin 8)", status.rpm_measure.instant_rpm);
+                                            rpm_sampler.add_sample(status.rpm);
                                             let _ = tx_status.send(status.clone());
                                         } else {
                                             status.rpm = 0;
                                             status.index = false;
-                                            status.log_msg = String::from("RPM: Pas de signal Index (Pin 8)");
+                                            status.log_msg = String::from("RPM: No Index pulse detected (Pin 8)");
                                             let _ = tx_status.send(status.clone());
                                         }
                                     }
@@ -2839,13 +3187,27 @@ pub fn hw_thread(
                         } else if status.analyzing
                             && status.motor_on
                             && status.has_disk
-                            && last_real_read.elapsed() >= Duration::from_millis(220)
                         {
+                            if status.head_select == HeadSelection::Both {
+                                let next_head = if status.head == 0 { 1 } else { 0 };
+                                let _ = gw_send(
+                                    &mut port,
+                                    &[0x03, 0x03, next_head],
+                                    0,
+                                    status.unit_id,
+                                    status.motor_on,
+                                    next_head,
+                                );
+                                thread::sleep(Duration::from_millis(HEAD_SWITCH_SETTLE_MS));
+                                let _ = port.clear(serialport::ClearBuffer::Input);
+                                status.head = next_head;
+                            }
+
                             status.activity = HwActivity::ReadingAnalyzing;
                             status.io_cycle = status.io_cycle.wrapping_add(1);
 
                             let diag =
-                                read_and_decode_track_diagnostic(&mut port, status.track);
+                                read_and_decode_track_diagnostic(&mut port, status.track, &mut status, &tx_status);
                             for &r in &diag.instant_rpms {
                                 rpm_sampler.add_sample(r);
                             }
@@ -2858,7 +3220,6 @@ pub fn hw_thread(
                             status.index = !diag.index_timestamps.is_empty();
 
                             process_track_diagnostic(&mut status, &diag, &tx_sound);
-                            last_real_read = Instant::now();
                         }
 
                         if !status.motor_on {
@@ -2887,7 +3248,9 @@ pub fn hw_thread(
                             break;
                         }
 
-                        thread::sleep(Duration::from_millis(20));
+                        if !status.analyzing {
+                            thread::sleep(Duration::from_millis(20));
+                        }
                     }
 
                     shutdown_drive(&mut port, status.unit_id);
@@ -3380,6 +3743,7 @@ mod tests {
         assert_eq!(meas.max_rpm, 302.0);
         assert!((meas.avg_rpm - 300.0).abs() < 0.01);
         assert_eq!(meas.jitter_rpm, 2.0);
+        assert!((meas.jitter_pct - ((4.0 / 600.0) * 100.0)).abs() < 0.01);
         assert_eq!(meas.recent_samples.len(), 3);
     }
 
@@ -3536,6 +3900,7 @@ mod tests {
 
     #[test]
     fn test_electromechanical_delays_constants() {
+        assert_eq!(HEAD_SWITCH_SETTLE_MS, 1);
         assert_eq!(HEAD_SETTLE_TIME_MS, 30);
         assert_eq!(SPIN_UP_DELAY_MS, 350);
         assert_eq!(SYNC_DELAY_MS, 30);
@@ -3947,4 +4312,179 @@ mod tests {
         assert!(jitter.is_some());
         assert!((jitter.unwrap() - 0.1).abs() < 0.05);
     }
+
+    #[test]
+    fn test_progressive_revolution_initial_state() {
+        let (tx_status, rx_status) = crossbeam_channel::unbounded();
+        let mut status = DriveStatus {
+            track: 40,
+            head: 0,
+            sector_count: 18,
+            ..Default::default()
+        };
+
+        start_revolution_progress(&mut status, &tx_status, 40, 0, 500, 18);
+
+        assert!(status.in_progress_pass);
+        assert_eq!(status.sector_log_standard.len(), 1);
+        assert_eq!(
+            status.sector_log_standard[0],
+            "T:40 H:0  500k  [ ░░░░░░░░░░░░░░░░░░ ]   ( 0/18)"
+        );
+        assert!(status.sectors.is_empty());
+
+        let emitted = rx_status.try_recv().unwrap();
+        assert_eq!(
+            emitted.sector_log_standard[0],
+            "T:40 H:0  500k  [ ░░░░░░░░░░░░░░░░░░ ]   ( 0/18)"
+        );
+    }
+
+    #[test]
+    fn test_progressive_revolution_incremental_updates() {
+        let (tx_status, rx_status) = crossbeam_channel::unbounded();
+        let mut status = DriveStatus {
+            track: 40,
+            head: 0,
+            sector_count: 18,
+            ..Default::default()
+        };
+
+        start_revolution_progress(&mut status, &tx_status, 40, 0, 500, 18);
+        let _ = rx_status.try_recv();
+
+        // Decode Sector 1
+        let sec1 = DecodedSector::new(40, 0, 1, 2, true);
+        update_revolution_progress(&mut status, &tx_status, 40, 0, 500, 18, 1, Some(&sec1));
+        assert_eq!(status.sector_log_standard.len(), 1);
+        assert_eq!(
+            status.sector_log_standard[0],
+            "T:40 H:0  500k  [ █░░░░░░░░░░░░░░░░░ ]   ( 1/18)"
+        );
+        assert_eq!(status.sectors.len(), 1);
+
+        // Decode Sector 5
+        let sec5 = DecodedSector::new(40, 0, 5, 2, true);
+        update_revolution_progress(&mut status, &tx_status, 40, 0, 500, 18, 5, Some(&sec5));
+        assert_eq!(status.sector_log_standard.len(), 1);
+        assert_eq!(
+            status.sector_log_standard[0],
+            "T:40 H:0  500k  [ █████░░░░░░░░░░░░░ ]   ( 5/18)"
+        );
+        assert_eq!(status.sectors.len(), 2);
+
+        // Decode Sector 18 (all sectors)
+        let sec18 = DecodedSector::new(40, 0, 18, 2, true);
+        update_revolution_progress(&mut status, &tx_status, 40, 0, 500, 18, 18, Some(&sec18));
+        assert_eq!(status.sector_log_standard.len(), 1);
+        assert_eq!(
+            status.sector_log_standard[0],
+            "T:40 H:0  500k  [ ██████████████████ ]  (18/18 OK)"
+        );
+    }
+
+    #[test]
+    fn test_progressive_revolution_finalize_and_multi_revolution_scroll() {
+        let (tx_status, _) = crossbeam_channel::unbounded();
+        let (tx_sound, _) = crossbeam_channel::unbounded();
+        let mut status = DriveStatus {
+            track: 40,
+            head: 0,
+            sector_count: 18,
+            beep_enabled: false,
+            ..Default::default()
+        };
+
+        // Revolution 1: Start
+        start_revolution_progress(&mut status, &tx_status, 40, 0, 500, 18);
+        assert_eq!(status.sector_log_standard.len(), 1);
+
+        // Revolution 1: Decode 18 sectors
+        let sectors: Vec<DecodedSector> = (1..=18)
+            .map(|id| DecodedSector::new(40, 0, id, 2, true))
+            .collect();
+        for (i, sec) in sectors.iter().enumerate() {
+            update_revolution_progress(&mut status, &tx_status, 40, 0, 500, 18, i + 1, Some(sec));
+        }
+        assert_eq!(status.sector_log_standard.len(), 1);
+
+        // Revolution 1: Finalize
+        let diag1 = TrackAnalysisResult {
+            has_disk: true,
+            bitrate: 500,
+            sector_count: 18,
+            sectors_known: true,
+            sectors: sectors.clone(),
+            on_track_count: 18,
+            off_track_count: 0,
+            off_track_details: String::from("NONE (Perfect)"),
+            crc_err_count: 0,
+            alignment_pct: 100.0,
+            index_timestamps: vec![1000, 14401000],
+            instant_rpms: vec![300],
+            rev_time_ms: 200.1,
+            ..Default::default()
+        };
+        process_track_diagnostic(&mut status, &diag1, &tx_sound);
+
+        assert_eq!(status.sector_log_standard.len(), 1);
+        assert!(!status.in_progress_pass);
+        assert_eq!(
+            status.sector_log_standard[0],
+            "T:40 H:0  500k  [ ██████████████████ ]  (18/18 OK)"
+        );
+
+        // Revolution 2: Start new revolution
+        start_revolution_progress(&mut status, &tx_status, 40, 0, 500, 18);
+        assert_eq!(status.sector_log_standard.len(), 2);
+        assert!(status.in_progress_pass);
+
+        // Line 0 is frozen in history
+        assert_eq!(
+            status.sector_log_standard[0],
+            "T:40 H:0  500k  [ ██████████████████ ]  (18/18 OK)"
+        );
+        // Line 1 is the new active line being swept
+        assert_eq!(
+            status.sector_log_standard[1],
+            "T:40 H:0  500k  [ ░░░░░░░░░░░░░░░░░░ ]   ( 0/18)"
+        );
+    }
+
+    #[test]
+    fn test_head_selection_transitions_and_alternation_both_mode() {
+        let mut status = DriveStatus {
+            track: 20,
+            head_select: HeadSelection::Head0,
+            head: 0,
+            ..Default::default()
+        };
+
+        // 1. Toggle from Head0 -> Head1
+        status.head_select = status.head_select.toggle_next();
+        assert_eq!(status.head_select, HeadSelection::Head1);
+
+        // 2. Toggle from Head1 -> Both
+        status.head_select = status.head_select.toggle_next();
+        assert_eq!(status.head_select, HeadSelection::Both);
+
+        // 3. Toggle from Both -> Head0
+        status.head_select = status.head_select.toggle_next();
+        assert_eq!(status.head_select, HeadSelection::Head0);
+
+        // Test alternating physical head simulation in Both mode
+        status.head_select = HeadSelection::Both;
+        status.head = 0;
+
+        // Simulated continuous read cycle 1: Head 0 -> alternates to Head 1
+        let next_head = if status.head == 0 { 1 } else { 0 };
+        status.head = next_head;
+        assert_eq!(status.head, 1);
+
+        // Simulated continuous read cycle 2: Head 1 -> alternates back to Head 0
+        let next_head = if status.head == 0 { 1 } else { 0 };
+        status.head = next_head;
+        assert_eq!(status.head, 0);
+    }
 }
+

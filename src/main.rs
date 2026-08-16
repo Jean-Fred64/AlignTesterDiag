@@ -102,16 +102,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
 
             let (badge_icon, badge_text) = format_activity_badge(status.activity, status.io_cycle);
+            let head_hdr = format_head_header_str(status.head_select, status.head);
 
             let mut top_spans = vec![
                 Span::styled(
                     format!(
-                        "{} {}k {}    T{:02}  H{}   ",
+                        "{} {}k {}    T{:02}  {:<7}",
                         drive_letter,
                         status.bitrate,
                         if status.bitrate == 500 { "HD" } else { "DD" },
                         status.track,
-                        status.head,
+                        head_hdr,
                     ),
                     Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
                 ),
@@ -202,7 +203,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Line::from(" Esc = Stop / Motor off"),
                 Line::from(" Backspace = Panic Reset"),
                 Line::from(" F = Format"),
-                Line::from(" H = Head 0/1"),
+                Line::from(" H = Head 0/1/Both"),
                 Line::from(" I = track Image"),
                 Line::from(" L = Live RPM test"),
                 Line::from(" M = Motor on/off"),
@@ -226,44 +227,38 @@ fn main() -> Result<(), Box<dyn Error>> {
             match status.mode {
                 DisplayMode::RpmMeasure => {
                     right_lines.push(Line::from(Span::styled(
-                        "=== MOTOR TACHOMETER / HIGH-PRECISION RPM TEST ===",
+                        "=== MOTOR TACHOMETER / LIVE RPM TEST ===",
                         Style::default()
                             .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
                     )));
+                    right_lines.push(Line::from(Span::styled(
+                        "Live RPM Test: High-precision continuous measurement for fine mechanical tuning",
+                        Style::default().fg(Color::LightCyan),
+                    )));
                     right_lines.push(Line::from(""));
 
                     if status.rpm_measure.sample_count > 0 {
-                        let instant_rpm = status.rpm_measure.instant_rpm;
                         let target_rpm = 300.0f64;
+                        let instant_rpm = status.rpm_measure.instant_rpm;
                         let diff = instant_rpm - target_rpm;
                         let sign = if diff >= 0.0 { "+" } else { "" };
                         let diff_pct = (diff / target_rpm) * 100.0;
 
-                        let jitter_color = if status.rpm_measure.jitter_rpm < 0.5 {
-                            Color::Green
-                        } else if status.rpm_measure.jitter_rpm < 1.5 {
+                        // 1. Metric Line: RPM: 300.1 (Avg: 300.0 | Min: 299.8 | Max: 300.2 | Jitter: ±0.07%)
+                        right_lines.push(Line::from(build_rpm_metric_spans(&status.rpm_measure, target_rpm)));
+
+                        // 2. Centering Gauge: [----|----▼----|----]
+                        right_lines.push(build_rpm_gauge_line(instant_rpm, target_rpm));
+                        right_lines.push(Line::from(""));
+
+                        let jitter_color = if status.rpm_measure.jitter_pct <= 0.20 {
                             Color::LightGreen
-                        } else if status.rpm_measure.jitter_rpm < 3.0 {
+                        } else if status.rpm_measure.jitter_pct <= 0.50 {
                             Color::Yellow
                         } else {
                             Color::Red
                         };
-
-                        right_lines.push(Line::from(vec![
-                            Span::styled(
-                                "► Instantaneous Speed     : ",
-                                Style::default()
-                                    .fg(Color::White)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(
-                                format!("{:.1} RPM", instant_rpm),
-                                Style::default()
-                                    .fg(Color::LightGreen)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                        ]));
 
                         right_lines.push(Line::from(vec![
                             Span::styled(
@@ -281,14 +276,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                         right_lines.push(Line::from(vec![
                             Span::styled(
-                                "► Speed Jitter (Gigue)    : ",
+                                "► Speed Jitter (Peak-Peak): ",
                                 Style::default().fg(Color::White),
                             ),
                             Span::styled(
                                 format!(
-                                    "σ = ±{:.1} RPM  ({:.1} RPM peak-to-peak)",
+                                    "±{:.1} RPM  (Δ={:.1} RPM | ±{:.2}%)",
                                     status.rpm_measure.jitter_rpm,
-                                    status.rpm_measure.max_rpm - status.rpm_measure.min_rpm
+                                    status.rpm_measure.max_rpm - status.rpm_measure.min_rpm,
+                                    status.rpm_measure.jitter_pct
                                 ),
                                 Style::default()
                                     .fg(jitter_color)
@@ -298,26 +294,26 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                         right_lines.push(Line::from(vec![
                             Span::styled(
-                                "► Statistical Average     : ",
+                                "► Rolling Average (10 rev): ",
                                 Style::default().fg(Color::White),
                             ),
                             Span::styled(
                                 format!(
-                                    "{:.1} RPM  (over {} revolutions captured)",
+                                    "{:.1} RPM  (over {} total revolutions)",
                                     status.rpm_measure.avg_rpm, status.rpm_measure.sample_count
                                 ),
                                 Style::default().fg(Color::LightCyan),
                             ),
                         ]));
 
-                        let stability_rating = if status.rpm_measure.jitter_rpm < 0.5 {
-                            ("★★★★★ EXCELLENT STABILITY (Jitter < 0.5 RPM)", Color::Green)
-                        } else if status.rpm_measure.jitter_rpm < 1.5 {
-                            ("★★★★☆ GOOD STABILITY (Jitter < 1.5 RPM)", Color::LightGreen)
-                        } else if status.rpm_measure.jitter_rpm < 3.0 {
-                            ("★★★☆☆ ACCEPTABLE STABILITY (Jitter < 3.0 RPM)", Color::Yellow)
+                        let stability_rating = if status.rpm_measure.jitter_pct <= 0.20 {
+                            ("★★★★★ EXCELLENT STABILITY (Jitter <= ±0.20%)", Color::Green)
+                        } else if status.rpm_measure.jitter_pct <= 0.50 {
+                            ("★★★★☆ GOOD STABILITY (Jitter <= ±0.50%)", Color::LightGreen)
+                        } else if status.rpm_measure.jitter_pct <= 1.00 {
+                            ("★★★☆☆ ACCEPTABLE STABILITY (Jitter <= ±1.00%)", Color::Yellow)
                         } else {
-                            ("★☆☆☆☆ UNSTABLE MOTOR SPEED (Jitter >= 3.0 RPM)", Color::Red)
+                            ("★☆☆☆☆ UNSTABLE MOTOR SPEED (Jitter > ±1.00%)", Color::Red)
                         };
 
                         right_lines.push(Line::from(vec![
@@ -496,7 +492,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     ]));
 
                     right_lines.push(Line::from(""));
-                    let subtitle = if status.verbose_mode {
+                    let subtitle = if status.head_select == HeadSelection::Both {
+                        if status.verbose_mode {
+                            "--- Dual-Head Real-Time Stream (Both Mode - Verbose) ---"
+                        } else {
+                            "--- Dual-Head Real-Time Stream (Both Mode - Standard) ---"
+                        }
+                    } else if status.verbose_mode {
                         "--- Read Sectors Stream (Verbose History Mode) ---"
                     } else {
                         "--- Read Sectors Stream (Standard Mode) ---"
@@ -508,42 +510,49 @@ fn main() -> Result<(), Box<dyn Error>> {
                             .add_modifier(Modifier::BOLD),
                     )));
 
-                    let available_height = lower_chunks[1].height as usize;
-                    // Sliding history of 12 to 13 lines
-                    let max_vertical_items = available_height.saturating_sub(11).clamp(1, 13);
-                    let start_idx = status
-                        .sector_log
-                        .len()
-                        .saturating_sub(max_vertical_items);
-                    let recent_logs = &status.sector_log[start_idx..];
-
-                    if recent_logs.is_empty() {
-                        right_lines.push(Line::from(Span::styled(
-                            format!(
-                                "T:{:02} H:{} : (Waiting read stream...)",
-                                status.track, status.head
-                            ),
-                            Style::default().fg(Color::DarkGray),
-                        )));
+                    if status.head_select == HeadSelection::Both {
+                        let both_lines = build_both_mode_display_lines(&status);
+                        for line in both_lines {
+                            right_lines.push(line);
+                        }
                     } else {
-                        for (i, log_line) in recent_logs.iter().enumerate() {
-                            let is_last = i == recent_logs.len().saturating_sub(1);
-                            let prefix = if is_last { " ► " } else { "   " };
-                            let prefix_span = Span::styled(
-                                prefix,
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .add_modifier(Modifier::BOLD),
-                            );
+                        let available_height = lower_chunks[1].height as usize;
+                        // Sliding history of 12 to 13 lines
+                        let max_vertical_items = available_height.saturating_sub(11).clamp(1, 13);
+                        let start_idx = status
+                            .sector_log
+                            .len()
+                            .saturating_sub(max_vertical_items);
+                        let recent_logs = &status.sector_log[start_idx..];
 
-                            if status.verbose_mode {
-                                let mut spans = vec![prefix_span];
-                                spans.extend(build_verbose_line_spans(log_line, status.sector_count));
-                                right_lines.push(Line::from(spans));
-                            } else {
-                                let mut spans = vec![prefix_span];
-                                spans.extend(build_standard_line_spans(log_line, status.sector_count));
-                                right_lines.push(Line::from(spans));
+                        if recent_logs.is_empty() {
+                            right_lines.push(Line::from(Span::styled(
+                                format!(
+                                    "T:{:02} H:{} : (Waiting read stream...)",
+                                    status.track, status.head
+                                ),
+                                Style::default().fg(Color::DarkGray),
+                            )));
+                        } else {
+                            for (i, log_line) in recent_logs.iter().enumerate() {
+                                let is_last = i == recent_logs.len().saturating_sub(1);
+                                let prefix = if is_last { " ► " } else { "   " };
+                                let prefix_span = Span::styled(
+                                    prefix,
+                                    Style::default()
+                                        .fg(Color::Yellow)
+                                        .add_modifier(Modifier::BOLD),
+                                );
+
+                                if status.verbose_mode {
+                                    let mut spans = vec![prefix_span];
+                                    spans.extend(build_verbose_line_spans(log_line, status.sector_count));
+                                    right_lines.push(Line::from(spans));
+                                } else {
+                                    let mut spans = vec![prefix_span];
+                                    spans.extend(build_standard_line_spans(log_line, status.sector_count));
+                                    right_lines.push(Line::from(spans));
+                                }
                             }
                         }
                     }
@@ -585,8 +594,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         status.track
                     )));
                     right_lines.push(Line::from(format!(
-                        "Current Head      : Head {}",
-                        status.head
+                        "Current Head      : {}",
+                        format_head_display(status.head_select, status.head)
                     )));
                     right_lines.push(Line::from(format!(
                         "Diskette Density  : {} ({})",
@@ -625,7 +634,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     right_lines.push(Line::from(
                         "    0-9             : Direct jump to tracks (0, 10, 20... 80)",
                     ));
-                    right_lines.push(Line::from("    H               : Toggle Head 0 / Head 1"));
+                    right_lines.push(Line::from("    H               : Toggle Head (Head 0 -> Head 1 -> Both 0+1)"));
                     right_lines.push(Line::from(
                         "    R               : Recalibrate Track 0 -> Current track",
                     ));
@@ -880,6 +889,15 @@ mod tests {
         }
         assert!(matches!(rx_cmd.try_recv().unwrap(), HwCmd::ToggleMotor));
 
+        let key_h = KeyCode::Char('h');
+        match key_h {
+            KeyCode::Char('h') | KeyCode::Char('H') => {
+                let _ = tx_cmd.send(HwCmd::ToggleHead);
+            }
+            _ => panic!("Expected key H to match"),
+        }
+        assert!(matches!(rx_cmd.try_recv().unwrap(), HwCmd::ToggleHead));
+
         // Backspace PanicReset mapping
         let key_backspace = KeyCode::Backspace;
         if key_backspace == KeyCode::Backspace
@@ -1110,4 +1128,350 @@ mod tests {
         assert_eq!(dark_blocks, 1);
         assert_eq!(green_14, 14);
     }
+
+    #[test]
+    fn test_build_standard_line_spans_progressive_sweep() {
+        // 0/18: 18 dark blocks, 0 green blocks
+        let line_0 = "T:40 H:0  500k  [ ░░░░░░░░░░░░░░░░░░ ]   ( 0/18)";
+        let spans_0 = build_standard_line_spans(line_0, 18);
+        let dark_0 = spans_0
+            .iter()
+            .filter(|s| s.content == "░" && s.style.fg == Some(Color::DarkGray))
+            .count();
+        let green_0 = spans_0
+            .iter()
+            .filter(|s| s.content == "█" && s.style.fg == Some(Color::LightGreen))
+            .count();
+        assert_eq!(dark_0, 18);
+        assert_eq!(green_0, 0);
+
+        // 1/18: 1 green block, 17 dark blocks
+        let line_1 = "T:40 H:0  500k  [ █░░░░░░░░░░░░░░░░░ ]   ( 1/18)";
+        let spans_1 = build_standard_line_spans(line_1, 18);
+        let dark_1 = spans_1
+            .iter()
+            .filter(|s| s.content == "░" && s.style.fg == Some(Color::DarkGray))
+            .count();
+        let green_1 = spans_1
+            .iter()
+            .filter(|s| s.content == "█" && s.style.fg == Some(Color::LightGreen))
+            .count();
+        assert_eq!(dark_1, 17);
+        assert_eq!(green_1, 1);
+
+        // 5/18: 5 green blocks, 13 dark blocks
+        let line_5 = "T:40 H:0  500k  [ █████░░░░░░░░░░░░░ ]   ( 5/18)";
+        let spans_5 = build_standard_line_spans(line_5, 18);
+        let dark_5 = spans_5
+            .iter()
+            .filter(|s| s.content == "░" && s.style.fg == Some(Color::DarkGray))
+            .count();
+        let green_5 = spans_5
+            .iter()
+            .filter(|s| s.content == "█" && s.style.fg == Some(Color::LightGreen))
+            .count();
+        assert_eq!(dark_5, 13);
+        assert_eq!(green_5, 5);
+
+        // 18/18 OK: 18 green blocks, 0 dark blocks
+        let line_18 = "T:40 H:0  500k  [ ██████████████████ ]  (18/18 OK)";
+        let spans_18 = build_standard_line_spans(line_18, 18);
+        let dark_18 = spans_18
+            .iter()
+            .filter(|s| s.content == "░" && s.style.fg == Some(Color::DarkGray))
+            .count();
+        let green_18 = spans_18
+            .iter()
+            .filter(|s| s.content == "█" && s.style.fg == Some(Color::LightGreen))
+            .count();
+        assert_eq!(dark_18, 0);
+        assert_eq!(green_18, 18);
+    }
+
+    #[test]
+    fn test_build_rpm_centering_gauge_nominal() {
+        let (gauge, color) = build_rpm_centering_gauge(300.0, 300.0);
+        assert_eq!(gauge, "[----|----▼----|----]");
+        assert_eq!(color, Color::LightGreen);
+    }
+
+    #[test]
+    fn test_build_rpm_centering_gauge_color_thresholds() {
+        // <= 0.5% deviation -> LightGreen
+        // 300 * 0.005 = 1.5 RPM -> 301.5 is +0.5%
+        let (_, color_green_pos) = build_rpm_centering_gauge(301.5, 300.0);
+        assert_eq!(color_green_pos, Color::LightGreen);
+
+        let (_, color_green_neg) = build_rpm_centering_gauge(298.5, 300.0);
+        assert_eq!(color_green_neg, Color::LightGreen);
+
+        // > 0.5% and <= 1.5% deviation -> Yellow
+        // 300 * 0.010 = 3.0 RPM -> 303.0 is +1.0%
+        let (gauge_yellow_pos, color_yellow_pos) = build_rpm_centering_gauge(303.0, 300.0);
+        assert_eq!(color_yellow_pos, Color::Yellow);
+        assert!(gauge_yellow_pos.contains('▼'));
+
+        let (_, color_yellow_neg) = build_rpm_centering_gauge(296.5, 300.0);
+        assert_eq!(color_yellow_neg, Color::Yellow);
+
+        // > 1.5% deviation -> Red
+        // 300 * 0.020 = 6.0 RPM -> 306.0 is +2.0%
+        let (gauge_red_pos, color_red_pos) = build_rpm_centering_gauge(306.0, 300.0);
+        assert_eq!(color_red_pos, Color::Red);
+        assert_eq!(gauge_red_pos, "[----|----|----|---▼]");
+
+        let (gauge_red_neg, color_red_neg) = build_rpm_centering_gauge(290.0, 300.0);
+        assert_eq!(color_red_neg, Color::Red);
+        assert_eq!(gauge_red_neg, "[▼---|----|----|----]");
+    }
+
+    #[test]
+    fn test_format_rpm_metric_line() {
+        let mut meas = hw::RpmMeasurement::new();
+        meas.instant_rpm = 300.1;
+        meas.avg_rpm = 300.0;
+        meas.min_rpm = 299.8;
+        meas.max_rpm = 300.2;
+        meas.jitter_pct = 0.0667;
+
+        let metric_str = format_rpm_metric_line(&meas);
+        assert_eq!(
+            metric_str,
+            "RPM: 300.1 (Avg: 300.0 | Min: 299.8 | Max: 300.2 | Jitter: ±0.07%)"
+        );
+    }
+
+    #[test]
+    fn test_build_rpm_metric_spans() {
+        let mut meas = hw::RpmMeasurement::new();
+        meas.instant_rpm = 300.1;
+        meas.avg_rpm = 300.0;
+        meas.min_rpm = 299.8;
+        meas.max_rpm = 300.2;
+        meas.jitter_pct = 0.0667;
+
+        let spans = build_rpm_metric_spans(&meas, 300.0);
+        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            joined,
+            "RPM: 300.1 (Avg: 300.0 | Min: 299.8 | Max: 300.2 | Jitter: ±0.07%)"
+        );
+        // RPM within 0.5% is LightGreen
+        assert_eq!(spans[1].style.fg, Some(Color::LightGreen));
+    }
+
+    #[test]
+    fn test_rpm_rolling_average_window_10() {
+        let mut meas = hw::RpmMeasurement::new();
+
+        // Feed 10 samples of 300.0
+        for _ in 0..10 {
+            meas.record_sample(300.0, 14_400_000);
+        }
+        assert_eq!(meas.sample_count, 10);
+        assert_eq!(meas.avg_rpm, 300.0);
+        assert_eq!(meas.min_rpm, 300.0);
+        assert_eq!(meas.max_rpm, 300.0);
+        assert_eq!(meas.jitter_rpm, 0.0);
+        assert_eq!(meas.jitter_pct, 0.0);
+
+        // Feed 5 samples of 310.0 -> Rolling window should now contain five 300.0 and five 310.0 -> avg = 305.0
+        for _ in 0..5 {
+            meas.record_sample(310.0, 13_935_483);
+        }
+        assert_eq!(meas.sample_count, 15);
+        assert_eq!(meas.avg_rpm, 305.0);
+        assert_eq!(meas.min_rpm, 300.0);
+        assert_eq!(meas.max_rpm, 310.0);
+        assert_eq!(meas.jitter_rpm, 5.0);
+
+        // Feed 5 more samples of 310.0 -> Rolling window now contains ten 310.0 -> avg = 310.0
+        for _ in 0..5 {
+            meas.record_sample(310.0, 13_935_483);
+        }
+        assert_eq!(meas.sample_count, 20);
+        assert_eq!(meas.avg_rpm, 310.0);
+        assert_eq!(meas.min_rpm, 300.0);
+        assert_eq!(meas.max_rpm, 310.0);
+    }
+
+    #[test]
+    fn test_single_rev_duration_strict_extraction() {
+        // Simulate two index timestamps 14_400_000 ticks apart at 72MHz sample rate
+        let idx_start: u32 = 1_000_000;
+        let idx_end: u32 = 15_400_000;
+        let sample_rate = 72_000_000.0;
+        let delta = (idx_end.wrapping_sub(idx_start)) & 0x0FFF_FFFF;
+        let rev_time_ms = (delta as f64 / sample_rate) * 1000.0;
+        assert!((rev_time_ms - 200.0).abs() < 0.001);
+
+        let rpm_instant = 60_000.0 / rev_time_ms;
+        assert!((rpm_instant - 300.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_head_selection_model_and_ui_formatting() {
+        // 1. Enum toggle_next cycle
+        let mut head = HeadSelection::Head0;
+        assert_eq!(head.as_str(), "0");
+        head = head.toggle_next();
+        assert_eq!(head, HeadSelection::Head1);
+        assert_eq!(head.as_str(), "1");
+        head = head.toggle_next();
+        assert_eq!(head, HeadSelection::Both);
+        assert_eq!(head.as_str(), "BOTH (0+1)");
+        head = head.toggle_next();
+        assert_eq!(head, HeadSelection::Head0);
+
+        // 2. App struct integration
+        let mut app = App::new();
+        assert_eq!(app.head_selection, HeadSelection::Head0);
+        assert_eq!(app.status.head_select, HeadSelection::Head0);
+
+        app.toggle_head();
+        assert_eq!(app.head_selection, HeadSelection::Head1);
+        assert_eq!(app.status.head_select, HeadSelection::Head1);
+
+        app.toggle_head();
+        assert_eq!(app.head_selection, HeadSelection::Both);
+        assert_eq!(app.status.head_select, HeadSelection::Both);
+
+        app.toggle_head();
+        assert_eq!(app.head_selection, HeadSelection::Head0);
+        assert_eq!(app.status.head_select, HeadSelection::Head0);
+
+        // 3. UI formatting helpers
+        assert_eq!(format_head_display(HeadSelection::Head0, 0), "Head 0");
+        assert_eq!(format_head_display(HeadSelection::Head1, 1), "Head 1");
+        assert_eq!(
+            format_head_display(HeadSelection::Both, 0),
+            "BOTH (0+1) [Active: H:0]"
+        );
+        assert_eq!(
+            format_head_display(HeadSelection::Both, 1),
+            "BOTH (0+1) [Active: H:1]"
+        );
+
+        assert_eq!(format_head_header_str(HeadSelection::Head0, 0), "H0");
+        assert_eq!(format_head_header_str(HeadSelection::Head1, 1), "H1");
+        assert_eq!(format_head_header_str(HeadSelection::Both, 0), "HB(H0)");
+        assert_eq!(format_head_header_str(HeadSelection::Both, 1), "HB(H1)");
+    }
+
+    #[test]
+    fn test_diagnostic_pass_model_and_app_integration() {
+        let pass_h0 = DiagnosticPass::new(
+            40,
+            0,
+            500,
+            "T:40 H:0  500k  [ ██████████████████ ]  (18/18 OK)".to_string(),
+            "T:40 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK) IL:1:1 200.0ms".to_string(),
+            18,
+            18,
+            true,
+        );
+
+        let pass_h1 = DiagnosticPass::new(
+            40,
+            1,
+            500,
+            "T:40 H:1  500k  [ ██████████░░░░░░░░ ]  (10/18 BAD)".to_string(),
+            "T:40 H:1 Rate:500k MFM [ ■■■■■■■■■■░░░░░░░░ ] (10/18 BAD) IL:1:1 200.1ms".to_string(),
+            10,
+            18,
+            false,
+        );
+
+        let mut app = App::new();
+        assert!(app.last_pass_h0.is_none());
+        assert!(app.last_pass_h1.is_none());
+
+        app.record_pass(pass_h0.clone());
+        assert_eq!(app.last_pass_h0, Some(pass_h0.clone()));
+        assert!(app.last_pass_h1.is_none());
+
+        app.record_pass(pass_h1.clone());
+        assert_eq!(app.last_pass_h0, Some(pass_h0));
+        assert_eq!(app.last_pass_h1, Some(pass_h1));
+
+        app.clear_passes();
+        assert!(app.last_pass_h0.is_none());
+        assert!(app.last_pass_h1.is_none());
+    }
+
+    #[test]
+    fn test_build_both_mode_display_lines() {
+        let mut status = DriveStatus {
+            track: 40,
+            head_select: HeadSelection::Both,
+            head: 0,
+            bitrate: 500,
+            sector_count: 18,
+            analyzing: true,
+            ..Default::default()
+        };
+
+        status.last_pass_h0 = Some(DiagnosticPass::new(
+            40,
+            0,
+            500,
+            "T:40 H:0  500k  [ ██████████████████ ]  (18/18 OK)".to_string(),
+            "T:40 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK)".to_string(),
+            18,
+            18,
+            true,
+        ));
+
+        status.last_pass_h1 = Some(DiagnosticPass::new(
+            40,
+            1,
+            500,
+            "T:40 H:1  500k  [ ██████████░░░░░░░░ ]  (10/18 BAD)".to_string(),
+            "T:40 H:1 Rate:500k MFM [ ■■■■■■■■■■░░░░░░░░ ] (10/18 BAD)".to_string(),
+            10,
+            18,
+            false,
+        ));
+
+        // When Head 0 is active (under acquisition):
+        status.head = 0;
+        let lines_h0_active = build_both_mode_display_lines(&status);
+        assert_eq!(lines_h0_active.len(), 2);
+        // Line 0 (Head 0) should have active pointer '► '
+        assert_eq!(lines_h0_active[0].spans[0].content, "► ");
+        assert_eq!(lines_h0_active[0].spans[0].style.fg, Some(Color::Yellow));
+        // Line 1 (Head 1) should have inactive padding '  '
+        assert_eq!(lines_h0_active[1].spans[0].content, "  ");
+
+        // When Head 1 is active (under acquisition):
+        status.head = 1;
+        let lines_h1_active = build_both_mode_display_lines(&status);
+        assert_eq!(lines_h1_active.len(), 2);
+        // Line 0 (Head 0) should have inactive padding '  '
+        assert_eq!(lines_h1_active[0].spans[0].content, "  ");
+        // Line 1 (Head 1) should have active pointer '► '
+        assert_eq!(lines_h1_active[1].spans[0].content, "► ");
+        assert_eq!(lines_h1_active[1].spans[0].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn test_build_standard_line_spans_with_bad_token() {
+        let line_bad = "T:40 H:1  500k  [ ██████████░░░░░░░░ ]  (10/18 BAD)";
+        let spans = build_standard_line_spans(line_bad, 18);
+        assert!(!spans.is_empty());
+
+        // Verify (10/18 BAD) has Red style
+        let bad_span = spans.iter().find(|s| s.content.contains("BAD"));
+        assert!(bad_span.is_some());
+        assert_eq!(bad_span.unwrap().style.fg, Some(Color::Red));
+
+        let style = get_standard_line_style(line_bad, 18);
+        assert_eq!(style, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_head_switch_settle_delay_constant() {
+        assert_eq!(hw::HEAD_SWITCH_SETTLE_MS, 1);
+    }
 }
+
