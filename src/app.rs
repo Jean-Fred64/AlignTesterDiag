@@ -75,21 +75,39 @@ impl DiagnosticPass {
     }
 }
 
+/// User action executable by the application
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    ToggleDriveUnit,
+}
+
 /// Application state wrapper
 pub struct App {
     pub status: DriveStatus,
     pub view_mode: ViewMode,
     pub head_selection: HeadSelection,
+    pub drive_unit: u8,
     pub last_pass_h0: Option<DiagnosticPass>,
     pub last_pass_h1: Option<DiagnosticPass>,
 }
 
 impl App {
     pub fn new() -> Self {
+        Self::with_drive_unit(0)
+    }
+
+    pub fn with_drive_unit(drive_unit: u8) -> Self {
+        let unit = drive_unit.min(1);
+        let status = DriveStatus {
+            drive_unit: unit,
+            unit_id: unit,
+            ..Default::default()
+        };
         Self {
-            status: DriveStatus::default(),
+            status,
             view_mode: ViewMode::Normal,
             head_selection: HeadSelection::default(),
+            drive_unit: unit,
             last_pass_h0: None,
             last_pass_h1: None,
         }
@@ -110,6 +128,24 @@ impl App {
     pub fn toggle_head(&mut self) {
         self.head_selection = self.head_selection.toggle_next();
         self.status.head_select = self.head_selection;
+    }
+
+    pub fn toggle_drive_unit(&mut self) {
+        self.drive_unit = if self.drive_unit == 0 { 1 } else { 0 };
+        self.status.drive_unit = self.drive_unit;
+        self.status.unit_id = self.drive_unit;
+    }
+
+    pub fn set_drive_unit(&mut self, unit: u8) {
+        self.drive_unit = unit.min(1);
+        self.status.drive_unit = self.drive_unit;
+        self.status.unit_id = self.drive_unit;
+    }
+
+    pub fn handle_action(&mut self, action: Action) {
+        match action {
+            Action::ToggleDriveUnit => self.toggle_drive_unit(),
+        }
     }
 
     pub fn record_pass(&mut self, pass: DiagnosticPass) {

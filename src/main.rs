@@ -28,9 +28,38 @@ pub use app::*;
 pub use hw::{hw_thread, DisplayMode, DriveStatus, HwActivity, HwCmd};
 pub use ui::*;
 
+pub fn parse_cli_args(args: &[String]) -> (Option<String>, u8) {
+    let mut port = None;
+    let mut drive_unit: u8 = 0;
+    let mut i = 1;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--drive" || arg == "-d" {
+            if i + 1 < args.len() {
+                if let Ok(val) = args[i + 1].parse::<u8>() {
+                    drive_unit = val.min(1);
+                }
+                i += 1;
+            }
+        } else if let Some(stripped) = arg.strip_prefix("--drive=") {
+            if let Ok(val) = stripped.parse::<u8>() {
+                drive_unit = val.min(1);
+            }
+        } else if let Some(stripped) = arg.strip_prefix("-d=") {
+            if let Ok(val) = stripped.parse::<u8>() {
+                drive_unit = val.min(1);
+            }
+        } else if !arg.starts_with('-') && port.is_none() {
+            port = Some(arg.clone());
+        }
+        i += 1;
+    }
+    (port, drive_unit)
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
-    let port_name = args.get(1).cloned();
+    let (port_name, drive_unit) = parse_cli_args(&args);
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -40,13 +69,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (tx_cmd, rx_cmd) = unbounded::<HwCmd>();
 
     thread::spawn(move || {
-        hw_thread(tx_status, rx_cmd, port_name);
+        hw_thread(tx_status, rx_cmd, port_name, drive_unit);
     });
 
-    let mut status = DriveStatus::default();
+    let mut app = App::with_drive_unit(drive_unit);
+    let mut status = DriveStatus {
+        drive_unit,
+        unit_id: drive_unit,
+        ..Default::default()
+    };
+
     loop {
         while let Ok(new_status) = rx_status.try_recv() {
             status = new_status;
+            app.status = status.clone();
         }
 
         terminal.draw(|f| {
@@ -55,7 +91,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .constraints([Constraint::Length(4), Constraint::Min(1)])
                 .split(f.size());
 
-            let drive_letter = if status.unit_id == 0 { "A:" } else { "B:" };
+            let drive_letter = if status.drive_unit == 0 { "A:" } else { "B:" };
             let max_sec = status.sector_count;
 
             let sec_count_str = if status.sectors_known && status.sector_count > 0 {
@@ -172,6 +208,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Line::from(" Insert formatted"),
                 Line::from(" diskette"),
                 Line::from(""),
+                Line::from(format!(" UNIT : Drive {} ({})", status.drive_unit, if status.drive_unit == 0 { "A:" } else { "B:" })),
                 Line::from(format!(" STAT : {}", state_label)),
                 Line::from(format!(" TRK0 : {}", if status.trk0 { "ON " } else { "OFF" })),
                 Line::from(format!(
@@ -210,6 +247,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Line::from(" P = fmt Parms"),
                 Line::from(" R = Recal/seek"),
                 Line::from(" S = Step S/D"),
+                Line::from(" U = Unit (Drive 0/1)"),
                 Line::from(" V = Verbose on/off"),
                 Line::from(" W = Write data"),
                 Line::from(" Z = Zero track"),
@@ -577,8 +615,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                     )));
                     right_lines.push(Line::from(format!(
-                        "Drive Selection   : Drive {} ({})",
-                        if status.unit_id == 0 { "A:" } else { "B:" },
+                        "Drive Selection   : Drive {} ({}) ({})",
+                        status.drive_unit,
+                        if status.drive_unit == 0 { "A:" } else { "B:" },
                         if status.drive_select { "Active" } else { "Inactive" }
                     )));
                     right_lines.push(Line::from(format!(
@@ -637,6 +676,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     right_lines.push(Line::from("    H               : Toggle Head (Head 0 -> Head 1 -> Both 0+1)"));
                     right_lines.push(Line::from(
                         "    R               : Recalibrate Track 0 -> Current track",
+                    ));
+                    right_lines.push(Line::from(
+                        "    U = Unit        : Toggle Drive Unit (Drive 0 / Drive 1)",
                     ));
                     right_lines.push(Line::from(
                         "    V = Verbose     : Toggle Standard / Verbose display mode",
@@ -732,6 +774,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     KeyCode::Char('r') | KeyCode::Char('R') => {
                         let _ = tx_cmd.send(HwCmd::RecalibrateSeek);
                     }
+                    KeyCode::Char('u') | KeyCode::Char('U') => {
+                        app.handle_action(Action::ToggleDriveUnit);
+                        let _ = tx_cmd.send(HwCmd::ToggleDriveUnit);
+                    }
                     KeyCode::Char('z') | KeyCode::Char('Z') => {
                         let _ = tx_cmd.send(HwCmd::ZeroTrack);
                     }
@@ -746,12 +792,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     KeyCode::Char('b') | KeyCode::Char('B') => {
                         let _ = tx_cmd.send(HwCmd::ToggleBeep);
-                    }
-                    KeyCode::Char('0') => {
-                        let _ = tx_cmd.send(HwCmd::SelectUnit(0));
-                    }
-                    KeyCode::Char('1') => {
-                        let _ = tx_cmd.send(HwCmd::SelectUnit(1));
                     }
                     _ => {}
                 }
@@ -897,6 +937,15 @@ mod tests {
             _ => panic!("Expected key H to match"),
         }
         assert!(matches!(rx_cmd.try_recv().unwrap(), HwCmd::ToggleHead));
+
+        let key_u = KeyCode::Char('u');
+        match key_u {
+            KeyCode::Char('u') | KeyCode::Char('U') => {
+                let _ = tx_cmd.send(HwCmd::ToggleDriveUnit);
+            }
+            _ => panic!("Expected key U to match"),
+        }
+        assert!(matches!(rx_cmd.try_recv().unwrap(), HwCmd::ToggleDriveUnit));
 
         // Backspace PanicReset mapping
         let key_backspace = KeyCode::Backspace;
@@ -1472,6 +1521,82 @@ mod tests {
     #[test]
     fn test_head_switch_settle_delay_constant() {
         assert_eq!(hw::HEAD_SWITCH_SETTLE_MS, 1);
+    }
+
+    #[test]
+    fn test_stepper_wakeup_delay_constant() {
+        assert_eq!(hw::STEPPER_WAKEUP_DELAY_MS, 15);
+    }
+
+    #[test]
+    fn test_cli_argument_parsing_drive_unit() {
+        let args_default = vec!["aligntester".to_string()];
+        let (port, unit) = parse_cli_args(&args_default);
+        assert_eq!(port, None);
+        assert_eq!(unit, 0);
+
+        let args_port_only = vec!["aligntester".to_string(), "COM3".to_string()];
+        let (port, unit) = parse_cli_args(&args_port_only);
+        assert_eq!(port, Some("COM3".to_string()));
+        assert_eq!(unit, 0);
+
+        let args_drive1 = vec!["aligntester".to_string(), "--drive".to_string(), "1".to_string()];
+        let (port, unit) = parse_cli_args(&args_drive1);
+        assert_eq!(port, None);
+        assert_eq!(unit, 1);
+
+        let args_drive0 = vec!["aligntester".to_string(), "--drive".to_string(), "0".to_string()];
+        let (port, unit) = parse_cli_args(&args_drive0);
+        assert_eq!(port, None);
+        assert_eq!(unit, 0);
+
+        let args_short_d1 = vec!["aligntester".to_string(), "-d".to_string(), "1".to_string()];
+        let (port, unit) = parse_cli_args(&args_short_d1);
+        assert_eq!(port, None);
+        assert_eq!(unit, 1);
+
+        let args_eq_syntax = vec!["aligntester".to_string(), "--drive=1".to_string(), "COM5".to_string()];
+        let (port, unit) = parse_cli_args(&args_eq_syntax);
+        assert_eq!(port, Some("COM5".to_string()));
+        assert_eq!(unit, 1);
+
+        let args_short_eq = vec!["aligntester".to_string(), "COM5".to_string(), "-d=1".to_string()];
+        let (port, unit) = parse_cli_args(&args_short_eq);
+        assert_eq!(port, Some("COM5".to_string()));
+        assert_eq!(unit, 1);
+
+        // Saturation to 1
+        let args_out_of_bounds = vec!["aligntester".to_string(), "--drive".to_string(), "4".to_string()];
+        let (_port, unit) = parse_cli_args(&args_out_of_bounds);
+        assert_eq!(unit, 1);
+    }
+
+    #[test]
+    fn test_app_drive_unit_state_and_action_handling() {
+        let mut app0 = App::new();
+        assert_eq!(app0.drive_unit, 0);
+        assert_eq!(app0.status.drive_unit, 0);
+        assert_eq!(app0.status.unit_id, 0);
+
+        let app1 = App::with_drive_unit(1);
+        assert_eq!(app1.drive_unit, 1);
+        assert_eq!(app1.status.drive_unit, 1);
+        assert_eq!(app1.status.unit_id, 1);
+
+        app0.toggle_drive_unit();
+        assert_eq!(app0.drive_unit, 1);
+        assert_eq!(app0.status.drive_unit, 1);
+        assert_eq!(app0.status.unit_id, 1);
+
+        app0.handle_action(Action::ToggleDriveUnit);
+        assert_eq!(app0.drive_unit, 0);
+        assert_eq!(app0.status.drive_unit, 0);
+        assert_eq!(app0.status.unit_id, 0);
+
+        app0.set_drive_unit(1);
+        assert_eq!(app0.drive_unit, 1);
+        assert_eq!(app0.status.drive_unit, 1);
+        assert_eq!(app0.status.unit_id, 1);
     }
 }
 
