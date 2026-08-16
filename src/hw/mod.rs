@@ -32,6 +32,16 @@ pub enum BeepType {
     Error,
 }
 
+/// Hardware flux reading status for diskette presence & index resilience
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DriveReadStatus {
+    #[default]
+    Ok,
+    NoDiskOrNoIndex,
+    IoError,
+    Aborted,
+}
+
 #[cfg(windows)]
 mod sound {
     extern "system" {
@@ -214,6 +224,7 @@ pub struct DriveStatus {
     pub in_progress_pass: bool,
     pub last_pass_h0: Option<DiagnosticPass>,
     pub last_pass_h1: Option<DiagnosticPass>,
+    pub read_status: DriveReadStatus,
 }
 
 impl Default for DriveStatus {
@@ -258,6 +269,7 @@ impl Default for DriveStatus {
             in_progress_pass: false,
             last_pass_h0: None,
             last_pass_h1: None,
+            read_status: DriveReadStatus::Ok,
         }
     }
 }
@@ -1082,6 +1094,7 @@ pub struct TrackAnalysisResult {
     pub gap0_us: Option<u32>,
     pub pll_quality_pct: Option<u8>,
     pub interleave: Option<String>,
+    pub read_status: DriveReadStatus,
 }
 
 impl Default for TrackAnalysisResult {
@@ -1105,6 +1118,7 @@ impl Default for TrackAnalysisResult {
             gap0_us: None,
             pll_quality_pct: None,
             interleave: None,
+            read_status: DriveReadStatus::Ok,
         }
     }
 }
@@ -1123,7 +1137,7 @@ fn read_motor_rpm_diagnostic(
     port.flush()?;
 
     let mut ack = [0u8; 2];
-    if let Err(e) = safe_read_exact(port, &mut ack, Duration::from_millis(500)) {
+    if let Err(e) = safe_read_exact(port, &mut ack, Duration::from_millis(400)) {
         let _ = port.clear(serialport::ClearBuffer::All);
         let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
         ensure_unit_active(port, unit, motor_on, head);
@@ -1137,7 +1151,7 @@ fn read_motor_rpm_diagnostic(
         let _ = port.clear(serialport::ClearBuffer::All);
         port.write_all(&read_cmd)?;
         port.flush()?;
-        if let Err(e) = safe_read_exact(port, &mut ack, Duration::from_millis(500)) {
+        if let Err(e) = safe_read_exact(port, &mut ack, Duration::from_millis(400)) {
             let _ = port.clear(serialport::ClearBuffer::All);
             let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
             ensure_unit_active(port, unit, motor_on, head);
@@ -1159,8 +1173,8 @@ fn read_motor_rpm_diagnostic(
     let mut tmp_buf = [0u8; 4096];
     let start = Instant::now();
 
-    // 2 revolutions at 300 RPM = 400 ms. Timeout 600 ms.
-    while start.elapsed() < Duration::from_millis(600) {
+    // Strict hardware timeout (max 400 ms)
+    while start.elapsed() < Duration::from_millis(400) {
         match port.read(&mut tmp_buf) {
             Ok(n) if n > 0 => {
                 dat.extend_from_slice(&tmp_buf[..n]);
@@ -1168,11 +1182,12 @@ fn read_motor_rpm_diagnostic(
                     break;
                 }
             }
-            Ok(_) => {}
+            Ok(_) => thread::sleep(Duration::from_millis(2)),
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
                 if !dat.is_empty() {
                     break;
                 }
+                thread::sleep(Duration::from_millis(2));
             }
             Err(_) => break,
         }
@@ -1182,7 +1197,7 @@ fn read_motor_rpm_diagnostic(
     let _ = port.write_all(&[0x09, 0x02]);
     let _ = port.flush();
     let mut status_ack = [0u8; 2];
-    let _ = safe_read_exact(port, &mut status_ack, Duration::from_millis(300));
+    let _ = safe_read_exact(port, &mut status_ack, Duration::from_millis(200));
 
     let decoded_gw = decode_gw_flux_with_index(&dat);
     Ok(decoded_gw)
@@ -1210,19 +1225,20 @@ pub fn start_revolution_progress(
     status.sectors.clear();
 
     // Standard ribbon with all empty blocks
-    let blocks_std = "░".repeat(expected_count as usize);
+    let empty_vec: Vec<&str> = (0..expected_count).map(|_| "░").collect();
+    let blocks_std = empty_vec.join(" ");
     let raw_ribbon_std = format!("[ {} ]", blocks_std);
-    let ribbon_col_std = format!("{:<22}", raw_ribbon_std);
+    let ribbon_col_std = format!("{:<39}", raw_ribbon_std);
     let status_str_std = format!("({:>2}/{})", 0, expected_count);
     let standard_line = format!(
-        "T:{:02} H:{}  {}k  {}   {}",
+        "T:{:02} H:{} Rate:{}k MFM {} {}",
         track, head, bitrate, ribbon_col_std, status_str_std
     );
 
     // Verbose ribbon with all empty blocks
-    let blocks_verb = "░".repeat(expected_count as usize);
+    let blocks_verb = empty_vec.join(" ");
     let raw_ribbon_verb = format!("[ {} ]", blocks_verb);
-    let ribbon_col_verb = format!("{:<22}", raw_ribbon_verb);
+    let ribbon_col_verb = format!("{:<39}", raw_ribbon_verb);
     let status_str_verb = format!(" ({:>2}/{})", 0, expected_count);
     let verbose_line = format!(
         "T:{:02} H:{} Rate:{}k MFM {} {} IL:--- Gap0:---- Q:--%",
@@ -1277,9 +1293,17 @@ pub fn update_revolution_progress(
     let filled = sectors_found.min(expected_count as usize);
     let empty = (expected_count as usize).saturating_sub(filled);
 
-    let blocks_std = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
-    let raw_ribbon_std = format!("[ {} ]", blocks_std);
-    let ribbon_col_std = format!("{:<22}", raw_ribbon_std);
+    let mut blocks_vec = Vec::with_capacity(expected_count as usize);
+    for _ in 0..filled {
+        blocks_vec.push("■");
+    }
+    for _ in 0..empty {
+        blocks_vec.push("░");
+    }
+
+    let blocks_str = blocks_vec.join(" ");
+    let raw_ribbon = format!("[ {} ]", blocks_str);
+    let ribbon_col = format!("{:<39}", raw_ribbon);
 
     let status_str_std = if filled == expected_count as usize {
         format!("({}/{} OK)", expected_count, expected_count)
@@ -1287,21 +1311,11 @@ pub fn update_revolution_progress(
         format!("({:>2}/{})", filled, expected_count)
     };
 
-    let standard_line = if filled == expected_count as usize {
-        format!(
-            "T:{:02} H:{}  {}k  {}  {}",
-            track, head, bitrate, ribbon_col_std, status_str_std
-        )
-    } else {
-        format!(
-            "T:{:02} H:{}  {}k  {}   {}",
-            track, head, bitrate, ribbon_col_std, status_str_std
-        )
-    };
+    let standard_line = format!(
+        "T:{:02} H:{} Rate:{}k MFM {} {}",
+        track, head, bitrate, ribbon_col, status_str_std
+    );
 
-    let blocks_verb = format!("{}{}", "■".repeat(filled), "░".repeat(empty));
-    let raw_ribbon_verb = format!("[ {} ]", blocks_verb);
-    let ribbon_col_verb = format!("{:<22}", raw_ribbon_verb);
     let status_str_verb = if filled == expected_count as usize {
         if expected_count == 9 {
             String::from("(9/9 OK)  ")
@@ -1313,7 +1327,7 @@ pub fn update_revolution_progress(
     };
     let verbose_line = format!(
         "T:{:02} H:{} Rate:{}k MFM {} {} IL:--- Gap0:---- Q:--%",
-        track, head, bitrate, ribbon_col_verb, status_str_verb
+        track, head, bitrate, ribbon_col, status_str_verb
     );
 
     if let Some(last) = status.sector_log_standard.last_mut() {
@@ -1346,12 +1360,13 @@ fn read_and_decode_track_diagnostic(
     let read_cmd = [0x07, 0x08, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00];
     if port.write_all(&read_cmd).is_ok() && port.flush().is_ok() {
         let mut ack = [0u8; 2];
-        if safe_read_exact(port, &mut ack, Duration::from_millis(500)).is_ok() && ack[1] == 0 {
+        if safe_read_exact(port, &mut ack, Duration::from_millis(400)).is_ok() && ack[1] == 0 {
             let mut dat = Vec::with_capacity(131072);
             let mut tmp_buf = [0u8; 4096];
             let start = Instant::now();
 
-            while start.elapsed() < Duration::from_millis(700) {
+            // Strict hardware timeout (max 400 ms)
+            while start.elapsed() < Duration::from_millis(400) {
                 if let Ok(n) = port.read(&mut tmp_buf) {
                     if n > 0 {
                         dat.extend_from_slice(&tmp_buf[..n]);
@@ -1366,7 +1381,7 @@ fn read_and_decode_track_diagnostic(
             let _ = port.write_all(&[0x09, 0x02]);
             let _ = port.flush();
             let mut status_ack = [0u8; 2];
-            let _ = safe_read_exact(port, &mut status_ack, Duration::from_millis(300));
+            let _ = safe_read_exact(port, &mut status_ack, Duration::from_millis(200));
 
             let decoded_gw = decode_gw_flux_with_index(&dat);
             let instant_rpms =
@@ -1389,7 +1404,7 @@ fn read_and_decode_track_diagnostic(
 
             let jitter_pct = calculate_jitter_pct(&decoded_gw.index_timestamps);
 
-            if dat.len() < 100 || decoded_gw.flux.len() < 100 {
+            if dat.len() < 100 || decoded_gw.flux.len() < 100 || decoded_gw.index_timestamps.is_empty() {
                 start_revolution_progress(status, tx_status, expected_cyl, status.head, 500, 18);
                 return TrackAnalysisResult {
                     has_disk: false,
@@ -1410,6 +1425,7 @@ fn read_and_decode_track_diagnostic(
                     gap0_us: None,
                     pll_quality_pct: None,
                     interleave: None,
+                    read_status: DriveReadStatus::NoDiskOrNoIndex,
                 };
             }
 
@@ -1560,6 +1576,7 @@ fn read_and_decode_track_diagnostic(
                 gap0_us,
                 pll_quality_pct,
                 interleave,
+                read_status: DriveReadStatus::Ok,
             };
         }
     }
@@ -1585,20 +1602,21 @@ fn read_and_decode_track_diagnostic(
         gap0_us: None,
         pll_quality_pct: None,
         interleave: None,
+        read_status: DriveReadStatus::NoDiskOrNoIndex,
     }
 }
 
 /// Formats a single pass for Verbose horizontal / vertical history mode:
 /// T:<track> H:<head> Rate:<bitrate>k MFM <ribbon> <status> <IL> <Gap0> <Quality>
-/// e.g. "T:40 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK) IL:1:1 Gap0:1440µs Q:98%"
+/// e.g. "T:40 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK) IL:1:1 Gap0:1440µs Q:98%"
 pub fn build_verbose_pass_line(
     track: u8,
     head: u8,
     diag: &TrackAnalysisResult,
 ) -> String {
     if !diag.has_disk || !diag.sectors_known || diag.sectors.is_empty() {
-        let ribbon_col = format!("{:<22}", "[ ? ]");
-        let status_col = "(0/0 NO DATA / MISSING)";
+        let ribbon_col = format!("{:<39}", "[ ? ]");
+        let status_col = "(0/0 NO DATA / NO DISK)";
         return format!(
             "T:{:02} H:{} Rate:---k --- {} {} IL:--- Gap0:---- Q:--%",
             track, head, ribbon_col, status_col
@@ -1627,13 +1645,7 @@ pub fn build_verbose_pass_line(
         18
     };
 
-    let mut blocks = String::with_capacity(expected_count as usize);
-    for _ in 1..=expected_count {
-        blocks.push('■');
-    }
-    let raw_ribbon = format!("[ {} ]", blocks);
-    let ribbon_col = format!("{:<22}", raw_ribbon);
-
+    let mut blocks_vec = Vec::with_capacity(expected_count as usize);
     let mut ok_count: u32 = 0;
     let mut crc_dat_secs: Vec<u8> = Vec::new();
     let mut crc_id_secs: Vec<u8> = Vec::new();
@@ -1644,17 +1656,39 @@ pub fn build_verbose_pass_line(
     for sec_id in 1..=expected_count {
         if let Some(sec) = diag.sectors.iter().find(|s| s.sec_id == sec_id && s.cyl == track) {
             match sec.status {
-                SectorStatus::Ok => ok_count += 1,
-                SectorStatus::CrcData => crc_dat_secs.push(sec_id),
-                SectorStatus::CrcId => crc_id_secs.push(sec_id),
-                SectorStatus::NoDam => no_dam_secs.push(sec_id),
-                SectorStatus::DelDam => del_dam_secs.push(sec_id),
-                SectorStatus::Missing => missing_secs.push(sec_id),
+                SectorStatus::Ok => {
+                    ok_count += 1;
+                    blocks_vec.push("■");
+                }
+                SectorStatus::CrcData => {
+                    crc_dat_secs.push(sec_id);
+                    blocks_vec.push("■");
+                }
+                SectorStatus::CrcId => {
+                    crc_id_secs.push(sec_id);
+                    blocks_vec.push("■");
+                }
+                SectorStatus::NoDam => {
+                    no_dam_secs.push(sec_id);
+                    blocks_vec.push("■");
+                }
+                SectorStatus::DelDam => {
+                    del_dam_secs.push(sec_id);
+                    blocks_vec.push("■");
+                }
+                SectorStatus::Missing => {
+                    missing_secs.push(sec_id);
+                    blocks_vec.push("░");
+                }
             }
         } else {
             missing_secs.push(sec_id);
+            blocks_vec.push("░");
         }
     }
+
+    let raw_ribbon = format!("[ {} ]", blocks_vec.join(" "));
+    let ribbon_col = format!("{:<39}", raw_ribbon);
 
     let status_str = if ok_count == expected_count as u32 {
         if expected_count == 9 {
@@ -1679,6 +1713,8 @@ pub fn build_verbose_pass_line(
         format!("({}/{} MISSING: Sec {})", ok_count, expected_count, list.join(", "))
     } else if diag.off_track_count > 0 {
         format!("({}/{} OFF-TRK: {})", ok_count, expected_count, diag.off_track_details)
+    } else if ok_count < expected_count as u32 {
+        format!("({}/{} BAD)", ok_count, expected_count)
     } else {
         format!("({}/{} OK)", ok_count, expected_count)
     };
@@ -1716,17 +1752,16 @@ pub fn build_verbose_pass_line(
 }
 
 /// Formats a single pass for Standard column mode (Clean segmented bar with strict column alignment)
-/// Format: T:<track> H:<head>  <bitrate>  <segmented_bar>  <status_counter>
+/// Format: T:<track> H:<head> Rate:<bitrate>k MFM <segmented_bar> <status_counter>
 pub fn build_standard_pass_line(
     track: u8,
     head: u8,
     diag: &TrackAnalysisResult,
 ) -> String {
     if !diag.has_disk || !diag.sectors_known || diag.sectors.is_empty() {
-        let raw_ribbon = "[ ? ]";
-        let ribbon_col = format!("{:<22}", raw_ribbon);
-        let status_col = "(0/0 NO DATA / MISSING)";
-        return format!("T:{:02} H:{}  ---k  {}  {}", track, head, ribbon_col, status_col);
+        let ribbon_col = format!("{:<39}", "[ ? ]");
+        let status_col = "(0/0 NO DATA / NO DISK)";
+        return format!("T:{:02} H:{} Rate:---k --- {} {}", track, head, ribbon_col, status_col);
     }
 
     let expected_count = if diag.bitrate == 250 {
@@ -1751,7 +1786,7 @@ pub fn build_standard_pass_line(
         18
     };
 
-    let mut blocks = String::with_capacity(expected_count as usize);
+    let mut blocks_vec = Vec::with_capacity(expected_count as usize);
     let mut ok_count: u32 = 0;
     let mut crc_dat_secs: Vec<u8> = Vec::new();
     let mut crc_id_secs: Vec<u8> = Vec::new();
@@ -1764,39 +1799,39 @@ pub fn build_standard_pass_line(
             match sec.status {
                 SectorStatus::Ok => {
                     ok_count += 1;
-                    blocks.push('█');
+                    blocks_vec.push("■");
                 }
                 SectorStatus::CrcData => {
                     crc_dat_secs.push(sec_id);
-                    blocks.push('█');
+                    blocks_vec.push("■");
                 }
                 SectorStatus::CrcId => {
                     crc_id_secs.push(sec_id);
-                    blocks.push('█');
+                    blocks_vec.push("■");
                 }
                 SectorStatus::NoDam => {
                     no_dam_secs.push(sec_id);
-                    blocks.push('█');
+                    blocks_vec.push("■");
                 }
                 SectorStatus::DelDam => {
                     del_dam_secs.push(sec_id);
-                    blocks.push('█');
+                    blocks_vec.push("■");
                 }
                 SectorStatus::Missing => {
                     missing_secs.push(sec_id);
-                    blocks.push('░');
+                    blocks_vec.push("░");
                 }
             }
         } else if diag.sectors.iter().any(|s| s.sec_id == sec_id) {
-            blocks.push('█');
+            blocks_vec.push("■");
         } else {
             missing_secs.push(sec_id);
-            blocks.push('░');
+            blocks_vec.push("░");
         }
     }
 
-    let raw_ribbon = format!("[ {} ]", blocks);
-    let ribbon_col = format!("{:<22}", raw_ribbon);
+    let raw_ribbon = format!("[ {} ]", blocks_vec.join(" "));
+    let ribbon_col = format!("{:<39}", raw_ribbon);
 
     let status_str = if ok_count == expected_count as u32 {
         format!("({}/{} OK)", expected_count, expected_count)
@@ -1817,12 +1852,14 @@ pub fn build_standard_pass_line(
         format!("({}/{} MISSING: Sec {})", ok_count, expected_count, list.join(", "))
     } else if diag.off_track_count > 0 {
         format!("({}/{} OFF-TRK: {})", ok_count, expected_count, diag.off_track_details)
+    } else if ok_count < expected_count as u32 {
+        format!("({}/{} BAD)", ok_count, expected_count)
     } else {
         format!("({}/{} OK)", ok_count, expected_count)
     };
 
     format!(
-        "T:{:02} H:{}  {}k  {}  {}",
+        "T:{:02} H:{} Rate:{}k MFM {} {}",
         track, head, diag.bitrate, ribbon_col, status_str
     )
 }
@@ -1893,6 +1930,7 @@ pub fn process_track_diagnostic(
     status.off_track_details = effective_diag.off_track_details.clone();
     status.crc_err_count = effective_diag.crc_err_count;
     status.alignment_pct = effective_diag.alignment_pct;
+    status.read_status = effective_diag.read_status;
 
     status.sectors.clear();
     for sec in &effective_diag.sectors {
@@ -1935,6 +1973,17 @@ pub fn process_track_diagnostic(
         status.last_pass_h0 = Some(pass);
     } else {
         status.last_pass_h1 = Some(pass);
+    }
+
+    if status.head_select == HeadSelection::Both {
+        let both_metrics = crate::app::App::compute_both_metrics_from_passes(
+            status.last_pass_h0.as_ref(),
+            status.last_pass_h1.as_ref(),
+            status.sector_count,
+        );
+        status.alignment_pct = both_metrics.alignment_pct;
+        status.on_track_count = both_metrics.total_ok;
+        status.crc_err_count = both_metrics.total_crc_err;
     }
 
     if status.in_progress_pass && !status.sector_log_standard.is_empty() && !status.sector_log_verbose.is_empty() {
@@ -2257,13 +2306,14 @@ pub fn hw_thread(
                                 HwCmd::ToggleMotor => {
                                     let new_state = !status.motor_on;
                                     let _ = port.clear(serialport::ClearBuffer::All);
+                                    let _ = gw_send_raw(&mut port, &[0x0E, 0x03, 0x01], 0);
+                                    let _ = gw_send_raw(&mut port, &[0x0C, 0x03, status.drive_unit], 0);
+                                    let _ = gw_send_raw(&mut port, &[0x03, 0x03, status.head], 0);
+                                    let _ = port.clear(serialport::ClearBuffer::Input);
                                     let res = if new_state {
-                                        let _ = gw_send_raw(&mut port, &[0x0E, 0x03, 0x01], 0);
-                                        let _ = gw_send_raw(&mut port, &[0x0C, 0x03, status.drive_unit], 0);
-                                        let _ = gw_send_raw(&mut port, &[0x03, 0x03, status.head], 0);
-                                        gw_send_raw_timeout(&mut port, &[0x06, 0x04, status.drive_unit, 0x01], 0, Duration::from_millis(150))
+                                        gw_send_raw_timeout(&mut port, &[0x06, 0x04, status.drive_unit, 0x01], 0, Duration::from_millis(200))
                                     } else {
-                                        gw_send_raw_timeout(&mut port, &[0x06, 0x04, status.drive_unit, 0x00], 0, Duration::from_millis(150))
+                                        gw_send_raw_timeout(&mut port, &[0x06, 0x04, status.drive_unit, 0x00], 0, Duration::from_millis(200))
                                     };
 
                                     match res {
@@ -3557,8 +3607,8 @@ mod tests {
         assert_eq!(status.sector_log.len(), 1);
         assert_eq!(status.sector_log_standard.len(), 1);
         assert_eq!(status.sector_log_verbose.len(), 1);
-        assert_eq!(status.sector_log_standard[0], "T:10 H:0  500k  [ ███░░░░░░░░░░░░░░░ ]  (1/18 CRC-DAT: Sec 2)");
-        assert!(status.sector_log_verbose[0].contains("T:10 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ]"));
+        assert_eq!(status.sector_log_standard[0], "T:10 H:0 Rate:500k MFM [ ■ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] (1/18 CRC-DAT: Sec 2)");
+        assert!(status.sector_log_verbose[0].contains("T:10 H:0 Rate:500k MFM [ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ]"));
         assert!(status.sector_log_verbose[0].contains("CRC-DAT: Sec 2"));
 
         let beeps: Vec<BeepType> = rx_sound.try_iter().collect();
@@ -3600,8 +3650,8 @@ mod tests {
         process_track_diagnostic(&mut status, &diag, &tx_sound);
 
         assert_eq!(status.sector_log.len(), 1);
-        assert_eq!(status.sector_log_standard[0], "T:10 H:0  500k  [ ██░░░░░░░░░░░░░░░░ ]  (2/18 MISSING: Sec 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)");
-        assert!(status.sector_log_verbose[0].contains("T:10 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ]"));
+        assert_eq!(status.sector_log_standard[0], "T:10 H:0 Rate:500k MFM [ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] (2/18 MISSING: Sec 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)");
+        assert!(status.sector_log_verbose[0].contains("T:10 H:0 Rate:500k MFM [ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ]"));
         assert!(!status.sector_log_verbose[0].contains("200.1ms"));
         assert!(status.sector_log_verbose[0].contains("Gap0:----"));
 
@@ -3645,8 +3695,8 @@ mod tests {
         process_track_diagnostic(&mut status, &diag, &tx_sound);
 
         assert_eq!(status.sector_log.len(), 1);
-        assert!(status.sector_log[0].contains("T:10 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ]"));
-        assert_eq!(status.sector_log_standard[0], "T:10 H:0  500k  [ ░░░███░░░░░░░░░░░░ ]  (3/18 MISSING: Sec 1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)");
+        assert!(status.sector_log[0].contains("T:10 H:0 Rate:500k MFM [ ░ ░ ░ ■ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ]"));
+        assert_eq!(status.sector_log_standard[0], "T:10 H:0 Rate:500k MFM [ ░ ░ ░ ■ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] (3/18 MISSING: Sec 1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)");
 
         let beeps: Vec<BeepType> = rx_sound.try_iter().collect();
         assert_eq!(beeps, vec![BeepType::Ok]);
@@ -3683,10 +3733,10 @@ mod tests {
         process_track_diagnostic(&mut status, &diag, &tx_sound);
 
         assert_eq!(status.sector_log.len(), 1);
-        assert_eq!(status.sector_log_standard[0], "T:05 H:1  ---k  [ ? ]                   (0/0 NO DATA / MISSING)");
+        assert_eq!(status.sector_log_standard[0], "T:05 H:1 Rate:---k --- [ ? ]                                   (0/0 NO DATA / NO DISK)");
         assert_eq!(
             status.sector_log_verbose[0],
-            "T:05 H:1 Rate:---k --- [ ? ]                  (0/0 NO DATA / MISSING) IL:--- Gap0:---- Q:--%"
+            "T:05 H:1 Rate:---k --- [ ? ]                                   (0/0 NO DATA / NO DISK) IL:--- Gap0:---- Q:--%"
         );
 
         let beeps: Vec<BeepType> = rx_sound.try_iter().collect();
@@ -3728,9 +3778,9 @@ mod tests {
         process_track_diagnostic(&mut status, &diag, &tx_sound);
 
         assert_eq!(status.sector_log.len(), 1);
-        assert!(status.sector_log[0].contains("T:10 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ]"));
+        assert!(status.sector_log[0].contains("T:10 H:0 Rate:500k MFM [ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ]"));
         assert!(status.sector_log[0].contains("CRC-DAT: Sec 1"));
-        assert_eq!(status.sector_log_standard[0], "T:10 H:0  500k  [ ██░░░░░░░░░░░░░░░░ ]  (1/18 CRC-DAT: Sec 1)");
+        assert_eq!(status.sector_log_standard[0], "T:10 H:0 Rate:500k MFM [ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] (1/18 CRC-DAT: Sec 1)");
 
         let beeps: Vec<BeepType> = rx_sound.try_iter().collect();
         assert_eq!(beeps, vec![BeepType::Error]);
@@ -3804,7 +3854,7 @@ mod tests {
         process_track_diagnostic(&mut status, &diag, &tx_sound);
 
         assert_eq!(status.sector_log_verbose.len(), 1);
-        assert!(status.sector_log_verbose[0].contains("T:20 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ]"));
+        assert!(status.sector_log_verbose[0].contains("T:20 H:0 Rate:500k MFM [ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ]"));
         assert!(!status.sector_log_verbose[0].contains("204.3ms"));
         assert!(status.sector_log_verbose[0].contains("Gap0:----"));
     }
@@ -4121,9 +4171,9 @@ mod tests {
         assert_eq!(status.sector_log_standard.len(), 1);
         assert_eq!(
             status.sector_log_standard[0],
-            "T:10 H:0  500k  [ ██████████████████ ]  (18/18 OK)"
+            "T:10 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK)"
         );
-        assert!(status.sector_log_verbose[0].contains("T:10 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK)"));
+        assert!(status.sector_log_verbose[0].contains("T:10 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK)"));
 
         // 4. Audio confirmation confirms perfect pass
         let beeps: Vec<BeepType> = rx_sound.try_iter().collect();
@@ -4190,7 +4240,7 @@ mod tests {
         assert_eq!(status.sector_log_standard.len(), 1);
         assert_eq!(
             status.sector_log_standard[0],
-            "T:70 H:0  500k  [ ██████████████████ ]  (18/18 OK)"
+            "T:70 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK)"
         );
         assert_eq!(status.on_track_count, 18);
         assert_eq!(status.off_track_count, 0);
@@ -4287,12 +4337,13 @@ mod tests {
             gap0_us: Some(1440),
             pll_quality_pct: Some(99),
             interleave: Some("1:1".to_string()),
+            read_status: DriveReadStatus::Ok,
         };
 
         let line = build_verbose_pass_line(79, 0, &diag);
         assert_eq!(
             line,
-            "T:79 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK) IL:1:1 Gap0:1440µs Q:99%"
+            "T:79 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK) IL:1:1 Gap0:1440µs Q:99%"
         );
     }
 
@@ -4321,12 +4372,13 @@ mod tests {
             gap0_us: Some(2880),
             pll_quality_pct: Some(98),
             interleave: Some("1:1".to_string()),
+            read_status: DriveReadStatus::Ok,
         };
 
         let line = build_verbose_pass_line(40, 0, &diag);
         assert_eq!(
             line,
-            "T:40 H:0 Rate:250k MFM [ ■■■■■■■■■ ]          (9/9 OK)   IL:1:1 Gap0:2880µs Q:98%"
+            "T:40 H:0 Rate:250k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ]                   (9/9 OK)   IL:1:1 Gap0:2880µs Q:98%"
         );
     }
 
@@ -4355,12 +4407,13 @@ mod tests {
             gap0_us: Some(1440),
             pll_quality_pct: Some(97),
             interleave: Some("1:1".to_string()),
+            read_status: DriveReadStatus::Ok,
         };
 
         let line = build_verbose_pass_line(40, 0, &diag);
         assert_eq!(
             line,
-            "T:40 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■ ]    (15/15 OK) IL:1:1 Gap0:1440µs Q:97%"
+            "T:40 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ]       (15/15 OK) IL:1:1 Gap0:1440µs Q:97%"
         );
     }
 
@@ -4395,12 +4448,13 @@ mod tests {
             gap0_us: Some(1440),
             pll_quality_pct: Some(84),
             interleave: Some("1:1".to_string()),
+            read_status: DriveReadStatus::Ok,
         };
 
         let line = build_verbose_pass_line(35, 0, &diag);
         assert_eq!(
             line,
-            "T:35 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (17/18 CRC-DAT: Sec 15) IL:1:1 Gap0:1440µs Q:84%"
+            "T:35 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (17/18 CRC-DAT: Sec 15) IL:1:1 Gap0:1440µs Q:84%"
         );
     }
 
@@ -4425,12 +4479,13 @@ mod tests {
             gap0_us: None,
             pll_quality_pct: None,
             interleave: None,
+            read_status: DriveReadStatus::NoDiskOrNoIndex,
         };
 
         let line = build_verbose_pass_line(80, 0, &diag);
         assert_eq!(
             line,
-            "T:80 H:0 Rate:---k --- [ ? ]                  (0/0 NO DATA / MISSING) IL:--- Gap0:---- Q:--%"
+            "T:80 H:0 Rate:---k --- [ ? ]                                   (0/0 NO DATA / NO DISK) IL:--- Gap0:---- Q:--%"
         );
     }
 
@@ -4459,6 +4514,7 @@ mod tests {
             gap0_us: Some(1440),
             pll_quality_pct: Some(98),
             interleave: Some("1:1".to_string()),
+            read_status: DriveReadStatus::Ok,
         };
 
         let line = build_verbose_pass_line(40, 0, &diag);
@@ -4568,14 +4624,14 @@ mod tests {
         assert_eq!(status.sector_log_standard.len(), 1);
         assert_eq!(
             status.sector_log_standard[0],
-            "T:40 H:0  500k  [ ░░░░░░░░░░░░░░░░░░ ]   ( 0/18)"
+            "T:40 H:0 Rate:500k MFM [ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] ( 0/18)"
         );
         assert!(status.sectors.is_empty());
 
         let emitted = rx_status.try_recv().unwrap();
         assert_eq!(
             emitted.sector_log_standard[0],
-            "T:40 H:0  500k  [ ░░░░░░░░░░░░░░░░░░ ]   ( 0/18)"
+            "T:40 H:0 Rate:500k MFM [ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] ( 0/18)"
         );
     }
 
@@ -4598,7 +4654,7 @@ mod tests {
         assert_eq!(status.sector_log_standard.len(), 1);
         assert_eq!(
             status.sector_log_standard[0],
-            "T:40 H:0  500k  [ █░░░░░░░░░░░░░░░░░ ]   ( 1/18)"
+            "T:40 H:0 Rate:500k MFM [ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] ( 1/18)"
         );
         assert_eq!(status.sectors.len(), 1);
 
@@ -4608,7 +4664,7 @@ mod tests {
         assert_eq!(status.sector_log_standard.len(), 1);
         assert_eq!(
             status.sector_log_standard[0],
-            "T:40 H:0  500k  [ █████░░░░░░░░░░░░░ ]   ( 5/18)"
+            "T:40 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] ( 5/18)"
         );
         assert_eq!(status.sectors.len(), 2);
 
@@ -4618,7 +4674,7 @@ mod tests {
         assert_eq!(status.sector_log_standard.len(), 1);
         assert_eq!(
             status.sector_log_standard[0],
-            "T:40 H:0  500k  [ ██████████████████ ]  (18/18 OK)"
+            "T:40 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK)"
         );
     }
 
@@ -4670,7 +4726,7 @@ mod tests {
         assert!(!status.in_progress_pass);
         assert_eq!(
             status.sector_log_standard[0],
-            "T:40 H:0  500k  [ ██████████████████ ]  (18/18 OK)"
+            "T:40 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK)"
         );
 
         // Revolution 2: Start new revolution
@@ -4681,13 +4737,68 @@ mod tests {
         // Line 0 is frozen in history
         assert_eq!(
             status.sector_log_standard[0],
-            "T:40 H:0  500k  [ ██████████████████ ]  (18/18 OK)"
+            "T:40 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK)"
         );
         // Line 1 is the new active line being swept
         assert_eq!(
             status.sector_log_standard[1],
-            "T:40 H:0  500k  [ ░░░░░░░░░░░░░░░░░░ ]   ( 0/18)"
+            "T:40 H:0 Rate:500k MFM [ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] ( 0/18)"
         );
+    }
+
+    #[test]
+    fn test_process_track_diagnostic_both_mode_consolidation() {
+        let (tx_sound, _) = crossbeam_channel::unbounded();
+        let mut status = DriveStatus {
+            track: 40,
+            head_select: HeadSelection::Both,
+            head: 0,
+            sector_count: 18,
+            ..Default::default()
+        };
+
+        // Head 0 pass: 18/18 OK
+        let sectors_h0: Vec<DecodedSector> = (1..=18)
+            .map(|id| DecodedSector::new(40, 0, id, 2, true))
+            .collect();
+        let diag_h0 = TrackAnalysisResult {
+            has_disk: true,
+            bitrate: 500,
+            sector_count: 18,
+            sectors_known: true,
+            sectors: sectors_h0,
+            on_track_count: 18,
+            off_track_count: 0,
+            off_track_details: String::from("NONE (Perfect)"),
+            crc_err_count: 0,
+            alignment_pct: 100.0,
+            ..Default::default()
+        };
+        process_track_diagnostic(&mut status, &diag_h0, &tx_sound);
+        assert!(status.last_pass_h0.is_some());
+
+        // Head 1 pass: 0/18 OK (degraded)
+        status.head = 1;
+        let diag_h1 = TrackAnalysisResult {
+            has_disk: false,
+            bitrate: 500,
+            sector_count: 0,
+            sectors_known: false,
+            sectors: Vec::new(),
+            on_track_count: 0,
+            off_track_count: 0,
+            off_track_details: String::from("NONE"),
+            crc_err_count: 0,
+            alignment_pct: 0.0,
+            read_status: DriveReadStatus::NoDiskOrNoIndex,
+            ..Default::default()
+        };
+        process_track_diagnostic(&mut status, &diag_h1, &tx_sound);
+        assert!(status.last_pass_h1.is_some());
+
+        // Both mode alignment should immediately be 50.0% (18/36)
+        assert_eq!(status.alignment_pct, 50.0);
+        assert_eq!(status.on_track_count, 18);
     }
 
     #[test]

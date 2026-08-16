@@ -453,9 +453,49 @@ fn main() -> Result<(), Box<dyn Error>> {
                     )));
                     right_lines.push(Line::from(""));
 
-                    let align_color = if status.alignment_pct >= 95.0 {
+                    let (disp_align_pct, disp_expected_sectors, disp_crc_text, disp_crc_color) =
+                        if status.head_select == HeadSelection::Both {
+                            let both_metrics = app.compute_both_mode_metrics();
+                            let crc_txt = if both_metrics.total_crc_err == 0 && both_metrics.alignment_pct >= 99.9 {
+                                "100% OK (0 errors)".to_string()
+                            } else if both_metrics.total_crc_err > 0 {
+                                format!("{:.1}% ({} CRC errors)", both_metrics.crc_integrity_pct, both_metrics.total_crc_err)
+                            } else {
+                                format!("{:.1}% (degraded pass)", both_metrics.crc_integrity_pct)
+                            };
+                            let crc_col = if both_metrics.total_crc_err == 0 && !both_metrics.is_degraded {
+                                Color::Green
+                            } else {
+                                Color::Red
+                            };
+                            (
+                                both_metrics.alignment_pct,
+                                both_metrics.total_expected,
+                                crc_txt,
+                                crc_col,
+                            )
+                        } else {
+                            let crc_txt = if status.crc_err_count == 0 {
+                                "100% OK (0 errors)".to_string()
+                            } else {
+                                format!("{} CRC Error(s)", status.crc_err_count)
+                            };
+                            let crc_col = if status.crc_err_count == 0 {
+                                Color::Green
+                            } else {
+                                Color::Red
+                            };
+                            (
+                                status.alignment_pct,
+                                status.on_track_count,
+                                crc_txt,
+                                crc_col,
+                            )
+                        };
+
+                    let align_color = if disp_align_pct >= 95.0 {
                         Color::Green
-                    } else if status.alignment_pct >= 80.0 {
+                    } else if disp_align_pct >= 80.0 {
                         Color::Yellow
                     } else {
                         Color::Red
@@ -471,8 +511,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         Span::styled(
                             format!(
                                 "{:.1}%  [ {} ]",
-                                status.alignment_pct,
-                                build_alignment_gauge(status.alignment_pct)
+                                disp_align_pct,
+                                build_alignment_gauge(disp_align_pct)
                             ),
                             Style::default()
                                 .fg(align_color)
@@ -486,7 +526,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             Style::default().fg(Color::White),
                         ),
                         Span::styled(
-                            format!("{} sectors", status.on_track_count),
+                            format!("{} sectors", disp_expected_sectors),
                             Style::default()
                                 .fg(Color::Green)
                                 .add_modifier(Modifier::BOLD),
@@ -509,23 +549,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         ),
                     ]));
 
-                    let crc_color = if status.crc_err_count == 0 {
-                        Color::Green
-                    } else {
-                        Color::Red
-                    };
                     right_lines.push(Line::from(vec![
                         Span::styled(
                             "► CRC Integrity Check     : ",
                             Style::default().fg(Color::White),
                         ),
                         Span::styled(
-                            if status.crc_err_count == 0 {
-                                "100% OK (0 errors)".to_string()
-                            } else {
-                                format!("{} CRC Error(s)", status.crc_err_count)
-                            },
-                            Style::default().fg(crc_color).add_modifier(Modifier::BOLD),
+                            disp_crc_text,
+                            Style::default().fg(disp_crc_color).add_modifier(Modifier::BOLD),
                         ),
                     ]));
 
@@ -989,7 +1020,7 @@ mod tests {
     #[test]
     fn test_get_standard_line_style_partial_pass() {
         // 16 sectors out of 18 (with missing) -> Yellow
-        let style = get_standard_line_style("T:00 H:0  500k  [ ████████████████░░ ]  (16/18 MISSING: Sec 17, 18)", 18);
+        let style = get_standard_line_style("T:00 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ░ ░ ] (16/18 MISSING: Sec 17, 18)", 18);
         assert_eq!(
             style,
             Style::default()
@@ -997,27 +1028,27 @@ mod tests {
                 .add_modifier(Modifier::BOLD)
         );
 
-        // 18 sectors with 1 CRC error -> Red
-        let style_err = get_standard_line_style("T:00 H:0  500k  [ ██████████████████ ]  (17/18 CRC-DAT: Sec 9)", 18);
+        // 18 sectors with 1 CRC error -> LightRed
+        let style_err = get_standard_line_style("T:00 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (17/18 CRC-DAT: Sec 9)", 18);
         assert_eq!(
             style_err,
             Style::default()
-                .fg(Color::Red)
+                .fg(Color::LightRed)
                 .add_modifier(Modifier::BOLD)
         );
     }
 
     #[test]
     fn test_get_standard_line_style_missing_or_poor_pass() {
-        let style_missing = get_standard_line_style("T:00 H:0  ---k  [ ? ]                   (0/0 NO DATA / MISSING)", 18);
+        let style_missing = get_standard_line_style("T:00 H:0 Rate:---k --- [ ? ] (0/0 NO DATA / NO DISK)", 18);
         assert_eq!(
             style_missing,
             Style::default()
-                .fg(Color::Red)
+                .fg(Color::LightRed)
                 .add_modifier(Modifier::BOLD)
         );
 
-        let style_poor = get_standard_line_style("T:00 H:0  500k  [ ███░░░░░░░░░░░░░░░ ]  (3/18 MISSING: Sec 4, 5)", 18);
+        let style_poor = get_standard_line_style("T:00 H:0 Rate:500k MFM [ ■ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] (3/18 MISSING: Sec 4, 5)", 18);
         assert_eq!(
             style_poor,
             Style::default()
@@ -1028,37 +1059,37 @@ mod tests {
 
     #[test]
     fn test_build_standard_line_spans_individual_coloring() {
-        let line_all_ok = "T:00 H:0  500k  [ ██████████████████ ]  (18/18 OK)";
+        let line_all_ok = "T:00 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK)";
         let spans = build_standard_line_spans(line_all_ok, 18);
         assert!(!spans.is_empty());
         let green_blocks = spans
             .iter()
-            .filter(|s| s.content == "█" && s.style.fg == Some(Color::LightGreen))
+            .filter(|s| s.content == "■ " && s.style.fg == Some(Color::LightGreen))
             .count();
         assert_eq!(green_blocks, 18);
 
-        let line_crc_15 = "T:35 H:0  500k  [ ██████████████████ ]  (17/18 CRC-DAT: Sec 15)";
+        let line_crc_15 = "T:35 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (17/18 CRC-DAT: Sec 15)";
         let spans_crc = build_standard_line_spans(line_crc_15, 18);
         let red_blocks = spans_crc
             .iter()
-            .filter(|s| s.content == "█" && s.style.fg == Some(Color::Red))
+            .filter(|s| s.content == "■ " && s.style.fg == Some(Color::LightRed))
             .count();
         let ok_blocks = spans_crc
             .iter()
-            .filter(|s| s.content == "█" && s.style.fg == Some(Color::LightGreen))
+            .filter(|s| s.content == "■ " && s.style.fg == Some(Color::LightGreen))
             .count();
         assert_eq!(red_blocks, 1);
         assert_eq!(ok_blocks, 17);
 
-        let line_missing_8 = "T:40 H:0  500k  [ ███████░███████ ]     (14/15 MISSING: Sec 8)";
+        let line_missing_8 = "T:40 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ░ ■ ■ ■ ■ ■ ■ ■ ] (14/15 MISSING: Sec 8)";
         let spans_miss = build_standard_line_spans(line_missing_8, 15);
         let dark_blocks = spans_miss
             .iter()
-            .filter(|s| s.content == "░" && s.style.fg == Some(Color::DarkGray))
+            .filter(|s| s.content == "░ " && s.style.fg == Some(Color::DarkGray))
             .count();
         let green_14 = spans_miss
             .iter()
-            .filter(|s| s.content == "█" && s.style.fg == Some(Color::LightGreen))
+            .filter(|s| s.content == "■ " && s.style.fg == Some(Color::LightGreen))
             .count();
         assert_eq!(dark_blocks, 1);
         assert_eq!(green_14, 14);
@@ -1067,7 +1098,7 @@ mod tests {
     #[test]
     fn test_get_verbose_line_style_perfect_pass() {
         let style = get_verbose_line_style(
-            "T:79 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK) IL:1:1 Gap0:1440µs Q:99%",
+            "T:79 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK) IL:1:1 Gap0:1440µs Q:99%",
             18,
         );
         assert_eq!(
@@ -1078,7 +1109,7 @@ mod tests {
         );
 
         let style_dd = get_verbose_line_style(
-            "T:40 H:0 Rate:250k MFM [ ■■■■■■■■■ ]          (9/9 OK)   IL:1:1 Gap0:2880µs Q:98%",
+            "T:40 H:0 Rate:250k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ]                    (9/9 OK)   IL:1:1 Gap0:2880µs Q:98%",
             9,
         );
         assert_eq!(
@@ -1092,7 +1123,7 @@ mod tests {
     #[test]
     fn test_get_verbose_line_style_partial_pass() {
         let style_missing = get_verbose_line_style(
-            "T:35 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■ ] (14/15 MISSING: Sec 8) IL:1:1 Gap0:1440µs Q:90%",
+            "T:35 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ░ ] (14/15 MISSING: Sec 8) IL:1:1 Gap0:1440µs Q:90%",
             15,
         );
         assert_eq!(
@@ -1103,7 +1134,7 @@ mod tests {
         );
 
         let style_off = get_verbose_line_style(
-            "T:00 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OFF-TRK: T10: 18 sect) IL:1:1 Gap0:1440µs Q:85%",
+            "T:00 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OFF-TRK: T10: 18 sect) IL:1:1 Gap0:1440µs Q:85%",
             18,
         );
         assert_eq!(
@@ -1117,62 +1148,62 @@ mod tests {
     #[test]
     fn test_get_verbose_line_style_missing_or_poor_pass() {
         let style_missing = get_verbose_line_style(
-            "T:80 H:0 Rate:---k --- [ ? ]                  (0/0 NO DATA / MISSING) IL:--- Gap0:---- Q:--%",
+            "T:80 H:0 Rate:---k --- [ ? ]                                    (0/0 NO DATA / NO DISK) IL:--- Gap0:---- Q:--%",
             18,
         );
         assert_eq!(
             style_missing,
             Style::default()
-                .fg(Color::Red)
+                .fg(Color::LightRed)
                 .add_modifier(Modifier::BOLD)
         );
 
         let style_crc = get_verbose_line_style(
-            "T:35 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (17/18 CRC-DAT: Sec 15) IL:1:1 Gap0:1440µs Q:84%",
+            "T:35 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (17/18 CRC-DAT: Sec 15) IL:1:1 Gap0:1440µs Q:84%",
             18,
         );
         assert_eq!(
             style_crc,
             Style::default()
-                .fg(Color::Red)
+                .fg(Color::LightRed)
                 .add_modifier(Modifier::BOLD)
         );
     }
 
     #[test]
     fn test_build_verbose_line_spans_individual_coloring() {
-        let line_all_ok = "T:79 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (18/18 OK) IL:1:1 Gap0:1440µs Q:99%";
+        let line_all_ok = "T:79 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK) IL:1:1 Gap0:1440µs Q:99%";
         let spans = build_verbose_line_spans(line_all_ok, 18);
         assert!(!spans.is_empty());
         // Check ribbon blocks are green
         let green_blocks = spans
             .iter()
-            .filter(|s| s.content == "■" && s.style.fg == Some(Color::LightGreen))
+            .filter(|s| s.content == "■ " && s.style.fg == Some(Color::LightGreen))
             .count();
         assert_eq!(green_blocks, 18);
 
-        let line_crc_15 = "T:35 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■■■■ ] (17/18 CRC-DAT: Sec 15) IL:1:1 Gap0:1440µs Q:84%";
+        let line_crc_15 = "T:35 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (17/18 CRC-DAT: Sec 15) IL:1:1 Gap0:1440µs Q:84%";
         let spans_crc = build_verbose_line_spans(line_crc_15, 18);
         let red_blocks = spans_crc
             .iter()
-            .filter(|s| s.content == "■" && s.style.fg == Some(Color::Red))
+            .filter(|s| s.content == "■ " && s.style.fg == Some(Color::LightRed))
             .count();
         let ok_blocks = spans_crc
             .iter()
-            .filter(|s| s.content == "■" && s.style.fg == Some(Color::LightGreen))
+            .filter(|s| s.content == "■ " && s.style.fg == Some(Color::LightGreen))
             .count();
         assert_eq!(red_blocks, 1);
         assert_eq!(ok_blocks, 17);
 
-        let line_missing_8 = "T:40 H:0 Rate:500k MFM [ ■■■■■■■■■■■■■■■ ] (14/15 MISSING: Sec 8) IL:1:1 Gap0:1440µs Q:90%";
+        let line_missing_8 = "T:40 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ░ ■ ■ ■ ■ ■ ■ ■ ] (14/15 MISSING: Sec 8) IL:1:1 Gap0:1440µs Q:90%";
         let spans_miss = build_verbose_line_spans(line_missing_8, 15);
         let dark_blocks = spans_miss
             .iter()
-            .filter(|s| s.content == "■" && s.style.fg == Some(Color::DarkGray))
+            .filter(|s| s.content == "░ " && s.style.fg == Some(Color::DarkGray))
             .count();
         let green_14 = spans_miss
             .iter()
-            .filter(|s| s.content == "■" && s.style.fg == Some(Color::LightGreen))
+            .filter(|s| s.content == "■ " && s.style.fg == Some(Color::LightGreen))
             .count();
         assert_eq!(dark_blocks, 1);
         assert_eq!(green_14, 14);
@@ -1181,57 +1212,57 @@ mod tests {
     #[test]
     fn test_build_standard_line_spans_progressive_sweep() {
         // 0/18: 18 dark blocks, 0 green blocks
-        let line_0 = "T:40 H:0  500k  [ ░░░░░░░░░░░░░░░░░░ ]   ( 0/18)";
+        let line_0 = "T:40 H:0 Rate:500k MFM [ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] ( 0/18)";
         let spans_0 = build_standard_line_spans(line_0, 18);
         let dark_0 = spans_0
             .iter()
-            .filter(|s| s.content == "░" && s.style.fg == Some(Color::DarkGray))
+            .filter(|s| s.content == "░ " && s.style.fg == Some(Color::DarkGray))
             .count();
         let green_0 = spans_0
             .iter()
-            .filter(|s| s.content == "█" && s.style.fg == Some(Color::LightGreen))
+            .filter(|s| s.content == "■ " && s.style.fg == Some(Color::LightGreen))
             .count();
         assert_eq!(dark_0, 18);
         assert_eq!(green_0, 0);
 
         // 1/18: 1 green block, 17 dark blocks
-        let line_1 = "T:40 H:0  500k  [ █░░░░░░░░░░░░░░░░░ ]   ( 1/18)";
+        let line_1 = "T:40 H:0 Rate:500k MFM [ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] ( 1/18)";
         let spans_1 = build_standard_line_spans(line_1, 18);
         let dark_1 = spans_1
             .iter()
-            .filter(|s| s.content == "░" && s.style.fg == Some(Color::DarkGray))
+            .filter(|s| s.content == "░ " && s.style.fg == Some(Color::DarkGray))
             .count();
         let green_1 = spans_1
             .iter()
-            .filter(|s| s.content == "█" && s.style.fg == Some(Color::LightGreen))
+            .filter(|s| s.content == "■ " && s.style.fg == Some(Color::LightGreen))
             .count();
         assert_eq!(dark_1, 17);
         assert_eq!(green_1, 1);
 
         // 5/18: 5 green blocks, 13 dark blocks
-        let line_5 = "T:40 H:0  500k  [ █████░░░░░░░░░░░░░ ]   ( 5/18)";
+        let line_5 = "T:40 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] ( 5/18)";
         let spans_5 = build_standard_line_spans(line_5, 18);
         let dark_5 = spans_5
             .iter()
-            .filter(|s| s.content == "░" && s.style.fg == Some(Color::DarkGray))
+            .filter(|s| s.content == "░ " && s.style.fg == Some(Color::DarkGray))
             .count();
         let green_5 = spans_5
             .iter()
-            .filter(|s| s.content == "█" && s.style.fg == Some(Color::LightGreen))
+            .filter(|s| s.content == "■ " && s.style.fg == Some(Color::LightGreen))
             .count();
         assert_eq!(dark_5, 13);
         assert_eq!(green_5, 5);
 
         // 18/18 OK: 18 green blocks, 0 dark blocks
-        let line_18 = "T:40 H:0  500k  [ ██████████████████ ]  (18/18 OK)";
+        let line_18 = "T:40 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK)";
         let spans_18 = build_standard_line_spans(line_18, 18);
         let dark_18 = spans_18
             .iter()
-            .filter(|s| s.content == "░" && s.style.fg == Some(Color::DarkGray))
+            .filter(|s| s.content == "░ " && s.style.fg == Some(Color::DarkGray))
             .count();
         let green_18 = spans_18
             .iter()
-            .filter(|s| s.content == "█" && s.style.fg == Some(Color::LightGreen))
+            .filter(|s| s.content == "■ " && s.style.fg == Some(Color::LightGreen))
             .count();
         assert_eq!(dark_18, 0);
         assert_eq!(green_18, 18);
@@ -1505,17 +1536,17 @@ mod tests {
 
     #[test]
     fn test_build_standard_line_spans_with_bad_token() {
-        let line_bad = "T:40 H:1  500k  [ ██████████░░░░░░░░ ]  (10/18 BAD)";
+        let line_bad = "T:40 H:1 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ] (10/18 BAD)";
         let spans = build_standard_line_spans(line_bad, 18);
         assert!(!spans.is_empty());
 
-        // Verify (10/18 BAD) has Red style
+        // Verify (10/18 BAD) has LightRed style
         let bad_span = spans.iter().find(|s| s.content.contains("BAD"));
         assert!(bad_span.is_some());
-        assert_eq!(bad_span.unwrap().style.fg, Some(Color::Red));
+        assert_eq!(bad_span.unwrap().style.fg, Some(Color::LightRed));
 
         let style = get_standard_line_style(line_bad, 18);
-        assert_eq!(style, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+        assert_eq!(style, Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD));
     }
 
     #[test]

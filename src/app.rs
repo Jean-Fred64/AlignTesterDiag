@@ -75,6 +75,17 @@ impl DiagnosticPass {
     }
 }
 
+/// Consolidated metrics calculated from dual heads in Both mode
+#[derive(Clone, Debug, PartialEq)]
+pub struct BothModeMetrics {
+    pub alignment_pct: f32,
+    pub total_expected: u32,
+    pub total_ok: u32,
+    pub total_crc_err: u32,
+    pub crc_integrity_pct: f32,
+    pub is_degraded: bool,
+}
+
 /// User action executable by the application
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -159,6 +170,81 @@ impl App {
     pub fn clear_passes(&mut self) {
         self.last_pass_h0 = None;
         self.last_pass_h1 = None;
+    }
+
+    pub fn compute_both_mode_metrics(&self) -> BothModeMetrics {
+        Self::compute_both_metrics_from_passes(
+            self.last_pass_h0.as_ref().or(self.status.last_pass_h0.as_ref()),
+            self.last_pass_h1.as_ref().or(self.status.last_pass_h1.as_ref()),
+            self.status.sector_count,
+        )
+    }
+
+    pub fn compute_both_metrics_from_passes(
+        pass_h0: Option<&DiagnosticPass>,
+        pass_h1: Option<&DiagnosticPass>,
+        fallback_sector_count: u8,
+    ) -> BothModeMetrics {
+        let expected_per_head = if let Some(p) = pass_h0.filter(|p| p.expected_count > 0) {
+            p.expected_count as u32
+        } else if let Some(p) = pass_h1.filter(|p| p.expected_count > 0) {
+            p.expected_count as u32
+        } else if fallback_sector_count > 0 {
+            fallback_sector_count as u32
+        } else {
+            18
+        };
+
+        let (h0_ok, h0_exp) = pass_h0
+            .map(|p| {
+                (
+                    p.ok_count as u32,
+                    if p.expected_count > 0 {
+                        p.expected_count as u32
+                    } else {
+                        expected_per_head
+                    },
+                )
+            })
+            .unwrap_or((0, expected_per_head));
+
+        let (h1_ok, h1_exp) = pass_h1
+            .map(|p| {
+                (
+                    p.ok_count as u32,
+                    if p.expected_count > 0 {
+                        p.expected_count as u32
+                    } else {
+                        expected_per_head
+                    },
+                )
+            })
+            .unwrap_or((0, expected_per_head));
+
+        let total_ok = h0_ok + h1_ok;
+        let total_expected = (h0_exp + h1_exp).max(1);
+
+        let alignment_pct = if total_expected > 0 {
+            (total_ok as f32 / total_expected as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        let h0_is_bad = pass_h0.map(|p| !p.is_ok).unwrap_or(false);
+        let h1_is_bad = pass_h1.map(|p| !p.is_ok).unwrap_or(false);
+        let is_degraded = h0_is_bad || h1_is_bad || alignment_pct < 95.0;
+
+        let total_crc_err = total_expected.saturating_sub(total_ok);
+        let crc_integrity_pct = alignment_pct;
+
+        BothModeMetrics {
+            alignment_pct,
+            total_expected,
+            total_ok,
+            total_crc_err,
+            crc_integrity_pct,
+            is_degraded,
+        }
     }
 }
 

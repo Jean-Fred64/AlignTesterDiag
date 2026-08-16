@@ -228,10 +228,10 @@ pub fn extract_sector_ids_from_error(line: &str, marker: &str) -> Vec<usize> {
 }
 
 /// Builds rich styled spans for Standard / Normal mode lines, with individual coloring for each segment:
-/// - 🟩 Green (`Color::LightGreen`): Sector read with valid CRC (`█`).
-/// - 🟥 Red (`Color::Red`): CRC error sector (`█` in red) or corrupt/error (`?`).
+/// - 🟩 Green (`Color::LightGreen`): Sector read with valid CRC (`■ `).
+/// - 🟥 Red (`Color::LightRed`): CRC error sector (`■ ` in red) or corrupt/error (`? `).
 /// - 🟨 Yellow (`Color::Yellow`): NO-DAM or DEL-DAM or warning.
-/// - ⬜ Dark Gray (`Color::DarkGray`): Missing sector (`░`).
+/// - ⬜ Dark Gray (`Color::DarkGray`): Missing sector (`░ `).
 pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
 
@@ -244,7 +244,7 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
             let ribbon_inner = line[open_idx + 1..close_idx].trim();
             let suffix = &line[close_idx + 1..];
 
-            // 1. Prefix: "T:00 H:0  500k  "
+            // 1. Prefix: "T:00 H:0 Rate:500k MFM " (or legacy "T:00 H:0  500k  ")
             spans.push(Span::styled(
                 prefix.to_string(),
                 Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
@@ -256,8 +256,8 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
             // 3. Segmented blocks
             if ribbon_inner == "?" {
                 spans.push(Span::styled(
-                    "?",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    "? ",
+                    Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
                 ));
             } else {
                 let crc_dat_secs = extract_sector_ids_from_error(line, "CRC-DAT: Sec ");
@@ -266,15 +266,15 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
                 let del_dam_secs = extract_sector_ids_from_error(line, "DEL-DAM: Sec ");
                 let missing_secs = extract_sector_ids_from_error(line, "MISSING: Sec ");
 
-                let is_unformatted = line.contains("NO DATA") || (line.contains("MISSING") && !line.contains("MISSING: Sec"));
+                let is_unformatted = line.contains("NO DATA") || line.contains("NO DISK") || (line.contains("MISSING") && !line.contains("MISSING: Sec"));
 
                 let mut block_idx = 1usize;
                 for ch in ribbon_inner.chars() {
-                    if ch == '█' {
+                    if ch == '█' || ch == '■' {
                         let style = if is_unformatted {
                             Style::default().fg(Color::DarkGray)
                         } else if crc_dat_secs.contains(&block_idx) || crc_id_secs.contains(&block_idx) {
-                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                            Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
                         } else if no_dam_secs.contains(&block_idx) || del_dam_secs.contains(&block_idx) {
                             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
                         } else if missing_secs.contains(&block_idx) {
@@ -283,20 +283,23 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
                             Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
                         };
 
-                        spans.push(Span::styled(ch.to_string(), style));
+                        spans.push(Span::styled("■ ", style));
                         block_idx += 1;
                     } else if ch == '░' {
                         let style = Style::default().fg(Color::DarkGray);
-                        spans.push(Span::styled(ch.to_string(), style));
+                        spans.push(Span::styled("░ ", style));
+                        block_idx += 1;
+                    } else if ch == '?' {
+                        spans.push(Span::styled("? ", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)));
                         block_idx += 1;
                     } else if !ch.is_whitespace() {
-                        spans.push(Span::styled(ch.to_string(), Style::default().fg(Color::White)));
+                        spans.push(Span::styled(format!("{} ", ch), Style::default().fg(Color::White)));
                     }
                 }
             }
 
             // 4. Closing bracket
-            spans.push(Span::styled(" ]", Style::default().fg(Color::White)));
+            spans.push(Span::styled("]", Style::default().fg(Color::White)));
 
             // 5. Suffix (Status counter e.g. "(18/18 OK)" or "(17/18 CRC-DAT: Sec 15)")
             let mut remaining = suffix;
@@ -310,8 +313,8 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
                 let style = if token.starts_with('(') && token.ends_with(')') {
                     if token.contains("OK") {
                         Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
-                    } else if token.contains("CRC-") || token.contains("NO DATA") || token.contains("MISSING") || token.contains("BAD") {
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    } else if token.contains("CRC-") || token.contains("NO DATA") || token.contains("NO DISK") || token.contains("MISSING") || token.contains("BAD") {
+                        Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
                     } else if token.contains("NO-DAM") || token.contains("DEL-DAM") || token.contains("OFF-TRK") {
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
                     } else {
@@ -319,7 +322,7 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
                     }
                 } else if token.starts_with('(') {
                     if token.contains("CRC-") || token.contains("NO") || token.contains("MISSING") || token.contains("BAD") {
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                        Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
                     } else if token.contains("NO-DAM") || token.contains("DEL-DAM") || token.contains("OFF-TRK") {
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
                     } else {
@@ -331,7 +334,7 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
                     } else if token.contains('/') && !token.contains("CRC") && !token.contains("NO") && !token.contains("MISSING") && !token.contains("BAD") {
                         Style::default().fg(Color::White)
                     } else {
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                        Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
                     }
                 } else {
                     Style::default().fg(Color::White)
@@ -351,18 +354,19 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
 /// Formats dynamic visual coloring for Standard mode lines:
 /// - 🟢 Bright Green (LightGreen Bold): Perfect pass (100% expected sectors read with CRC OK: 9/9, 15/15, 18/18)
 /// - 🟡 Yellow / Orange (Yellow Bold): Close to count (e.g. >= 50% or partial errors/missing)
-/// - 🔴 Red (Red Bold): Far from count (< 50% expected sectors or major errors / missing)
+/// - 🔴 Red (LightRed Bold): Far from count (< 50% expected sectors or major errors / missing / no disk)
 pub fn get_standard_line_style(line: &str, _expected_count: u8) -> Style {
     if line.contains("CRC-DAT")
         || line.contains("CRC-ID")
         || line.contains("CRC ERR")
         || line.contains("NO DATA")
+        || line.contains("NO DISK")
         || line.contains("NO SECTORS")
         || line.contains("ERR(")
         || line.contains("BAD")
-        || (line.contains("[ ? ]") && line.contains("MISSING"))
+        || (line.contains("[ ? ]") && (line.contains("MISSING") || line.contains("NO DATA") || line.contains("NO DISK")))
     {
-        return Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+        return Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD);
     }
 
     if line.contains("NO-DAM")
@@ -383,10 +387,10 @@ pub fn get_standard_line_style(line: &str, _expected_count: u8) -> Style {
 }
 
 /// Builds rich styled spans for Verbose mode lines, with individual coloring for each ribbon block:
-/// - 🟩 Green (`Color::LightGreen`): Sector read with valid IDAM and Data CRC.
-/// - 🟥 Red (`Color::Red`): CRC error (Header IDAM or Data CRC).
+/// - 🟩 Green (`Color::LightGreen`): Sector read with valid IDAM and Data CRC (`■ `).
+/// - 🟥 Red (`Color::LightRed`): CRC error (Header IDAM or Data CRC, `■ ` in red).
 /// - 🟨 Yellow (`Color::Yellow`): NO-DAM or DEL-DAM (deleted data mark).
-/// - ⬜ Dark Gray (`Color::DarkGray`): Missing sector.
+/// - ⬜ Dark Gray (`Color::DarkGray`): Missing sector (`░ `).
 pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
 
@@ -411,8 +415,8 @@ pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'st
             // 3. Ribbon blocks
             if ribbon_inner == "?" {
                 spans.push(Span::styled(
-                    "?",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    "? ",
+                    Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
                 ));
             } else {
                 let crc_dat_secs = extract_sector_ids_from_error(line, "CRC-DAT: Sec ");
@@ -421,15 +425,15 @@ pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'st
                 let del_dam_secs = extract_sector_ids_from_error(line, "DEL-DAM: Sec ");
                 let missing_secs = extract_sector_ids_from_error(line, "MISSING: Sec ");
 
-                let is_unformatted = line.contains("NO DATA") || (line.contains("MISSING") && !line.contains("MISSING: Sec"));
+                let is_unformatted = line.contains("NO DATA") || line.contains("NO DISK") || (line.contains("MISSING") && !line.contains("MISSING: Sec"));
 
                 let mut block_idx = 1usize;
                 for ch in ribbon_inner.chars() {
-                    if ch == '■' {
+                    if ch == '■' || ch == '█' {
                         let style = if is_unformatted {
                             Style::default().fg(Color::DarkGray)
                         } else if crc_dat_secs.contains(&block_idx) || crc_id_secs.contains(&block_idx) {
-                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                            Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
                         } else if no_dam_secs.contains(&block_idx) || del_dam_secs.contains(&block_idx) {
                             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
                         } else if missing_secs.contains(&block_idx) {
@@ -438,16 +442,23 @@ pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'st
                             Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
                         };
 
-                        spans.push(Span::styled(ch.to_string(), style));
+                        spans.push(Span::styled("■ ", style));
+                        block_idx += 1;
+                    } else if ch == '░' {
+                        let style = Style::default().fg(Color::DarkGray);
+                        spans.push(Span::styled("░ ", style));
+                        block_idx += 1;
+                    } else if ch == '?' {
+                        spans.push(Span::styled("? ", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)));
                         block_idx += 1;
                     } else if !ch.is_whitespace() {
-                        spans.push(Span::styled(ch.to_string(), Style::default().fg(Color::White)));
+                        spans.push(Span::styled(format!("{} ", ch), Style::default().fg(Color::White)));
                     }
                 }
             }
 
             // 4. Closing bracket
-            spans.push(Span::styled(" ]", Style::default().fg(Color::White)));
+            spans.push(Span::styled("]", Style::default().fg(Color::White)));
 
             // 5. Suffix (Ratio, IL, timing, RPM, Gap0, Quality)
             let mut remaining = suffix;
@@ -461,8 +472,8 @@ pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'st
                 let style = if token.starts_with('(') && token.ends_with(')') {
                     if token.contains("OK") {
                         Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
-                    } else if token.contains("CRC-") || token.contains("NO DATA") || token.contains("MISSING") {
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    } else if token.contains("CRC-") || token.contains("NO DATA") || token.contains("NO DISK") || token.contains("MISSING") {
+                        Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
                     } else if token.contains("NO-DAM") || token.contains("DEL-DAM") || token.contains("OFF-TRK") {
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
                     } else {
@@ -470,7 +481,7 @@ pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'st
                     }
                 } else if token.starts_with('(') {
                     if token.contains("CRC-") || token.contains("NO") || token.contains("MISSING") {
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                        Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
                     } else if token.contains("NO-DAM") || token.contains("DEL-DAM") || token.contains("OFF-TRK") {
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
                     } else {
@@ -482,7 +493,7 @@ pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'st
                     } else if token.contains('/') && !token.contains("CRC") && !token.contains("NO") && !token.contains("MISSING") {
                         Style::default().fg(Color::White)
                     } else {
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                        Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
                     }
                 } else if token.starts_with("IL:") {
                     if token == "IL:---" {
@@ -506,7 +517,7 @@ pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'st
                         } else if num >= 60 {
                             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
                         } else {
-                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                            Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
                         }
                     }
                 } else {
@@ -527,17 +538,18 @@ pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'st
 /// Formats dynamic visual coloring for Verbose mode lines:
 /// - 🟢 Bright Green (LightGreen Bold): Perfect pass (100% expected sectors read with CRC OK and (OK))
 /// - 🟡 Yellow / Orange (Yellow Bold): Partial pass with missing sectors, weak signal, or off-track
-/// - 🔴 Red (Red Bold): CRC error (CRC-DAT / CRC-ID / CRC ERR), header error (?), or no sectors (NO DATA / MISSING)
+/// - 🔴 Red (LightRed Bold): CRC error (CRC-DAT / CRC-ID / CRC ERR), header error (?), or no sectors (NO DATA / NO DISK / MISSING)
 pub fn get_verbose_line_style(line: &str, _expected_count: u8) -> Style {
     if line.contains("CRC-DAT")
         || line.contains("CRC-ID")
         || line.contains("CRC ERR")
         || line.contains("NO DATA")
+        || line.contains("NO DISK")
         || line.contains("NO SECTORS")
         || line.contains("ERR(")
-        || (line.contains("[ ? ]") && line.contains("MISSING"))
+        || (line.contains("[ ? ]") && (line.contains("MISSING") || line.contains("NO DATA") || line.contains("NO DISK")))
     {
-        return Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+        return Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD);
     }
 
     if line.contains("NO-DAM")
@@ -705,9 +717,10 @@ pub fn build_both_mode_display_lines(status: &crate::hw::DriveStatus) -> Vec<Lin
                 build_standard_line_spans(last_log, expected)
             }
         } else {
-            let empty_blocks = "░".repeat(expected as usize);
+            let empty_vec: Vec<&str> = (0..expected).map(|_| "░").collect();
+            let empty_blocks = empty_vec.join(" ");
             let raw_ribbon = format!("[ {} ]", empty_blocks);
-            let ribbon_col = format!("{:<22}", raw_ribbon);
+            let ribbon_col = format!("{:<40}", raw_ribbon);
             let status_col = format!("( 0/{})", expected);
             let line_str = if status.verbose_mode {
                 format!(
@@ -716,7 +729,7 @@ pub fn build_both_mode_display_lines(status: &crate::hw::DriveStatus) -> Vec<Lin
                 )
             } else {
                 format!(
-                    "T:{:02} H:{}  {}k  {}   {}",
+                    "T:{:02} H:{} Rate:{}k MFM {}  {}",
                     status.track, head_idx, status.bitrate, ribbon_col, status_col
                 )
             };
