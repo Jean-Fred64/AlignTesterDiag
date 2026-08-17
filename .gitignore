@@ -6,3 +6,8 @@
 *:Zone.Identifier*
 __pycache__/
 *.pyc
+/export
+/sources
+/src_step2_checkpoint
+/.vscode
+/.clinerules

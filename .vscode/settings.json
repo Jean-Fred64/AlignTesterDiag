@@ -1,9 +1,0 @@
-{
-  "editor.formatOnSave": true,
-  "editor.codeActionsOnSave": {
-    "source.organizeImports": "explicit"
-  },
-  "rust-analyzer.check.command": "clippy",
-  "files.autoSave": "afterDelay",
-  "files.autoSaveDelay": 500
-}
