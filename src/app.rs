@@ -140,11 +140,15 @@ pub enum Action {
     Analyze,
     StartAnalysis,
     Stop,
+    ToggleMotor,
+    SetMotor(bool),
+    PanicReset,
 }
 
 /// Application state wrapper
 pub struct App {
     pub status: DriveStatus,
+    pub motor_on: bool,
     pub view_mode: ViewMode,
     pub head_selection: HeadSelection,
     pub drive_unit: u8,
@@ -169,6 +173,7 @@ impl App {
         };
         Self {
             status,
+            motor_on: false,
             view_mode: ViewMode::Normal,
             head_selection: HeadSelection::default(),
             drive_unit: unit,
@@ -178,6 +183,14 @@ impl App {
             stream_spinner_idx: 0,
             show_help: false,
         }
+    }
+
+    pub fn drive_status(&self) -> &DriveStatus {
+        &self.status
+    }
+
+    pub fn is_motor_on(&self) -> bool {
+        self.motor_on
     }
 
     pub fn toggle_help(&mut self) {
@@ -211,6 +224,7 @@ impl App {
             self.stream_spinner_idx = (self.stream_spinner_idx + 1) % 4;
         }
 
+        self.motor_on = status.motor_on;
         self.status = status;
         self.drive_unit = self.status.drive_unit;
         self.head_selection = self.status.head_select;
@@ -254,6 +268,7 @@ impl App {
         match action {
             Action::ToggleDriveUnit => self.toggle_drive_unit(),
             Action::Analyze | Action::StartAnalysis => {
+                self.motor_on = true;
                 self.status.analyzing = true;
                 self.status.mode = DisplayMode::Analyze;
                 self.status.motor_on = true;
@@ -261,11 +276,81 @@ impl App {
                 self.clear_passes();
             }
             Action::Stop => {
+                self.motor_on = false;
                 self.status.analyzing = false;
                 self.status.motor_on = false;
                 self.status.mode = DisplayMode::None;
                 self.status.activity = HwActivity::Stopped;
                 self.status.index = false;
+                self.status.log_msg = String::from("Stop / Motor OFF (Safe to change disk)");
+            }
+            Action::ToggleMotor => {
+                self.motor_on = !self.motor_on;
+                self.status.motor_on = self.motor_on;
+                if !self.motor_on {
+                    self.status.index = false;
+                    self.status.analyzing = false;
+                    if self.status.mode != DisplayMode::None {
+                        if self.status.mode == DisplayMode::RpmMeasure && self.status.rpm_measure.sample_count > 0 {
+                            self.status.rpm_display = format!("{:.1} RPM", self.status.rpm_measure.avg_rpm);
+                        }
+                        self.status.mode = DisplayMode::None;
+                    }
+                    self.status.activity = HwActivity::Stopped;
+                    self.status.log_msg = String::from("Motor OFF (M key)");
+                } else {
+                    self.status.drive_select = true;
+                    self.status.has_disk = true;
+                    self.status.activity = HwActivity::Idle;
+                    self.status.log_msg = String::from("Motor ON (M key)");
+                }
+            }
+            Action::SetMotor(on) => {
+                self.motor_on = on;
+                self.status.motor_on = on;
+                if !on {
+                    self.status.index = false;
+                    self.status.analyzing = false;
+                    if self.status.mode != DisplayMode::None {
+                        if self.status.mode == DisplayMode::RpmMeasure && self.status.rpm_measure.sample_count > 0 {
+                            self.status.rpm_display = format!("{:.1} RPM", self.status.rpm_measure.avg_rpm);
+                        }
+                        self.status.mode = DisplayMode::None;
+                    }
+                    self.status.activity = HwActivity::Stopped;
+                    self.status.log_msg = String::from("Motor OFF (M key)");
+                } else {
+                    self.status.drive_select = true;
+                    self.status.has_disk = true;
+                    self.status.activity = HwActivity::Idle;
+                    self.status.log_msg = String::from("Motor ON (M key)");
+                }
+            }
+            Action::PanicReset => {
+                self.motor_on = false;
+                self.clear_passes();
+                self.status.motor_on = false;
+                self.status.analyzing = false;
+                self.status.mode = DisplayMode::None;
+                self.status.activity = HwActivity::Idle;
+                self.status.rpm = 0;
+                self.status.rpm_display = String::from("--- RPM");
+                self.status.rpm_measure.clear();
+                self.status.index = false;
+                self.status.sectors.clear();
+                self.status.sectors_known = false;
+                self.status.on_track_count = 0;
+                self.status.off_track_count = 0;
+                self.status.off_track_details = String::from("NONE");
+                self.status.crc_err_count = 0;
+                self.status.alignment_pct = 0.0;
+                self.status.head_select = HeadSelection::Head0;
+                self.status.head = 0;
+                self.status.last_pass_h0 = None;
+                self.status.last_pass_h1 = None;
+                self.status.in_progress_pass = false;
+                self.status.read_status = crate::hw::DriveReadStatus::Ok;
+                self.status.log_msg = String::from("PANIC RESET: Hardware reset & serial buffers purged successfully");
             }
         }
     }
@@ -626,6 +711,76 @@ mod tests {
         assert!(app.show_help);
         app.toggle_help();
         assert!(!app.show_help);
+    }
+
+    #[test]
+    fn test_app_toggle_motor_action() {
+        let mut app = App::new();
+        assert!(!app.motor_on);
+        assert!(!app.status.motor_on);
+        assert!(!app.is_motor_on());
+
+        // Toggle Motor ON
+        app.handle_action(Action::ToggleMotor);
+        assert!(app.motor_on);
+        assert!(app.status.motor_on);
+        assert!(app.is_motor_on());
+        assert_eq!(app.status.activity, HwActivity::Idle);
+        assert!(app.status.drive_select);
+        assert_eq!(app.status.log_msg, "Motor ON (M key)");
+
+        // Toggle Motor OFF
+        app.handle_action(Action::ToggleMotor);
+        assert!(!app.motor_on);
+        assert!(!app.status.motor_on);
+        assert!(!app.is_motor_on());
+        assert_eq!(app.status.activity, HwActivity::Stopped);
+        assert_eq!(app.status.log_msg, "Motor OFF (M key)");
+
+        // Set Motor explicitly
+        app.handle_action(Action::SetMotor(true));
+        assert!(app.motor_on);
+        assert!(app.status.motor_on);
+        app.handle_action(Action::SetMotor(false));
+        assert!(!app.motor_on);
+        assert!(!app.status.motor_on);
+    }
+
+    #[test]
+    fn test_app_panic_reset_action() {
+        let mut app = App::new();
+        app.handle_action(Action::Analyze);
+        assert!(app.motor_on);
+        assert!(app.status.analyzing);
+        assert_eq!(app.status.mode, DisplayMode::Analyze);
+
+        let pass = DiagnosticPass::new(
+            40, 0, 500,
+            "T:40 H:0".into(), "T:40 H:0".into(),
+            18, 18, true,
+        );
+        app.record_pass(pass);
+        assert!(app.last_pass_h0.is_some());
+
+        // Trigger PanicReset
+        app.handle_action(Action::PanicReset);
+        assert!(!app.motor_on);
+        assert!(!app.status.motor_on);
+        assert!(!app.status.analyzing);
+        assert_eq!(app.status.mode, DisplayMode::None);
+        assert_eq!(app.status.activity, HwActivity::Idle);
+        assert_eq!(app.status.rpm, 0);
+        assert_eq!(app.status.rpm_display, "--- RPM");
+        assert!(!app.status.index);
+        assert!(app.status.sectors.is_empty());
+        assert!(!app.status.sectors_known);
+        assert_eq!(app.status.head, 0);
+        assert_eq!(app.status.head_select, HeadSelection::Head0);
+        assert_eq!(app.head_selection, HeadSelection::Head0);
+        assert!(app.last_pass_h0.is_none());
+        assert!(app.last_pass_h1.is_none());
+        assert_eq!(app.status.log_msg, "PANIC RESET: Hardware reset & serial buffers purged successfully");
+        assert_eq!(app.drive_status().activity, HwActivity::Idle);
     }
 }
 

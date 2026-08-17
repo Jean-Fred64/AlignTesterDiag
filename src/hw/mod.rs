@@ -9,6 +9,9 @@ use std::{
 use crate::app::{DiagnosticPass, HeadSelection};
 use crate::audio::{evaluate_alignment_audio_event, sound_worker, AudioEvent};
 
+pub mod protocol;
+pub use protocol::*;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisplayMode {
     None,
@@ -350,7 +353,7 @@ fn gw_send_raw(
     cmd: &[u8],
     extra_read: usize,
 ) -> Result<(u8, Vec<u8>), Box<dyn std::error::Error>> {
-    gw_send_raw_timeout(port, cmd, extra_read, Duration::from_millis(100))
+    gw_send_raw_timeout(port, cmd, extra_read, Duration::from_millis(ACK_GUARD_TIMEOUT_MS))
 }
 
 fn ensure_unit_active(
@@ -396,7 +399,7 @@ fn gw_send(
     motor_on: bool,
     head: u8,
 ) -> Result<(u8, Vec<u8>), Box<dyn std::error::Error>> {
-    gw_send_timeout(port, cmd, extra_read, unit, motor_on, head, Duration::from_millis(100))
+    gw_send_timeout(port, cmd, extra_read, unit, motor_on, head, Duration::from_millis(ACK_GUARD_TIMEOUT_MS))
 }
 
 /// Performs a motor-gated seek operation.
@@ -451,21 +454,28 @@ pub fn query_write_protect(
         unit,
         motor_on,
         head,
-        Duration::from_millis(100),
+        Duration::from_millis(ACK_GUARD_TIMEOUT_MS),
     ) {
         Ok((0, extra)) if !extra.is_empty() => Some(extra[0] == 0),
         _ => None,
     }
 }
 
-/// Sets spindle motor state on the specified drive unit
+/// Sets spindle motor state on the specified drive unit.
+/// Purges incoming buffer before transmission and uses a 500ms ACK guard timeout.
 pub fn gw_set_motor(
     port: &mut Box<dyn serialport::SerialPort>,
     unit: u8,
     motor_on: bool,
 ) -> Result<(u8, Vec<u8>), Box<dyn std::error::Error>> {
+    let _ = port.clear(serialport::ClearBuffer::Input);
     let state = if motor_on { 0x01 } else { 0x00 };
-    gw_send_raw_timeout(port, &[0x06, 0x04, unit, state], 0, Duration::from_millis(100))
+    gw_send_raw_timeout(
+        port,
+        &[CMD_MOTOR, 0x04, unit, state],
+        0,
+        Duration::from_millis(ACK_GUARD_TIMEOUT_MS),
+    )
 }
 
 /// Reads raw flux stream directly from Greaseweazle via CMD_READ_FLUX (0x07) without intrusive pre-checks
@@ -2112,35 +2122,52 @@ pub fn handle_command(
             should_exit = true;
         }
         HwCmd::PanicReset => {
-            // 1. Drain pending command channel
+            // 1. Instantly signal and stop any running background worker/analysis threads
             while rx_cmd.try_recv().is_ok() {}
+            status.analyzing = false;
+            status.mode = DisplayMode::None;
 
-            // 2. Clear all port buffers
+            // 2. Clear all port buffers before reset dispatch
             let _ = port.clear(serialport::ClearBuffer::All);
 
-            // 3. Immediate hardware emergency shutdown:
-            // - Cut drive motor: MOTOR_OFF (0x06 with state 0)
-            // - Deselect head: Head 0 (0x03 with head 0)
-            // - Re-sync bus & select unit
-            let _ = gw_send_raw(port, &[0x06, 0x04, status.drive_unit, 0x00], 0);
-            let _ = gw_send_raw(port, &[0x03, 0x03, 0x00], 0);
-            let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
-            let _ = gw_send_raw(port, &[0x0E, 0x03, 0x01], 0);
-            let _ = gw_send_raw(port, &[0x0C, 0x03, status.drive_unit], 0);
+            // 3. Send hardware CMD_RESET (0x00) followed by CMD_MOTOR(false) to force spindle cut and LED shutdown
+            let _ = gw_send_raw_timeout(
+                port,
+                &build_reset_packet(),
+                32,
+                Duration::from_millis(ACK_GUARD_TIMEOUT_MS),
+            );
+            let _ = gw_set_motor(port, status.drive_unit, false);
+            let _ = gw_send_raw(port, &build_head_packet(0), 0);
+            let _ = gw_send_raw(port, &build_bus_type_packet(0x01), 0);
+            let _ = gw_send_raw(port, &build_select_packet(status.drive_unit), 0);
 
-            // 4. Reset software state cleanly to safe stopped state
+            // 4. Clear both RX and TX serial buffers
+            let _ = port.clear(serialport::ClearBuffer::All);
+
+            // 5. Reset internal state machine back to [IDLE / READY], resetting error counters and active flags cleanly
             status.motor_on = false;
             status.analyzing = false;
             status.mode = DisplayMode::None;
-            status.activity = HwActivity::Stopped;
+            status.activity = HwActivity::Idle;
             status.rpm = 0;
             status.rpm_display = String::from("--- RPM");
+            status.rpm_measure.clear();
             status.index = false;
             status.sectors.clear();
             status.sectors_known = false;
+            status.on_track_count = 0;
+            status.off_track_count = 0;
+            status.off_track_details = String::from("NONE");
+            status.crc_err_count = 0;
+            status.alignment_pct = 0.0;
             status.head_select = HeadSelection::Head0;
             status.head = 0;
-            status.log_msg = String::from("*** EMERGENCY STOP (BACKSPACE): Motor stopped & hardware reset ***");
+            status.last_pass_h0 = None;
+            status.last_pass_h1 = None;
+            status.in_progress_pass = false;
+            status.read_status = DriveReadStatus::Ok;
+            status.log_msg = String::from("PANIC RESET: Hardware reset & serial buffers purged successfully");
             let _ = tx_status.send(status.clone());
         }
         HwCmd::Stop => {
@@ -2199,9 +2226,9 @@ pub fn handle_command(
         HwCmd::ToggleMotor => {
             let new_state = !status.motor_on;
             let _ = port.clear(serialport::ClearBuffer::All);
-            let _ = gw_send_raw(port, &[0x0E, 0x03, 0x01], 0);
-            let _ = gw_send_raw(port, &[0x0C, 0x03, status.drive_unit], 0);
-            let _ = gw_send_raw(port, &[0x03, 0x03, status.head], 0);
+            let _ = gw_send_raw(port, &build_bus_type_packet(0x01), 0);
+            let _ = gw_send_raw(port, &build_select_packet(status.drive_unit), 0);
+            let _ = gw_send_raw(port, &build_head_packet(status.head), 0);
             let _ = port.clear(serialport::ClearBuffer::Input);
             let res = gw_set_motor(port, status.drive_unit, new_state);
 
@@ -2823,9 +2850,10 @@ pub fn handle_command(
                 let _ = tx_status.send(status.clone());
             } else {
                 let _ = port.clear(serialport::ClearBuffer::All);
-                let _ = gw_send_raw(port, &[0x0E, 0x03, 0x01], 0);
-                let _ = gw_send_raw(port, &[0x0C, 0x03, status.drive_unit], 0);
-                let _ = gw_send_raw(port, &[0x03, 0x03, status.head], 0);
+                let _ = gw_send_raw(port, &build_bus_type_packet(0x01), 0);
+                let _ = gw_send_raw(port, &build_select_packet(status.drive_unit), 0);
+                let _ = gw_send_raw(port, &build_head_packet(status.head), 0);
+                let _ = port.clear(serialport::ClearBuffer::Input);
                 let res = gw_set_motor(port, status.drive_unit, on);
 
                 match res {
@@ -4257,21 +4285,34 @@ mod tests {
         status.motor_on = false;
         status.analyzing = false;
         status.mode = DisplayMode::None;
-        status.activity = HwActivity::Stopped;
+        status.activity = HwActivity::Idle;
         status.rpm = 0;
         status.rpm_display = String::from("--- RPM");
+        status.rpm_measure.clear();
         status.index = false;
         status.sectors.clear();
         status.sectors_known = false;
+        status.on_track_count = 0;
+        status.off_track_count = 0;
+        status.crc_err_count = 0;
+        status.alignment_pct = 0.0;
         status.head = 0;
+        status.head_select = HeadSelection::Head0;
+        status.last_pass_h0 = None;
+        status.last_pass_h1 = None;
+        status.log_msg = String::from("PANIC RESET: Hardware reset & serial buffers purged successfully");
 
         assert!(!status.motor_on);
         assert!(!status.analyzing);
         assert_eq!(status.mode, DisplayMode::None);
-        assert_eq!(status.activity, HwActivity::Stopped);
+        assert_eq!(status.activity, HwActivity::Idle);
         assert_eq!(status.rpm, 0);
         assert_eq!(status.rpm_display, "--- RPM");
         assert_eq!(status.head, 0);
+        assert_eq!(status.head_select, HeadSelection::Head0);
+        assert_eq!(status.on_track_count, 0);
+        assert_eq!(status.crc_err_count, 0);
+        assert_eq!(status.log_msg, "PANIC RESET: Hardware reset & serial buffers purged successfully");
     }
 
     #[test]

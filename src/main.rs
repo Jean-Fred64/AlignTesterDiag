@@ -52,6 +52,15 @@ Options:
     )
 }
 
+/// Formats the UI status log message cleanly with standard "Log: " prefix
+pub fn format_log_line(msg: &str) -> String {
+    if msg.starts_with("Log: ") {
+        msg.to_string()
+    } else {
+        format!("Log: {}", msg)
+    }
+}
+
 /// Checks for help or version flags (-h, --help, -v, -V, --version)
 /// If present, prints the clean CLI banner to stdout and returns true (indicating early exit).
 pub fn handle_cli_help_or_version(args: &[String]) -> bool {
@@ -520,7 +529,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         "Note: Press Esc, L, A, D, +, -, or Seek key to interrupt Tachometer mode immediately.",
                         Style::default().fg(Color::LightYellow),
                     )));
-                    right_lines.push(Line::from(format!("Log: {}", status.log_msg)));
+                    right_lines.push(Line::from(format_log_line(&status.log_msg)));
                 }
                 DisplayMode::Analyze | DisplayMode::ReadData => {
                     let title = if status.mode == DisplayMode::Analyze {
@@ -683,7 +692,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
 
                     right_lines.push(Line::from(""));
-                    right_lines.push(Line::from(format!("Log: {}", status.log_msg)));
+                    right_lines.push(Line::from(format_log_line(&status.log_msg)));
                 }
                 DisplayMode::None => {
                     right_lines.push(Line::from(Span::styled(
@@ -777,7 +786,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         "    Q/X = Exit      : Clean exit (Instant motor & LED shutdown)",
                     ));
                     right_lines.push(Line::from(""));
-                    right_lines.push(Line::from(format!("Log: {}", status.log_msg)));
+                    right_lines.push(Line::from(format_log_line(&status.log_msg)));
                 }
             }
 
@@ -820,6 +829,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     || key.code == KeyCode::Char('\x08')
                     || key.code == KeyCode::Char('\u{8}')
                 {
+                    app.handle_action(Action::PanicReset);
                     let _ = tx_cmd.send(HwCmd::PanicReset);
                     continue;
                 }
@@ -852,6 +862,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let _ = tx_cmd.send(HwCmd::MeasureRpm);
                     }
                     KeyCode::Char('m') | KeyCode::Char('M') => {
+                        app.handle_action(Action::ToggleMotor);
                         let _ = tx_cmd.send(HwCmd::ToggleMotor);
                     }
                     KeyCode::Char('r') | KeyCode::Char('R') => {
