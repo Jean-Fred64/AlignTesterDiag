@@ -33,7 +33,7 @@ pub use ui::*;
 /// Builds the clean CLI banner and help/version text
 pub fn build_cli_banner() -> String {
     format!(
-r#"AlignTesterDiag v{}
+r#"💾 AlignTesterDiag v{}
 Real-time Floppy Drive Diagnostic & Alignment Tool for Greaseweazle
 Copyright (C) 2026 MonSieur JeAn-FReD (GPL-3.0)
 
@@ -1844,7 +1844,7 @@ mod tests {
     #[test]
     fn test_cli_help_and_version_flags() {
         let banner = build_cli_banner();
-        assert!(banner.contains("AlignTesterDiag"));
+        assert!(banner.contains("💾 AlignTesterDiag"));
         assert!(banner.contains(env!("CARGO_PKG_VERSION")));
         assert!(banner.contains("2026 MonSieur JeAn-FReD (GPL-3.0)"));
         assert!(banner.contains("--port"));
@@ -1897,8 +1897,9 @@ mod tests {
     #[test]
     fn test_top_header_branding() {
         let title = get_header_title();
-        assert_eq!(title, format!(" AlignTesterDiag v{} ", env!("CARGO_PKG_VERSION")));
-        assert!(!title.contains('🖴'));
+        assert_eq!(title, format!(" 💾 AlignTesterDiag v{} ", env!("CARGO_PKG_VERSION")));
+        assert!(title.contains('💾'));
+        assert!(title.contains("🛠️"));
         assert!(!title.contains("MonSieur JeAn-FReD"));
 
         let badge_com3 = format_port_badge("COM3");
@@ -1932,7 +1933,7 @@ mod tests {
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>() + "\n")
             .collect();
 
-        assert!(full_text.contains("AlignTesterDiag"));
+        assert!(full_text.contains("💾 AlignTesterDiag"));
         assert!(full_text.contains(env!("CARGO_PKG_VERSION")));
         assert!(full_text.contains("MonSieur JeAn-FReD"));
         assert!(full_text.contains("GPL-3.0"));

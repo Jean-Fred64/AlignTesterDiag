@@ -475,6 +475,6 @@ AlignTesterDiag Roadmap
 ## 📄 License & Credits
 
 
-- Copyright (C) 2026 MonSieur JeAn-FReD
+- Copyright (C) 2026 Mr JeAn-FReD 🇫🇷
 - **Heritage:** Inspired by Dave Dunfield's **ImageDisk (`IMD`)** and Keir Fraser's **Greaseweazle**.
 - **License:** Distributed under the terms of the [GNU General Public License v3.0 (GPL-3.0)](LICENSE).

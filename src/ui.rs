@@ -869,9 +869,9 @@ pub fn build_single_head_stream_lines(app: &App, available_height: usize) -> Vec
 }
 
 /// Returns the clean top header branding title:
-/// ` AlignTesterDiag v{VERSION} `
+/// ` 💾 AlignTesterDiag v{VERSION} `
 pub fn get_header_title() -> String {
-    format!(" AlignTesterDiag v{} ", env!("CARGO_PKG_VERSION"))
+    format!(" 💾 AlignTesterDiag v{} ", env!("CARGO_PKG_VERSION"))
 }
 
 /// Formats the port badge string for the top header banner:
@@ -916,7 +916,7 @@ fn shortcut_row(key: &str, desc: &str) -> Line<'static> {
 pub fn build_help_modal_lines() -> Vec<Line<'static>> {
     vec![
         Line::from(vec![
-            Span::styled(" AlignTesterDiag ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(" 💾 AlignTesterDiag ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::styled(format!("v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
             Span::styled(" | Author: ", Style::default().fg(Color::White)),
             Span::styled("MonSieur JeAn-FReD", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
@@ -971,7 +971,7 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
         .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-        .title(" AlignTesterDiag — Help & Shortcut Reference ")
+        .title(" 💾 AlignTesterDiag — Help & Shortcut Reference ")
         .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
         .style(Style::default().bg(Color::Rgb(15, 20, 35)));
 

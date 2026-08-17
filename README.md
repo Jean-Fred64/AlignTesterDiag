@@ -1,4 +1,4 @@
-# AlignTesterDiag 🖴⚡
+# 💾 AlignTesterDiag 🛠️
 
 [![Rust](https://img.shields.io/badge/rust-2021%20edition-orange.svg?logo=rust)](https://www.rust-lang.org)
 [![TUI](https://img.shields.io/badge/ui-Ratatui%20%2B%20Crossterm-blue.svg)](https://ratatui.rs)
@@ -153,6 +153,6 @@ AlignTesterDiag/
 
 ## 📄 License & Credits
 
-- Copyright (C) 2026 MonSieur JeAn-FReD
+- Copyright (C) 2026 Mr JeAn-FReD 🇫🇷
 - **Heritage:** Inspired by Dave Dunfield's **ImageDisk (`IMD`)** and Keir Fraser's **Greaseweazle**.
 - **License:** Distributed under the terms of the [GNU General Public License v3.0 (GPL-3.0)](LICENSE).
