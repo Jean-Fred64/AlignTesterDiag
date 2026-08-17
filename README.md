@@ -33,6 +33,22 @@
 
 ## 🚀 Quick Start
 
+### Option A: Pre-compiled Windows Binary (Recommended for Users)
+
+1. Download the latest `aligntester-diag-windows-x64.zip` from the **[Releases](../../releases)** tab.
+2. Extract the archive into any local folder.
+3. Connect your **Greaseweazle v4 / v4.1** and floppy drive via USB.
+4. Launch the binary in a terminal (PowerShell / Windows Terminal):
+   ```powershell
+   # Auto-detects the Greaseweazle port automatically:
+   .\aligntester-diag.exe
+
+   # Or specify the COM port and Drive unit manually:
+   .\aligntester-diag.exe COM3 --drive 0
+
+
+### Option B: Build from Source (Developers & Linux / macOS)
+
 ### 1. Prerequisites
 - **Rust Toolchain:** Stable Rust (2021 edition or newer) & Cargo ([rustup.rs](https://rustup.rs)).
 - **Hardware:** Greaseweazle v4 (or compatible v4.1 hardware) connected via USB to a 3.5" or 5.25" floppy drive.
@@ -135,5 +151,4 @@ AlignTesterDiag/
 ---
 
 ## 📄 License
-
 This project is dual-licensed under either the **MIT License** or the **Apache License 2.0**.
