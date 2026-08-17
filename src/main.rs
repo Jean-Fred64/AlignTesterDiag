@@ -1899,7 +1899,6 @@ mod tests {
         let title = get_header_title();
         assert_eq!(title, format!(" 💾 AlignTesterDiag v{} ", env!("CARGO_PKG_VERSION")));
         assert!(title.contains('💾'));
-        assert!(title.contains("🛠️"));
         assert!(!title.contains("MonSieur JeAn-FReD"));
 
         let badge_com3 = format_port_badge("COM3");
@@ -1933,10 +1932,10 @@ mod tests {
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>() + "\n")
             .collect();
 
-        assert!(full_text.contains("💾 AlignTesterDiag"));
+        assert!(full_text.contains("Version:"));
         assert!(full_text.contains(env!("CARGO_PKG_VERSION")));
         assert!(full_text.contains("MonSieur JeAn-FReD"));
-        assert!(full_text.contains("GPL-3.0"));
+        assert!(full_text.contains("License: GPL-3.0"));
         assert!(full_text.contains("? / F1"));
         assert!(full_text.contains("Analyze"));
         assert!(full_text.contains("Audio Radar"));

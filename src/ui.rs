@@ -916,14 +916,14 @@ fn shortcut_row(key: &str, desc: &str) -> Line<'static> {
 pub fn build_help_modal_lines() -> Vec<Line<'static>> {
     vec![
         Line::from(vec![
-            Span::styled(" 💾 AlignTesterDiag ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("  Version: ", Style::default().fg(Color::White)),
             Span::styled(format!("v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
             Span::styled(" | Author: ", Style::default().fg(Color::White)),
-            Span::styled("MonSieur JeAn-FReD", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled("Mr JeAn-FReD", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::styled(" | License: ", Style::default().fg(Color::White)),
             Span::styled("GPL-3.0", Style::default().fg(Color::LightMagenta)),
         ]),
-        Line::from(Span::styled(" ──────────────────────────────────────────────────────────────────────────", Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", Style::default().fg(Color::DarkGray))),
         shortcut_row("? / F1", "Toggle this Help Modal"),
         shortcut_row("A", "Analyze (Continuous real-time alignment & flux acquisition)"),
         shortcut_row("B", "Toggle Audio Radar (Pitch-variometer feedback)"),
@@ -945,7 +945,7 @@ pub fn build_help_modal_lines() -> Vec<Line<'static>> {
         shortcut_row("+ / - / Arrows", "Step track +1 / -1 (0 to 83)"),
         shortcut_row("0 - 9", "Direct jump to tracks (0, 10, 20... 80)"),
         shortcut_row("Q / X / Ctrl+C", "Clean Exit (Instant motor & LED shutdown)"),
-        Line::from(Span::styled(" ──────────────────────────────────────────────────────────────────────────", Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", Style::default().fg(Color::DarkGray))),
         Line::from(vec![
             Span::styled("  Press ", Style::default().fg(Color::DarkGray)),
             Span::styled("[Esc]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
@@ -960,8 +960,8 @@ pub fn build_help_modal_lines() -> Vec<Line<'static>> {
 
 /// Renders an interactive centered overlay help modal dialog
 pub fn render_help_modal(f: &mut Frame, area: Rect) {
-    let modal_width = (area.width.saturating_sub(4)).clamp(68, 80).min(area.width);
-    let modal_height = (area.height.saturating_sub(2)).clamp(22, 28).min(area.height);
+    let modal_width = (area.width.saturating_sub(2)).clamp(86, 88).min(area.width);
+    let modal_height = (area.height.saturating_sub(2)).clamp(27, 28).min(area.height);
     let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(x, y, modal_width, modal_height);
@@ -971,7 +971,7 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
         .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-        .title(" 💾 AlignTesterDiag — Help & Shortcut Reference ")
+        .title(" 💾 AlignTesterDiag 🛠️ — Help & Shortcuts ")
         .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
         .style(Style::default().bg(Color::Rgb(15, 20, 35)));
 
