@@ -38,14 +38,15 @@
 1. Download the latest `aligntester-diag-windows-x64.zip` from the **[Releases](../../releases)** tab.
 2. Extract the archive into any local folder.
 3. Connect your **Greaseweazle v4 / v4.1** and floppy drive via USB.
-4. Launch the binary in a terminal (PowerShell / Windows Terminal):
-   ```powershell
-   # Auto-detects the Greaseweazle port automatically:
-   .\aligntester-diag.exe
+4. **Launch via Terminal (Important):** Run the executable inside a terminal window (**Windows Terminal**, **PowerShell**, or **Command Prompt**) rather than double-clicking it from the file explorer. This ensures proper ANSI color rendering, full-size TUI layout, and readable error logs if a COM port issue occurs.
 
-   # Or specify the COM port and Drive unit manually:
-   .\aligntester-diag.exe COM3 --drive 0
+```powershell
+# Navigate to your extracted folder and run (auto-detects the Greaseweazle port):
+.\aligntester-diag.exe
 
+# Or specify the COM port and Drive unit manually:
+.\aligntester-diag.exe COM3 --drive 0
+```
 
 ### Option B: Build from Source (Developers & Linux / macOS)
 
