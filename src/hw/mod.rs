@@ -188,6 +188,7 @@ pub struct DriveStatus {
     pub last_pass_h0: Option<DiagnosticPass>,
     pub last_pass_h1: Option<DiagnosticPass>,
     pub read_status: DriveReadStatus,
+    pub port_name: String,
 }
 
 impl Default for DriveStatus {
@@ -234,6 +235,7 @@ impl Default for DriveStatus {
             last_pass_h0: None,
             last_pass_h1: None,
             read_status: DriveReadStatus::Ok,
+            port_name: String::new(),
         }
     }
 }
@@ -2975,6 +2977,9 @@ pub fn hw_thread(
     initial_drive_unit: u8,
 ) {
     let mut status = DriveStatus::default();
+    if let Some(ref p) = port_arg {
+        status.port_name = p.clone();
+    }
     status.drive_unit = initial_drive_unit.min(1);
     status.unit_id = status.drive_unit;
     let mut rpm_sampler = RpmSampler::new(4);
@@ -2991,6 +2996,7 @@ pub fn hw_thread(
         let mut should_exit = false;
 
         if let Some(name) = port_name {
+            status.port_name = name.clone();
             match serialport::new(&name, 115_200)
                 .timeout(Duration::from_millis(100))
                 .open()

@@ -1,6 +1,9 @@
 use ratatui::{
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    Frame,
 };
 use crate::app::{App, HeadSelection};
 use crate::hw::HwActivity;
@@ -864,6 +867,121 @@ pub fn build_single_head_stream_lines(app: &App, available_height: usize) -> Vec
     }
     lines
 }
+
+/// Returns the clean top header branding title:
+/// ` AlignTesterDiag v{VERSION} `
+pub fn get_header_title() -> String {
+    format!(" AlignTesterDiag v{} ", env!("CARGO_PKG_VERSION"))
+}
+
+/// Formats the port badge string for the top header banner:
+/// ` [ Port: {PORT_NAME} ] `
+pub fn format_port_badge(port_name: &str) -> String {
+    let p = if port_name.trim().is_empty() {
+        "Auto"
+    } else {
+        port_name.trim()
+    };
+    format!(" [ Port: {} ] ", p)
+}
+
+/// Builds the clean 1-line footer status bar displaying shortcuts and hardware status:
+/// ` [?] / [F1] Help | [Q] Quit | [Esc] Stop | Hardware: Greaseweazle `
+pub fn build_footer_line() -> Line<'static> {
+    Line::from(vec![
+        Span::styled(" [?] / [F1] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("Help", Style::default().fg(Color::White)),
+        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+        Span::styled("[Q] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("Quit", Style::default().fg(Color::White)),
+        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+        Span::styled("[Esc] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("Stop", Style::default().fg(Color::White)),
+        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Hardware: ", Style::default().fg(Color::White)),
+        Span::styled("Greaseweazle", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+        Span::styled(" ", Style::default()),
+    ])
+}
+
+fn shortcut_row(key: &str, desc: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("  {:<16}", key), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(": ", Style::default().fg(Color::DarkGray)),
+        Span::styled(desc.to_string(), Style::default().fg(Color::White)),
+    ])
+}
+
+/// Builds the formatted help and keyboard shortcut reference lines for the interactive modal
+pub fn build_help_modal_lines() -> Vec<Line<'static>> {
+    vec![
+        Line::from(vec![
+            Span::styled(" AlignTesterDiag ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(" | Author: ", Style::default().fg(Color::White)),
+            Span::styled("MonSieur JeAn-FReD", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(" | License: ", Style::default().fg(Color::White)),
+            Span::styled("GPL-3.0", Style::default().fg(Color::LightMagenta)),
+        ]),
+        Line::from(Span::styled(" ──────────────────────────────────────────────────────────────────────────", Style::default().fg(Color::DarkGray))),
+        shortcut_row("? / F1", "Toggle this Help Modal"),
+        shortcut_row("A", "Analyze (Continuous real-time alignment & flux acquisition)"),
+        shortcut_row("B", "Toggle Audio Radar (Pitch-variometer feedback)"),
+        shortcut_row("D", "Read Data (Sector integrity check & CRC verification)"),
+        shortcut_row("Esc", "Stop / Motor off (Enter safe idle state)"),
+        shortcut_row("Backspace", "PANIC RESET (Instant motor cut & hardware re-init)"),
+        shortcut_row("F", "Format (Low-level track format)"),
+        shortcut_row("H", "Toggle Head (Head 0 -> Head 1 -> Both 0+1)"),
+        shortcut_row("I", "Track Image (Capture raw MFM flux stream)"),
+        shortcut_row("L", "Live RPM (High-precision continuous tachometer test)"),
+        shortcut_row("M", "Toggle Motor (Spindle motor ON / OFF)"),
+        shortcut_row("P", "Format Parameters"),
+        shortcut_row("R", "Recalibrate Seek (Track 0 seek & verify)"),
+        shortcut_row("S", "Step Rate (Single / Double step)"),
+        shortcut_row("U", "Toggle Drive Unit (Drive 0 / Drive 1)"),
+        shortcut_row("V", "Toggle Verbose (Standard vs Verbose detail)"),
+        shortcut_row("W", "Write Data"),
+        shortcut_row("Z", "Zero Track (Direct seek to Track 0)"),
+        shortcut_row("+ / - / Arrows", "Step track +1 / -1 (0 to 83)"),
+        shortcut_row("0 - 9", "Direct jump to tracks (0, 10, 20... 80)"),
+        shortcut_row("Q / X / Ctrl+C", "Clean Exit (Instant motor & LED shutdown)"),
+        Line::from(Span::styled(" ──────────────────────────────────────────────────────────────────────────", Style::default().fg(Color::DarkGray))),
+        Line::from(vec![
+            Span::styled("  Press ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[Esc]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(", ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[?]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(", or ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[F1]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(" to return", Style::default().fg(Color::DarkGray)),
+        ]),
+    ]
+}
+
+/// Renders an interactive centered overlay help modal dialog
+pub fn render_help_modal(f: &mut Frame, area: Rect) {
+    let modal_width = (area.width.saturating_sub(4)).clamp(68, 80).min(area.width);
+    let modal_height = (area.height.saturating_sub(2)).clamp(22, 28).min(area.height);
+    let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
+    let modal_area = Rect::new(x, y, modal_width, modal_height);
+
+    f.render_widget(Clear, modal_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .title(" AlignTesterDiag — Help & Shortcut Reference ")
+        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(Color::Rgb(15, 20, 35)));
+
+    let paragraph = Paragraph::new(build_help_modal_lines())
+        .block(block)
+        .alignment(ratatui::layout::Alignment::Left);
+
+    f.render_widget(paragraph, modal_area);
+}
+
 
 
 

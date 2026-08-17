@@ -331,7 +331,7 @@ The UI renders an intuitive centering gauge depicting deviation from the nominal
 The interface is divided into three primary functional zones: Top Header, Left Control Menu, and Right Diagnostic Panel.
 
 ```text
-┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+┌─ AlignTesterDiag v0.1.1-alpha ─────────────────────────────────────────────────────────────────── [ Port: COM3 ] ──┐
 │ A: 500k HD    T40  H0     Flags: [-wRz-]   WP: WRITE-ENABLED     18x512  27  84         ► [READING / ANALYZING /]        │
 │  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18                                                                   │
 │ 0....+....1....+....2....+....3....+....4....+....5....+....6....+....7....+....8...                                   │
@@ -353,6 +353,7 @@ The interface is divided into three primary functional zones: Top Header, Left C
 
 ### 8.1 Visual Components
 1. **Top Header Banner:**
+   - **Branding & Port Badge:** Clean title banner spanning top border: `AlignTesterDiag v{VERSION}` on the left, active Greaseweazle COM port `[ Port: {PORT_NAME} ]` (e.g. `[ Port: COM3 ]`, `[ Port: /dev/ttyACM0 ]`) on the right.
    - **Drive & Track:** Active unit (`A:` / `B:`), Density (`500k HD` / `250k DD`), Cylinder (`T40`), Head (`H0`, `H1`, `HB(H0)`).
    - **Access Flags:** `[-wRz-]` (`w` = Write enabled, `R` = Recalibrate, `z` = Zero track).
    - **Write Protect Badge:** `WP: PROTECTED` (Yellow) vs. `WP: WRITE-ENABLED` (Cyan).

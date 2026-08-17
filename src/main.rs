@@ -8,7 +8,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Paragraph},
     Terminal,
 };
 use std::{
@@ -29,6 +29,40 @@ pub use app::*;
 pub use audio::*;
 pub use hw::{hw_thread, DisplayMode, DriveStatus, HwActivity, HwCmd};
 pub use ui::*;
+
+/// Builds the clean CLI banner and help/version text
+pub fn build_cli_banner() -> String {
+    format!(
+r#"AlignTesterDiag v{}
+Real-time Floppy Drive Diagnostic & Alignment Tool for Greaseweazle
+Copyright (C) 2026 MonSieur JeAn-FReD (GPL-3.0)
+
+Usage: aligntester-diag [OPTIONS] [PORT]
+
+Arguments:
+  [PORT]              Serial port connected to Greaseweazle (e.g. COM3, /dev/ttyACM0)
+
+Options:
+  -d, --drive <0|1>   Select physical drive unit (0 for Drive A:, 1 for Drive B:) [default: 0]
+  -p, --port <PORT>   Serial port connected to Greaseweazle
+  -h, --help          Print help information
+  -v, -V, --version   Print version information
+"#,
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// Checks for help or version flags (-h, --help, -v, -V, --version)
+/// If present, prints the clean CLI banner to stdout and returns true (indicating early exit).
+pub fn handle_cli_help_or_version(args: &[String]) -> bool {
+    for arg in args.iter().skip(1) {
+        if arg == "-h" || arg == "--help" || arg == "-v" || arg == "-V" || arg == "--version" {
+            print!("{}", build_cli_banner());
+            return true;
+        }
+    }
+    false
+}
 
 pub fn parse_cli_args(args: &[String]) -> (Option<String>, u8) {
     let mut port = None;
@@ -51,6 +85,15 @@ pub fn parse_cli_args(args: &[String]) -> (Option<String>, u8) {
             if let Ok(val) = stripped.parse::<u8>() {
                 drive_unit = val.min(1);
             }
+        } else if arg == "--port" || arg == "-p" {
+            if i + 1 < args.len() {
+                port = Some(args[i + 1].clone());
+                i += 1;
+            }
+        } else if let Some(stripped) = arg.strip_prefix("--port=") {
+            port = Some(stripped.to_string());
+        } else if let Some(stripped) = arg.strip_prefix("-p=") {
+            port = Some(stripped.to_string());
         } else if !arg.starts_with('-') && port.is_none() {
             port = Some(arg.clone());
         }
@@ -61,6 +104,9 @@ pub fn parse_cli_args(args: &[String]) -> (Option<String>, u8) {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
+    if handle_cli_help_or_version(&args) {
+        return Ok(());
+    }
     let (port_name, drive_unit) = parse_cli_args(&args);
 
     enable_raw_mode()?;
@@ -70,11 +116,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (tx_status, rx_status) = unbounded::<DriveStatus>();
     let (tx_cmd, rx_cmd) = unbounded::<HwCmd>();
 
+    let port_arg = port_name.clone();
     thread::spawn(move || {
-        hw_thread(tx_status, rx_cmd, port_name, drive_unit);
+        hw_thread(tx_status, rx_cmd, port_arg, drive_unit);
     });
 
     let mut app = App::with_drive_unit(drive_unit);
+    if let Some(ref p) = port_name {
+        app.status.port_name = p.clone();
+    }
 
     loop {
         while let Ok(msg) = rx_status.try_recv() {
@@ -85,7 +135,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         terminal.draw(|f| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(4), Constraint::Min(1)])
+                .constraints([
+                    Constraint::Length(4),
+                    Constraint::Min(1),
+                ])
                 .split(f.size());
 
             let drive_letter = if status.drive_unit == 0 { "A:" } else { "B:" };
@@ -160,13 +213,47 @@ fn main() -> Result<(), Box<dyn Error>> {
             top_spans.push(badge_icon);
             top_spans.push(badge_text);
 
+            let port_display = if status.port_name.is_empty() {
+                if status.connected {
+                    "Connected".to_string()
+                } else {
+                    "Searching...".to_string()
+                }
+            } else {
+                status.port_name.clone()
+            };
+            let port_badge = format_port_badge(&port_display);
+
             let header_lines = vec![
                 Line::from(top_spans),
                 Line::from(sec_line_spans),
                 build_ruler_line(status.track),
                 Line::from(""),
             ];
-            let header = Paragraph::new(header_lines).style(Style::default().bg(Color::Red));
+            let header = Paragraph::new(header_lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::TOP)
+                        .border_style(
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                        .title(
+                            ratatui::widgets::block::Title::from(get_header_title())
+                                .alignment(ratatui::layout::Alignment::Left),
+                        )
+                        .title(
+                            ratatui::widgets::block::Title::from(port_badge)
+                                .alignment(ratatui::layout::Alignment::Right),
+                        )
+                        .title_style(
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                )
+                .style(Style::default().bg(Color::Red));
             f.render_widget(header, chunks[0]);
 
             let lower_chunks = Layout::default()
@@ -250,7 +337,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Line::from(" Z = Zero track"),
                 Line::from(" 0-9 = seek 0-90"),
                 Line::from(" +/- = Seek +/-1"),
-                Line::from(" X   = eXit"),
+                Line::from(" ?/F1= Help Modal"),
+                Line::from(" Q/X = Quit / eXit"),
             ];
 
             let menu = Paragraph::new(menu_lines)
@@ -280,10 +368,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let sign = if diff >= 0.0 { "+" } else { "" };
                         let diff_pct = (diff / target_rpm) * 100.0;
 
-                        // 1. Metric Line: RPM: 300.1 (Avg: 300.0 | Min: 299.8 | Max: 300.2 | Jitter: ±0.07%)
                         right_lines.push(Line::from(build_rpm_metric_spans(&status.rpm_measure, target_rpm)));
 
-                        // 2. Centering Gauge: [----|----▼----|----]
                         right_lines.push(build_rpm_gauge_line(instant_rpm, target_rpm));
                         right_lines.push(Line::from(""));
 
@@ -397,6 +483,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         for (i, &(rpm_val, delta_ticks)) in recent.iter().enumerate() {
                             let is_last = i == recent.len().saturating_sub(1);
                             let period_ms = (delta_ticks as f64) / 72_000.0;
+
                             let prefix = if is_last { " ► " } else { "   " };
                             let style = if is_last {
                                 Style::default()
@@ -687,7 +774,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         "    Z               : Zero track (Direct return to Track 0)",
                     ));
                     right_lines.push(Line::from(
-                        "    X               : Clean exit (Instant motor & LED shutdown)",
+                        "    Q/X = Exit      : Clean exit (Instant motor & LED shutdown)",
                     ));
                     right_lines.push(Line::from(""));
                     right_lines.push(Line::from(format!("Log: {}", status.log_msg)));
@@ -697,18 +784,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             let right_panel = Paragraph::new(right_lines)
                 .style(Style::default().fg(Color::White).bg(Color::Blue));
             f.render_widget(right_panel, lower_chunks[1]);
+
+            if app.show_help {
+                render_help_modal(f, f.size());
+            }
         })?;
 
         if event::poll(Duration::from_millis(15))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                if key.code == KeyCode::Backspace
-                    || key.code == KeyCode::Char('\x08')
-                    || key.code == KeyCode::Char('\u{8}')
-                {
-                    let _ = tx_cmd.send(HwCmd::PanicReset);
                     continue;
                 }
                 if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -717,8 +801,33 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let _ = tx_cmd.send(HwCmd::Exit);
                     break;
                 }
+
+                if app.show_help {
+                    match key.code {
+                        KeyCode::Esc
+                        | KeyCode::Char('?')
+                        | KeyCode::F(1)
+                        | KeyCode::Char('q')
+                        | KeyCode::Char('Q') => {
+                            app.show_help = false;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                if key.code == KeyCode::Backspace
+                    || key.code == KeyCode::Char('\x08')
+                    || key.code == KeyCode::Char('\u{8}')
+                {
+                    let _ = tx_cmd.send(HwCmd::PanicReset);
+                    continue;
+                }
                 match key.code {
-                    KeyCode::Char('x') | KeyCode::Char('X') => {
+                    KeyCode::Char('?') | KeyCode::F(1) => {
+                        app.toggle_help();
+                    }
+                    KeyCode::Char('x') | KeyCode::Char('X') | KeyCode::Char('q') | KeyCode::Char('Q') => {
                         let _ = tx_cmd.send(HwCmd::Exit);
                         break;
                     }
@@ -1730,6 +1839,127 @@ mod tests {
             .filter(|s| s.content == "░ " && s.style.fg == Some(Color::DarkGray))
             .count();
         assert_eq!(dark_blocks, 1);
+    }
+
+    #[test]
+    fn test_cli_help_and_version_flags() {
+        let banner = build_cli_banner();
+        assert!(banner.contains("AlignTesterDiag"));
+        assert!(banner.contains(env!("CARGO_PKG_VERSION")));
+        assert!(banner.contains("2026 MonSieur JeAn-FReD (GPL-3.0)"));
+        assert!(banner.contains("--port"));
+        assert!(banner.contains("--drive"));
+        assert!(banner.contains("--help"));
+        assert!(banner.contains("--version"));
+
+        let args_help_short = vec!["aligntester".to_string(), "-h".to_string()];
+        assert!(handle_cli_help_or_version(&args_help_short));
+
+        let args_help_long = vec!["aligntester".to_string(), "--help".to_string()];
+        assert!(handle_cli_help_or_version(&args_help_long));
+
+        let args_ver_short_v = vec!["aligntester".to_string(), "-v".to_string()];
+        assert!(handle_cli_help_or_version(&args_ver_short_v));
+
+        let args_ver_short_cap_v = vec!["aligntester".to_string(), "-V".to_string()];
+        assert!(handle_cli_help_or_version(&args_ver_short_cap_v));
+
+        let args_ver_long = vec!["aligntester".to_string(), "--version".to_string()];
+        assert!(handle_cli_help_or_version(&args_ver_long));
+
+        let args_normal = vec!["aligntester".to_string(), "COM3".to_string(), "-d".to_string(), "1".to_string()];
+        assert!(!handle_cli_help_or_version(&args_normal));
+    }
+
+    #[test]
+    fn test_cli_argument_parsing_port_flags() {
+        let args_p_short = vec!["aligntester".to_string(), "-p".to_string(), "COM4".to_string(), "-d".to_string(), "1".to_string()];
+        let (port, unit) = parse_cli_args(&args_p_short);
+        assert_eq!(port, Some("COM4".to_string()));
+        assert_eq!(unit, 1);
+
+        let args_p_long = vec!["aligntester".to_string(), "--port".to_string(), "/dev/ttyACM0".to_string()];
+        let (port, unit) = parse_cli_args(&args_p_long);
+        assert_eq!(port, Some("/dev/ttyACM0".to_string()));
+        assert_eq!(unit, 0);
+
+        let args_p_eq = vec!["aligntester".to_string(), "--port=COM7".to_string(), "--drive=1".to_string()];
+        let (port, unit) = parse_cli_args(&args_p_eq);
+        assert_eq!(port, Some("COM7".to_string()));
+        assert_eq!(unit, 1);
+
+        let args_short_p_eq = vec!["aligntester".to_string(), "-p=COM9".to_string()];
+        let (port, unit) = parse_cli_args(&args_short_p_eq);
+        assert_eq!(port, Some("COM9".to_string()));
+        assert_eq!(unit, 0);
+    }
+
+    #[test]
+    fn test_top_header_branding() {
+        let title = get_header_title();
+        assert_eq!(title, format!(" AlignTesterDiag v{} ", env!("CARGO_PKG_VERSION")));
+        assert!(!title.contains('🖴'));
+        assert!(!title.contains("MonSieur JeAn-FReD"));
+
+        let badge_com3 = format_port_badge("COM3");
+        assert_eq!(badge_com3, " [ Port: COM3 ] ");
+
+        let badge_com10 = format_port_badge("COM10");
+        assert_eq!(badge_com10, " [ Port: COM10 ] ");
+
+        let badge_linux = format_port_badge("/dev/ttyACM0");
+        assert_eq!(badge_linux, " [ Port: /dev/ttyACM0 ] ");
+
+        let badge_empty = format_port_badge("");
+        assert_eq!(badge_empty, " [ Port: Auto ] ");
+    }
+
+    #[test]
+    fn test_footer_line_content() {
+        let footer_line = build_footer_line();
+        let footer_text: String = footer_line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(footer_text.contains("[?] / [F1] Help"));
+        assert!(footer_text.contains("[Q] Quit"));
+        assert!(footer_text.contains("[Esc] Stop"));
+        assert!(footer_text.contains("Hardware: Greaseweazle"));
+    }
+
+    #[test]
+    fn test_help_modal_content() {
+        let lines = build_help_modal_lines();
+        let full_text: String = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>() + "\n")
+            .collect();
+
+        assert!(full_text.contains("AlignTesterDiag"));
+        assert!(full_text.contains(env!("CARGO_PKG_VERSION")));
+        assert!(full_text.contains("MonSieur JeAn-FReD"));
+        assert!(full_text.contains("GPL-3.0"));
+        assert!(full_text.contains("? / F1"));
+        assert!(full_text.contains("Analyze"));
+        assert!(full_text.contains("Audio Radar"));
+        assert!(full_text.contains("Read Data"));
+        assert!(full_text.contains("Stop / Motor off"));
+        assert!(full_text.contains("PANIC RESET"));
+        assert!(full_text.contains("Head 0 -> Head 1 -> Both 0+1"));
+        assert!(full_text.contains("Press [Esc], [?], or [F1] to return"));
+    }
+
+    #[test]
+    fn test_terminal_vertical_layout_no_footer() {
+        let area = ratatui::layout::Rect::new(0, 0, 100, 30);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(4),
+                Constraint::Min(1),
+            ])
+            .split(area);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].height, 4);
+        assert_eq!(chunks[1].height, 26);
     }
 }
 

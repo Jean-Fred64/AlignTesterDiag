@@ -145,6 +145,7 @@ pub struct App {
     pub last_pass_h1: Option<DiagnosticPass>,
     pub last_capture_instant: std::time::Instant,
     pub stream_spinner_idx: usize,
+    pub show_help: bool,
 }
 
 impl App {
@@ -168,7 +169,12 @@ impl App {
             last_pass_h1: None,
             last_capture_instant: std::time::Instant::now(),
             stream_spinner_idx: 0,
+            show_help: false,
         }
+    }
+
+    pub fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
     }
 
     pub fn on_sector_packet(&mut self) {
@@ -599,6 +605,16 @@ mod tests {
         );
         app.record_pass(pass);
         assert_eq!(app.stream_spinner_idx, 2);
+    }
+
+    #[test]
+    fn test_app_help_toggle() {
+        let mut app = App::new();
+        assert!(!app.show_help);
+        app.toggle_help();
+        assert!(app.show_help);
+        app.toggle_help();
+        assert!(!app.show_help);
     }
 }
 
