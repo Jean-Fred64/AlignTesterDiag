@@ -143,6 +143,8 @@ pub struct App {
     pub drive_unit: u8,
     pub last_pass_h0: Option<DiagnosticPass>,
     pub last_pass_h1: Option<DiagnosticPass>,
+    pub last_capture_instant: std::time::Instant,
+    pub stream_spinner_idx: usize,
 }
 
 impl App {
@@ -164,10 +166,38 @@ impl App {
             drive_unit: unit,
             last_pass_h0: None,
             last_pass_h1: None,
+            last_capture_instant: std::time::Instant::now(),
+            stream_spinner_idx: 0,
         }
     }
 
+    pub fn on_sector_packet(&mut self) {
+        self.last_capture_instant = std::time::Instant::now();
+        self.stream_spinner_idx = (self.stream_spinner_idx + 1) % 4;
+    }
+
     pub fn handle_hw_message(&mut self, status: DriveStatus) {
+        let is_sector_packet = status.activity == HwActivity::ReadingAnalyzing
+            || status.mode == DisplayMode::Analyze
+            || status.mode == DisplayMode::ReadData
+            || status.analyzing
+            || status.in_progress_pass
+            || status.sector_log != self.status.sector_log
+            || status.io_cycle != self.status.io_cycle
+            || status.last_pass_h0 != self.status.last_pass_h0
+            || status.last_pass_h1 != self.status.last_pass_h1;
+
+        if is_sector_packet
+            && (status.activity == HwActivity::ReadingAnalyzing
+                || status.mode == DisplayMode::Analyze
+                || status.mode == DisplayMode::ReadData
+                || status.analyzing
+                || !status.sector_log.is_empty())
+        {
+            self.last_capture_instant = std::time::Instant::now();
+            self.stream_spinner_idx = (self.stream_spinner_idx + 1) % 4;
+        }
+
         self.status = status;
         self.drive_unit = self.status.drive_unit;
         self.head_selection = self.status.head_select;
@@ -228,6 +258,8 @@ impl App {
     }
 
     pub fn record_pass(&mut self, pass: DiagnosticPass) {
+        self.last_capture_instant = std::time::Instant::now();
+        self.stream_spinner_idx = (self.stream_spinner_idx + 1) % 4;
         if pass.head == 0 {
             self.last_pass_h0 = Some(pass);
         } else {
@@ -527,6 +559,48 @@ mod tests {
         // CRC error must NOT trigger PerfectAlignment, but OffTrackOrCrcError
         assert_eq!(event, Some(AudioEvent::OffTrackOrCrcError));
     }
+
+    #[test]
+    fn test_app_spinner_and_capture_instant_lifecycle() {
+        let mut app = App::new();
+        assert_eq!(app.stream_spinner_idx, 0);
+
+        let initial_instant = app.last_capture_instant;
+
+        // Simulate sector packet arrival via on_sector_packet
+        app.on_sector_packet();
+        assert_eq!(app.stream_spinner_idx, 1);
+        assert!(app.last_capture_instant >= initial_instant);
+
+        app.on_sector_packet();
+        assert_eq!(app.stream_spinner_idx, 2);
+
+        app.on_sector_packet();
+        assert_eq!(app.stream_spinner_idx, 3);
+
+        app.on_sector_packet();
+        assert_eq!(app.stream_spinner_idx, 0); // Rotates back to 0
+
+        // Simulate sector packet arrival via handle_hw_message
+        let mut status = DriveStatus::default();
+        status.activity = HwActivity::ReadingAnalyzing;
+        status.mode = DisplayMode::Analyze;
+        status.sector_log.push("T:00 H:0 Rate:500k MFM [ ■ ■ ■ ] (3/3 OK)".into());
+
+        app.handle_hw_message(status);
+        assert_eq!(app.stream_spinner_idx, 1);
+
+        // Simulate record_pass
+        let pass = DiagnosticPass::new(
+            0, 0, 500,
+            "T:00 H:0 [ ■ ] (1/1 OK)".into(),
+            "T:00 H:0 [ ■ ] (1/1 OK)".into(),
+            1, 1, true,
+        );
+        app.record_pass(pass);
+        assert_eq!(app.stream_spinner_idx, 2);
+    }
 }
+
 
 

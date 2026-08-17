@@ -2,7 +2,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use crate::app::HeadSelection;
+use crate::app::{App, HeadSelection};
 use crate::hw::HwActivity;
 
 /// Builds the track ruler line with visual highlight for active tracks (0 to 83)
@@ -241,7 +241,16 @@ pub fn extract_sector_ids_from_error(line: &str, marker: &str) -> Vec<usize> {
 /// - 🟥 Red (`Color::LightRed`): CRC error sector (`■ ` in red) or corrupt/error (`? `).
 /// - 🟨 Yellow (`Color::Yellow`): NO-DAM or DEL-DAM or warning.
 /// - ⬜ Dark Gray (`Color::DarkGray`): Missing sector (`░ `).
-pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'static>> {
+pub fn build_standard_line_spans(line: &str, expected_count: u8) -> Vec<Span<'static>> {
+    build_standard_line_spans_with_color(line, expected_count, Color::LightGreen)
+}
+
+/// Builds rich styled spans for Standard / Normal mode lines with a configurable valid block color (for decay effects):
+pub fn build_standard_line_spans_with_color(
+    line: &str,
+    _expected_count: u8,
+    valid_color: Color,
+) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
 
     let open_bracket = line.find('[');
@@ -292,7 +301,7 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
                         } else if missing_secs.contains(&block_idx) {
                             Style::default().fg(Color::DarkGray)
                         } else {
-                            Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+                            Style::default().fg(valid_color).add_modifier(Modifier::BOLD)
                         };
 
                         spans.push(Span::styled("■ ", style));
@@ -326,7 +335,7 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
                     if token.contains("MISALIGNED") {
                         Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD)
                     } else if token.contains("OK") {
-                        Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+                        Style::default().fg(valid_color).add_modifier(Modifier::BOLD)
                     } else if token.contains("CRC-") || token.contains("NO DATA") || token.contains("NO DISK") || token.contains("MISSING") || token.contains("BAD") {
                         Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
                     } else if token.contains("NO-DAM") || token.contains("DEL-DAM") || token.contains("OFF-TRK") {
@@ -348,7 +357,7 @@ pub fn build_standard_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'s
                     if token.contains("MISALIGNED") {
                         Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD)
                     } else if token.contains("OK") {
-                        Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+                        Style::default().fg(valid_color).add_modifier(Modifier::BOLD)
                     } else if token.contains('/') && !token.contains("CRC") && !token.contains("NO") && !token.contains("MISSING") && !token.contains("BAD") {
                         Style::default().fg(Color::White)
                     } else {
@@ -788,5 +797,73 @@ pub fn build_both_mode_display_lines(status: &crate::hw::DriveStatus) -> Vec<Lin
     lines.push(format_head_line(1));
     lines
 }
+
+/// Builds the sliding multi-line scroll history for single-head mode (Head 0 or Head 1):
+/// - Historical lines: aligned neutral prefix ("      ") and standard green valid sector blocks (`Color::Rgb(0, 180, 0)`)
+/// - Last line (`is_last`): rotating spinner prefix ("▸ [/] ") and dynamic TrueColor decay interpolation over ~220ms
+pub fn build_single_head_stream_lines(app: &App, available_height: usize) -> Vec<Line<'static>> {
+    let status = &app.status;
+    let mut lines = Vec::new();
+    let max_vertical_items = available_height.saturating_sub(11).clamp(1, 13);
+    let start_idx = status
+        .sector_log
+        .len()
+        .saturating_sub(max_vertical_items);
+    let recent_logs = &status.sector_log[start_idx..];
+
+    if recent_logs.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "T:{:02} H:{} : (Waiting read stream...)",
+                status.track, status.head
+            ),
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        const SPINNERS: &[&str] = &["|", "/", "-", "\\"];
+        let spin_char = SPINNERS[app.stream_spinner_idx % SPINNERS.len()];
+
+        for (i, log_line) in recent_logs.iter().enumerate() {
+            let is_last = i == recent_logs.len().saturating_sub(1);
+            let prefix_span = if is_last {
+                Span::styled(
+                    format!("▸ [{}] ", spin_char),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled("      ", Style::default())
+            };
+
+            if status.verbose_mode {
+                let mut spans = vec![prefix_span];
+                spans.extend(build_verbose_line_spans(log_line, status.sector_count));
+                lines.push(Line::from(spans));
+            } else {
+                let valid_color = if is_last {
+                    let elapsed = app.last_capture_instant.elapsed().as_millis() as f32;
+                    let factor = (1.0 - (elapsed / 220.0)).clamp(0.0, 1.0);
+                    let r = (30.0 + factor * 180.0) as u8;
+                    let g = (180.0 + factor * 75.0) as u8;
+                    let b = (30.0 + factor * 180.0) as u8;
+                    Color::Rgb(r, g, b)
+                } else {
+                    Color::Rgb(0, 180, 0)
+                };
+
+                let mut spans = vec![prefix_span];
+                spans.extend(build_standard_line_spans_with_color(
+                    log_line,
+                    status.sector_count,
+                    valid_color,
+                ));
+                lines.push(Line::from(spans));
+            }
+        }
+    }
+    lines
+}
+
 
 
