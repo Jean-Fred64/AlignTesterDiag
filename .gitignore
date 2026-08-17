@@ -11,3 +11,4 @@ __pycache__/
 /src_step2_checkpoint
 /.vscode
 /.clinerules
+/.cargo
