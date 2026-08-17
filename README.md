@@ -14,11 +14,11 @@
 
 - ⚡ **100% Non-Blocking Architecture (~60 Hz TUI):** Strict decoupling between the interactive Ratatui/Crossterm rendering loop, the USB hardware acquisition worker thread, and a dedicated real-time audio thread via lock-free `crossbeam-channel` queues.
 - 🎯 **Real-Time Mechanical Alignment Radar:** Continuous on-track vs. off-track sector validation with live percentage gauge calculation, detecting misaligned head carriages, tracking errors, and invalid track IDs.
-- 🔊 **Dynamic Pitch Acoustic Variometer:** Auditory feedback inspired by glider variometers. Continuously modulates audio frequency from **440 Hz to 1760 Hz** proportional to sector quality ($Q\%$), with instantaneous **220 Hz dissonant warning** on cross-track mismatch and **150 Hz tick** on CRC faults.
+- 🔊 **Dynamic Pitch Acoustic Variometer:** Auditory feedback inspired by glider variometers. Continuously modulates multi-tier audio frequency (**1500 Hz – 2200 Hz** for nominal alignment, **600 Hz – 1400 Hz** for marginal tracking, **250 Hz – 500 Hz** continuous tone for severe misalignment), with instantaneous **180 Hz pulsed warning buzz** on cross-track mismatch and **150 Hz hum** on zero decoded sectors.
 - ⏱️ **72 MHz Spindle Tachometer & Live RPM Jitter Gauge:** Sub-microsecond revolution interval timing extracted directly from hardware index pulses. Computes instant RPM, 10-revolution rolling average, peak-to-peak jitter ($\Delta\text{RPM}$, $\pm\Delta\%$), and displays a 21-character visual centering gauge.
 - 🔄 **Dual-Head ("Both" Mode) Acquisition:** Alternating Head 0 & Head 1 acquisition with automated cross-track divergence detection ($T_{\text{H0}} \ne T_{\text{H1}}$) and consolidated dual-head health scoring.
 - 🔌 **Universal Drive Support (26-Pin FFC & 34-Pin Shugart/PC):** Motor-gated seek with 15 ms electronic wake-up delay (`STEPPER_WAKEUP_DELAY_MS`) to eliminate stepper motor driver lockups on slim laptop mechanisms (e.g. TEAC FD-05HG). Dynamic drive selection (`Drive 0` / `Drive 1`).
-- 📊 **Standard & Verbose Live Stream Views:** Color-coded segmented ribbon blocks representing sector-by-sector IDAM/DAM integrity, Gap0 timing in microseconds, and interleave ratio.
+- 📊 **Standard & Verbose Live Stream Views:** Color-coded segmented ribbon blocks representing sector-by-sector IDAM/DAM integrity, Gap0 timing in microseconds, phosphor decay animation, and interleave ratio.
 - 🛑 **Panic Reset & Safe State Protection:** Instant motor power cut, flux buffer flush, and Greaseweazle bus re-initialization on `Backspace` or `Esc`.
 
 ---
@@ -83,6 +83,7 @@ cargo run --release -- /dev/ttyACM0 --drive 1
 
 | Key | Action | Description |
 |:---:|:---|:---|
+| <kbd>?</kbd> / <kbd>F1</kbd> | **Help Modal** | Toggle full-screen interactive help & shortcut reference overlay |
 | <kbd>A</kbd> | **Analyze** | Start continuous real-time track alignment analysis |
 | <kbd>D</kbd> | **Read Data** | Read and test sector CRC integrity across the cylinder |
 | <kbd>L</kbd> | **Live RPM** | Launch 72 MHz high-precision spindle tachometer mode |
@@ -96,9 +97,9 @@ cargo run --release -- /dev/ttyACM0 --drive 1
 | <kbd>+</kbd> / <kbd>→</kbd> | **Step Forward (+1)** | Step carriage forward by +1 track (up to Track 83) |
 | <kbd>-</kbd> / <kbd>←</kbd> | **Step Backward (-1)** | Step carriage backward by -1 track (down to Track 0) |
 | <kbd>0</kbd>–<kbd>9</kbd> | **Direct Seek** | Direct seek jump to decade tracks (0, 10, 20 ... 80) |
-| <kbd>Esc</kbd> | **Stop** | Stop spindle motor, flush pending buffers, enter safe state |
+| <kbd>Esc</kbd> | **Stop** | Stop spindle motor, flush pending buffers, dismiss help |
 | <kbd>Backspace</kbd> | **Panic Reset** | Emergency instant motor cut and hardware re-initialization |
-| <kbd>X</kbd> / <kbd>Ctrl+C</kbd> | **Exit** | Clean shutdown (cuts spindle motor, disables LEDs, exits raw mode) |
+| <kbd>Q</kbd> / <kbd>X</kbd> / <kbd>Ctrl+C</kbd> | **Exit** | Clean shutdown (cuts spindle motor, disables LEDs, exits raw mode) |
 
 ---
 
@@ -136,13 +137,9 @@ AlignTesterDiag/
 │   ├── app.rs                 # State management, Action dispatcher, Dual-head metrics consolidation
 │   ├── audio.rs               # Real-time sound worker thread, dynamic pitch calculation, platform beeps
 │   ├── ui.rs                  # TUI components, styled ribbon spans, centering gauges, track ruler
-│   ├── hw/
-│   │   └── mod.rs             # Greaseweazle USB communication, DPLL, MFM decoding, hardware timings
-│   └── bin/
-│       ├── gw_read_track.rs   # Standalone flux cell duration measurement tool
-│       ├── gw_test.rs         # Standalone Greaseweazle command verification utility
-│       ├── test_mfm_decoder.rs# Standalone MFM bitstream & IDAM decoder test harness
-│       └── test_sector_gen.rs # Interleave & sector geometry verification tool
+│   └── hw/
+│       ├── mod.rs             # Greaseweazle USB communication, DPLL, MFM decoding, hardware timings
+│       └── protocol.rs        # Greaseweazle binary protocol opcodes, ACK codes, packet builders
 └── export/
     ├── README.md              # Distribution showcase & quick reference
     ├── documentation.md       # Complete unified technical specification & manual

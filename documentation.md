@@ -14,7 +14,7 @@ Welcome to the definitive technical documentation for **AlignTesterDiag**, an ul
 6. [Acoustic Variometer & Alignment Radar](#6-acoustic-variometer--alignment-radar)
 7. [High-Precision Spindle Tachometer & Live RPM Jitter Engine](#7-high-precision-spindle-tachometer--live-rpm-jitter-engine)
 8. [User Interface, Visual Indicators & Controls](#8-user-interface-visual-indicators--controls)
-9. [Standalone Test Binaries & Verification Suite](#9-standalone-test-binaries--verification-suite)
+9. [Automated Test & Verification Suite](#9-automated-test--verification-suite)
 10. [Technical Roadmap & Multi-System Future Support](#10-technical-roadmap--multi-system-future-support)
 
 ---
@@ -93,10 +93,11 @@ All commands follow the Greaseweazle frame format: `[CMD_OPCODE, FRAME_LENGTH, A
 | `0x00` | `CMD_GET_INFO` | `[0x00, 0x03, 0x00]` | 32 bytes | Query firmware version, hardware model, sample clock frequency |
 | `0x0E` | `CMD_SET_BUS_TYPE` | `[0x0E, 0x03, 0x01]` | 0 bytes | Configure interface pinout (`0x01` = IBM PC standard) |
 | `0x0C` | `CMD_SELECT` | `[0x0C, 0x03, unit]` | 0 bytes | Assert drive select line (`0` = Drive A, `1` = Drive B) |
+| `0x0D` | `CMD_DESELECT` | `[0x0D, 0x02]` | 0 bytes | Deselect all drive units / release interface bus |
 | `0x06` | `CMD_MOTOR` | `[0x06, 0x04, unit, state]` | 0 bytes | Control spindle motor (`1` = ON, `0` = OFF) |
 | `0x02` | `CMD_SEEK` | `[0x02, 0x03, cyl]` | 0 bytes | Step head carriage to logical cylinder (`0` to `83`) |
 | `0x03` | `CMD_HEAD` | `[0x03, 0x03, head]` | 0 bytes | Select physical head (`0` = Lower / Side 0, `1` = Upper / Side 1) |
-| `0x07` | `CMD_READ_FLUX` | `[0x07, 0x0A, 0x00, 0x00, 0x00, 0x00, revs, 0x00, 0x00, 0x00]` | Stream | Stream raw magnetic flux transition timings |
+| `0x07` | `CMD_READ_FLUX` | `[0x07, 0x08, 0x00, 0x00, 0x00, 0x00, rev_low, rev_high]` | Stream | Stream raw magnetic flux transition timings |
 | `0x14` | `CMD_GET_PIN` | `[0x14, 0x03, pin_num]` | 1 byte | Read logic level of physical connector pin |
 
 <details>
@@ -131,7 +132,10 @@ Floppy disk drives incorporate physical stepper motors, lead screws, and rotatin
 | `SPIN_UP_DELAY_MS` | `350 ms` | **Motor Spin-Up Delay:** Time required for the DC brushless spindle motor to accelerate from 0 to 300 RPM and lock index synchronization. |
 | `RECALIBRATE_WAIT_MS` | `200 ms` | **Track 0 Shock Dissipation Delay:** One full disk revolution (~200 ms) allowed after optical stop recalibration to dissipate mechanical shock before MFM decoding. |
 | `DWELL_TIME_TRK0_MS` | `60 ms` | **Dwell Time at Track 0:** Carriage stabilization pause at the physical stop during recalibrate-and-return sequences. |
+| `SEEK_TRK0_TIMEOUT_MS` | `3000 ms` | **Track 0 Seek Timeout:** Maximum guard window during optical base stop homing operations. |
 | `DEFAULT_SERIAL_TIMEOUT_MS` | `1000 ms` | **USB Flux Read Timeout:** Maximum allowable communication window for flux packet reception. |
+| `ACK_GUARD_TIMEOUT_MS` | `500 ms` | **Hardware ACK Guard Timeout:** Response timeout on low-level command acknowledgments. |
+| `SYNC_DELAY_MS` | `30 ms` | **Bus Protocol Synchronization Pause:** Short stabilization delay during bus mode re-sync. |
 
 ### 3.2 Motor-Gated Seek Operation
 When stepping tracks while the motor is stopped, issuing immediate step pulses will fail on 26-pin drives whose stepper drivers are powered off. `perform_motor_gated_seek()` resolves this:
@@ -249,35 +253,44 @@ When operating in "Both" mode, if Head 0 reads Track $N$ while Head 1 reads Trac
 - Diagnostic Flag: `MISMATCH: Track X on Head 0, Track Y on Head 1`
 - Alignment penalty: Alignment score is reduced to $50\%$ or lower.
 - Orange/Red ribbon highlighting on misaligned segments.
-- Immediate **220 Hz dissonant warning buzz** from the audio variometer.
+- Immediate **180 Hz pulsed warning buzz** from the audio variometer.
 
 ---
 
 ## 6. Acoustic Variometer & Alignment Radar
 
-To allow technicians to align floppy drive head carriages without constantly looking at the screen, AlignTesterDiag includes a real-time **Acoustic Variometer** inspired by soaring flight instrumentation.
+To allow technicians to align floppy drive head carriages without constantly looking at the screen, AlignTesterDiag includes a real-time **Multi-Tier Acoustic Variometer** inspired by soaring flight instrumentation.
 
-### 6.1 Dynamic Frequency Modulation
-In nominal alignment mode, audio frequency modulates continuously based on the instantaneous sector quality score $Q\% = \min(Q_{\text{H0}}, Q_{\text{H1}})$:
+### 6.1 Multi-Tier Dynamic Frequency Modulation
+The acoustic engine dynamically calculates pitch across three continuous quality tiers ($Q\%$):
 
-$$\text{Pitch (Hz)} = 440 + \left( \frac{\text{clamp}(Q\%, 30, 100) - 30}{70} \right) \times (1760 - 440)$$
+$$\text{Pitch}(Q\%) = \begin{cases}
+1500 + \left(\frac{Q\% - 95}{5}\right) \times 700 \text{ Hz} & \text{for } 95\% \le Q\% \le 100\% \text{ (Nominal Factory Alignment)} \\[6pt]
+600 + \left(\frac{Q\% - 70}{24}\right) \times 800 \text{ Hz} & \text{for } 70\% \le Q\% \le 94\% \text{ (Marginal Tracking)} \\[6pt]
+250 + \left(\frac{Q\%}{69}\right) \times 250 \text{ Hz} & \text{for } Q\% < 70\% \text{ (Severe Misalignment — never silenced)}
+\end{cases}$$
 
 ```text
-  30% Quality ──>  440 Hz (A4)
-  65% Quality ──> 1100 Hz (C#6)
- 100% Quality ──> 1760 Hz (A6)
+ 100% Quality ──> 2200 Hz (C#7)  ──┐
+  95% Quality ──> 1500 Hz (G6)   ──┴─ [Tier 1: Nominal Factory Alignment]
+  94% Quality ──> 1400 Hz (F6)   ──┐
+  70% Quality ──>  600 Hz (D5)   ──┴─ [Tier 2: Marginal Tracking]
+  69% Quality ──>  500 Hz (B4)   ──┐
+   0% Quality ──>  250 Hz (B3)   ──┴─ [Tier 3: Severe Misalignment (Continuous Low Tone)]
 ```
 
 ### 6.2 Sonic Signature Mapping
 
-| Audio Event | Frequency | Duration | Acoustic Profile & Trigger Condition |
+| Audio Event | Frequency / Pattern | Duration | Acoustic Profile & Trigger Condition |
 |:---|:---:|:---:|:---|
-| **Perfect Alignment** | `440 Hz – 1760 Hz` | `40 ms` | Smooth harmonic tone. Dynamic pitch tracking signal quality $Q\%$. |
-| **Track Mismatch** | `220 Hz` | `120 ms` | Low dissonant alarm. Triggered on cross-track divergence ($T_{\text{H0}} \ne T_{\text{H1}}$) or carriage off-target. |
-| **CRC / Missing Sector** | `150 Hz` | `20 ms` | Attenuated transient click. Indicates missing sector ID or CRC data corruption. |
+| **Nominal Alignment** | `1500 Hz – 2200 Hz` | `40 ms` | High clean tone. Dynamic pitch tracking signal quality $95\% \le Q\% \le 100\%$. |
+| **Marginal Tracking** | `600 Hz – 1400 Hz` | `40 ms` | Medium tone. Dynamic pitch tracking signal quality $70\% \le Q\% \le 94\%$. |
+| **Severe Misalignment** | `250 Hz – 500 Hz` | `40 ms` | Low continuous tone ($Q\% < 70\%$). Never muted, providing non-zero auditory guidance. |
+| **Track Mismatch** | `180 Hz` pulsed buzz | `2x 50 ms` (15 ms gap) | Low dissonant alarm. Triggered on cross-track divergence ($T_{\text{H0}} \ne T_{\text{H1}}$) or carriage off-target ($T_{\text{read}} \ne T_{\text{target}}$). |
+| **Zero Decoded Sectors** | `150 Hz` | `40 ms` | Low-frequency warning hum. Triggered when zero valid sectors or IDAM headers are detected. |
 
 ### 6.3 Low-Latency Audio Queue
-The audio thread processes signals from `crossbeam_channel::Receiver<AudioEvent>`. Under high revolution speeds, intermediate queued beeps are drained:
+The audio thread processes signals from `crossbeam_channel::Receiver<AudioEvent>`. Under high revolution speeds, intermediate queued beeps are drained to ensure real-time responsiveness:
 ```rust
 while let Ok(mut event) = rx.recv() {
     while let Ok(newer) = rx.try_recv() {
@@ -353,9 +366,9 @@ The interface is divided into three primary functional zones: Top Header, Left C
 
 ### 8.1 Visual Components
 1. **Top Header Banner:**
-   - **Branding & Port Badge:** Clean title banner spanning top border: `AlignTesterDiag v{VERSION}` on the left, active Greaseweazle COM port `[ Port: {PORT_NAME} ]` (e.g. `[ Port: COM3 ]`, `[ Port: /dev/ttyACM0 ]`) on the right.
+   - **Branding & Port Badge:** Clean title banner spanning top border: ` 💾 AlignTesterDiag v{VERSION} ` on the left, active Greaseweazle COM port `[ Port: {PORT_NAME} ]` (e.g. `[ Port: COM3 ]`, `[ Port: /dev/ttyACM0 ]`) on the right.
    - **Drive & Track:** Active unit (`A:` / `B:`), Density (`500k HD` / `250k DD`), Cylinder (`T40`), Head (`H0`, `H1`, `HB(H0)`).
-   - **Access Flags:** `[-wRz-]` (`w` = Write enabled, `R` = Recalibrate, `z` = Zero track).
+   - **Access Flags:** `Flags: [-wRz-]` (`w` = Cyan bold when write enabled / WP negated; `-` = Dark gray when write protected; `R` = Recalibrate yellow bold; `z` = Zero track yellow bold).
    - **Write Protect Badge:** `WP: PROTECTED` (Yellow) vs. `WP: WRITE-ENABLED` (Cyan).
    - **Sector Map:** Numbered badges highlighting sector availability and CRC errors in red.
    - **Track Ruler (0–83):** 84-character ruler highlighting carriage travel with solid white block.
@@ -363,12 +376,16 @@ The interface is divided into three primary functional zones: Top Header, Left C
    - Hardware signal states (`TRK0`, `INDEX`, `MOT`, `WPROT`, `RPM`, `BEEP`, `VERB`).
    - Comprehensive keyboard shortcut legend.
 3. **Right Diagnostic Stream Panel:**
+   - **Single-Head Live Stream:** Sliding history scroll (up to 13 passes) with rotating spinner (`▸ [/] `) on the latest capture line, and TrueColor phosphor decay interpolation transitioning smoothly from bright green-white (`Rgb(210, 255, 210)`) to standard green (`Rgb(0, 180, 0)`) over ~220 ms.
+   - **Dual-Head ("Both" Mode):** Dedicated 2-line fixed persistent view (Head 0 and Head 1) with active pointer `► ` indicating the head currently being sampled.
    - Real-time segmented ribbons:
      - 🟩 `■ ` (Light Green): Valid sector read with correct IDAM and CRC.
      - 🟥 `■ ` (Light Red): Sector read with CRC corruption.
      - 🟨 `■ ` (Yellow): Special mark (`NO-DAM`, `DEL-DAM`).
      - 🟧 `■ ` (Orange): Misaligned sector claiming a different track ID (`MISALIGNED`).
      - ⬜ `░ ` (Dark Gray): Missing sector.
+4. **Interactive Help Modal (<kbd>?</kbd> / <kbd>F1</kbd>):**
+   - Centered overlay modal dialog featuring a double-line border and dark slate background, presenting version, author attribution, and the full interactive keybinding cheat sheet.
 
 ### 8.2 Keyboard Shortcuts & Interactive Commands
 
@@ -376,10 +393,11 @@ All keyboard inputs are captured in raw mode via Crossterm non-blocking polling 
 
 | Key / Shortcut | Function & Action Name | Target Subsystem | Detailed Technical Description |
 |:---|:---|:---:|:---|
+| <kbd>?</kbd> / <kbd>F1</kbd> | **Toggle Interactive Help Modal** | `UI` | Opens/closes the full-screen centered interactive help modal overlay displaying all keybindings, version, author attribution, and license details. |
 | <kbd>A</kbd> / <kbd>a</kbd> | **Real-Time Track Analysis** | `UI` & `Hardware I/O` | Dispatches `HwCmd::Analyze` and `Action::Analyze`. Spins up spindle motor if stopped (enforcing `SPIN_UP_DELAY_MS` 350 ms delay), samples physical `/WRTPRT` pin, sets `DisplayMode::Analyze` and `HwActivity::ReadingAnalyzing`. Initiates continuous raw flux capture (`CMD_READ_FLUX`), real-time DPLL MFM decoding, mechanical alignment percentage calculation, and acoustic variometer evaluation. |
 | <kbd>D</kbd> / <kbd>d</kbd> | **Read Sector Data & CRC Test** | `Hardware I/O` | Dispatches `HwCmd::ReadData`. Purges UART buffer, asserts spindle motor power (`CMD_MOTOR 1`), queries `/WRTPRT`, and enters `DisplayMode::ReadData`. Continuously decodes IDAM/DAM headers and verifies 512-byte sector data integrity against CCITT CRC-16 checksums, updating the sector ribbon and summary metrics. |
-| <kbd>Esc</kbd> | **Safe Stop / Motor OFF** | `UI` & `Hardware I/O` | Dispatches `HwCmd::Stop` and `Action::Stop`. Immediately turns off spindle motor (`CMD_MOTOR 0`), halts continuous flux capture, resets mode to `DisplayMode::None`, sets activity to `HwActivity::Stopped`, and invalidates transient sector buffers. Establishes safe mechanical state for inserting or swapping diskettes. |
-| <kbd>Backspace</kbd> / `\x08` | **Emergency Panic Reset** | `Hardware I/O` | Dispatches `HwCmd::PanicReset`. Instantly drains all pending command queues in `rx_cmd`, purges all UART buffers, cuts motor power (`CMD_MOTOR 0`), deselects head (`CMD_HEAD 0`), re-initializes Greaseweazle bus (`CMD_SET_BUS_TYPE 1`), re-selects drive unit, and resets internal state to safe stopped state. |
+| <kbd>Esc</kbd> | **Safe Stop / Motor OFF** | `UI` & `Hardware I/O` | Dispatches `HwCmd::Stop` and `Action::Stop` (or dismisses Help modal if open). Immediately turns off spindle motor (`CMD_MOTOR 0`), halts continuous flux capture, resets mode to `DisplayMode::None`, sets activity to `HwActivity::Stopped`, and invalidates transient sector buffers. Establishes safe mechanical state for inserting or swapping diskettes. |
+| <kbd>Backspace</kbd> / `\x08` / `\u{8}` | **Emergency Panic Reset** | `Hardware I/O` | Dispatches `HwCmd::PanicReset`. Instantly drains all pending command queues in `rx_cmd`, purges all UART buffers, cuts motor power (`CMD_MOTOR 0`), deselects head (`CMD_HEAD 0`), re-initializes Greaseweazle bus (`CMD_SET_BUS_TYPE 1`), re-selects drive unit, and resets internal state to `[IDLE / READY]`. |
 | <kbd>Z</kbd> / <kbd>z</kbd> | **Zero Track (Return to Cyl 00)** | `Hardware I/O` | Dispatches `HwCmd::ZeroTrack`. Performs motor-gated seek to Track 00 (`CMD_SEEK 0`) with 3000 ms optical stop timeout (`SEEK_TRK0_TIMEOUT_MS`). Enforces 200 ms mechanical shock dissipation delay (`RECALIBRATE_WAIT_MS`), resets Track 0 flag (`TRK0=ON`), re-queries write-protect pin, purges input UART buffers, and resumes active diagnostic mode if previously analyzing. |
 | <kbd>R</kbd> / <kbd>r</kbd> | **Recalibrate & Seek Return** | `Hardware I/O` | Dispatches `HwCmd::RecalibrateSeek`. Saves origin cylinder, issues motor-gated seek to physical Track 00 (`CMD_SEEK 0`), pauses for 60 ms dwell time (`DWELL_TIME_TRK0_MS`) against the stop, then seeks directly back to origin cylinder with 30 ms vibration dampening (`HEAD_SETTLE_TIME_MS`). Clears lead-screw backlash and motor step slip. (If already at Track 00, performs a 2-track step-out clearance cycle `Seek(2)` $\rightarrow$ `Seek(0)`). |
 | <kbd>+</kbd> / <kbd>=</kbd> / <kbd>▲ Up</kbd> / <kbd>► Right</kbd> | **Step Track +1 (Outward)** | `Hardware I/O` | Dispatches `HwCmd::Seek(track + 1)`. Steps head carriage outward by +1 cylinder (clamped at physical limit Track 83). Uses `perform_motor_gated_seek()` with electronic stepper wake-up if motor is stopped, clears prior track flux cache, enforces 30 ms head settling time (`HEAD_SETTLE_TIME_MS`), and queries `/WRTPRT`. |
@@ -389,10 +407,10 @@ All keyboard inputs are captured in raw mode via Crossterm non-blocking polling 
 | <kbd>H</kbd> / <kbd>h</kbd> | **Toggle Physical Head** | `Hardware I/O` | Dispatches `HwCmd::ToggleHead`. Cycles head selection: `Head 0` (Side 0 / Lower) $\rightarrow$ `Head 1` (Side 1 / Upper) $\rightarrow$ `Both (0+1)` (Alternating Dual-Head Mode). Transmits `CMD_HEAD` (0x03), applies 1 ms electronic preamplifier settle delay (`HEAD_SWITCH_SETTLE_MS`), clears transient sector logs, and resets per-head diagnostic passes. |
 | <kbd>U</kbd> / <kbd>u</kbd> | **Toggle Drive Unit Selection** | `UI` & `Hardware I/O` | Dispatches `HwCmd::ToggleDriveUnit` and `Action::ToggleDriveUnit`. Toggles active drive between Unit 0 (`A:`) and Unit 1 (`B:`). Safely shuts down motor on old drive, deselects bus (`CMD_DESELECT 0x0D`), selects new drive unit (`CMD_SELECT 0x0C`), performs motor-gated recalibration to Track 00 (`CMD_SEEK 0`), queries write-protect status, and resets UI metrics. |
 | <kbd>L</kbd> / <kbd>l</kbd> | **Live RPM & Tachometer Test** | `Hardware I/O` & `UI` | Dispatches `HwCmd::MeasureRpm`. Toggles live motor tachometer mode (`DisplayMode::RpmMeasure`, `HwActivity::MeasuringRpm`). Spins up spindle motor if stopped, continuously captures index pulse intervals over 72 MHz hardware timer, tracks instantaneous RPM, computes 10-revolution rolling average and peak-to-peak flutter/jitter, and updates the 21-slot visual centering gauge. Interruptible by any seek or mode key. |
-| <kbd>M</kbd> / <kbd>m</kbd> | **Force Motor Toggle ON / OFF** | `Hardware I/O` | Dispatches `HwCmd::ToggleMotor`. Manually toggles spindle motor power (`CMD_MOTOR = 1 / 0`) without clearing current cylinder, head selection, or valid sector history (non-destructive state toggle). |
-| <kbd>B</kbd> / <kbd>b</kbd> | **Toggle Acoustic Variometer** | `Audio` & `UI` | Dispatches `HwCmd::ToggleBeep`. Toggles real-time acoustic alignment radar audio feedback. When enabled (`BEEP : ON (Radar)`), the sound worker thread synthesizes pitch-modulated square waves ($440\text{ Hz} \le f \le 1760\text{ Hz}$) proportional to track alignment quality. |
+| <kbd>M</kbd> / <kbd>m</kbd> | **Force Motor Toggle ON / OFF** | `Hardware I/O` | Dispatches `HwCmd::ToggleMotor`. Manually toggles spindle motor power (`CMD_MOTOR = 1 / 0`) with bus and unit re-assertion, preserving current cylinder, head selection, sector map, and rolling average RPM (non-destructive state toggle). |
+| <kbd>B</kbd> / <kbd>b</kbd> | **Toggle Acoustic Variometer** | `Audio` & `UI` | Dispatches `HwCmd::ToggleBeep`. Toggles real-time acoustic alignment radar audio feedback. When enabled (`BEEP : ON (Radar)`), the sound worker thread synthesizes multi-tier pitch-modulated tones ($1500\text{ Hz} \le f \le 2200\text{ Hz}$ for nominal, $600\text{ Hz} \le f \le 1400\text{ Hz}$ for marginal, $250\text{ Hz} \le f \le 500\text{ Hz}$ continuous for severe, and $180\text{ Hz}$ pulsed buzz for cross-track mismatch). |
 | <kbd>V</kbd> / <kbd>v</kbd> | **Toggle Verbose Stream Mode** | `UI` & `Hardware I/O` | Dispatches `HwCmd::ToggleVerbose`. Switches stream display between Standard mode (compact graphical sector blocks `[ ■ ■ ■ ]`) and Verbose History mode (detailed microsecond cell timings, DPLL phase drift, instantaneous RPM per revolution, and individual error causes). |
-| <kbd>X</kbd> / <kbd>x</kbd> / <kbd>Ctrl</kbd>+<kbd>C</kbd> | **Clean Application Exit** | `UI` & `Hardware I/O` | Dispatches `HwCmd::Exit`. Gracefully terminates background worker threads, shuts down spindle motor, deselects drive unit (`CMD_DESELECT`), tri-states interface bus (`CMD_SET_BUS_TYPE 0`), lowers DTR/RTS lines, restores terminal raw mode, and exits the application cleanly. |
+| <kbd>Q</kbd> / <kbd>q</kbd> / <kbd>X</kbd> / <kbd>x</kbd> / <kbd>Ctrl</kbd>+<kbd>C</kbd> | **Clean Application Exit** | `UI` & `Hardware I/O` | Dispatches `HwCmd::Exit`. Gracefully terminates background worker threads, shuts down spindle motor, deselects drive unit (`CMD_DESELECT`), tri-states interface bus (`CMD_SET_BUS_TYPE 0`), lowers DTR/RTS lines, restores terminal raw mode, and exits the application cleanly. |
 | <kbd>P</kbd> / <kbd>p</kbd> | **Format Parameters Configuration** | `UI` *(Reserved)* | Reserved menu shortcut for interactive format parameters adjustment (Interleave ratio, Gap 1/2/3/4 lengths, fill byte, sector count) in Roadmap Phase 3. |
 | <kbd>F</kbd> / <kbd>f</kbd> | **Low-Level Track Formatter** | `Hardware I/O` *(Reserved)* | Reserved shortcut for full-track low-level MFM formatting and bulk magnetic degaussing utility in Roadmap Phase 3. |
 | <kbd>I</kbd> / <kbd>i</kbd> | **Track Flux Imaging Utility** | `Hardware I/O` *(Reserved)* | Reserved shortcut for raw multi-revolution flux imaging and flux-level surface degradation heatmaps in Roadmap Phase 4. |
@@ -401,29 +419,24 @@ All keyboard inputs are captured in raw mode via Crossterm non-blocking polling 
 
 ---
 
-## 9. Standalone Test Binaries & Verification Suite
+## 9. Automated Test & Verification Suite
 
-AlignTesterDiag includes dedicated test utilities and a 96-test automated unit suite.
+AlignTesterDiag includes an exhaustive **109-test automated unit test suite** built directly into Cargo.
 
-### 9.1 Standalone Binaries (`src/bin/`)
-- `gw_read_track.rs`: Captures 1 full revolution of raw flux and calculates average flux cell duration, validating the 240-tick HD/DD threshold.
-- `gw_test.rs`: Step-by-step diagnostic verification tool exercising unit selection, motor control, and seek operations.
-- `test_mfm_decoder.rs`: Offline validation test bench for the DPLL algorithm and CRC-16 engine.
-- `test_sector_gen.rs`: Validates sector interleave orders across 9, 15, and 18 sectors/track formats.
-
-### 9.2 Automated Unit Test Harness
-Run the test suite using Cargo:
+### 9.1 Automated Unit Test Harness
+Run the full test suite using Cargo:
 ```bash
 cargo test
 ```
 
-The 96 unit tests validate:
-- State transitions on `HwCmd` and `Action` dispatches.
-- DPLL boundary clamping, RMS phase jitter, and frequency adaptation.
-- Mathematical variometer pitch bounds ($440 \text{ Hz} \le f \le 1760 \text{ Hz}$).
-- Spindle tachometer rolling average windowing and jitter calculations.
-- Dual-head "Both" mode consolidation and mismatch handling.
-- TUI ribbon span coloring and dynamic text generation.
+The 109 unit tests provide complete coverage across all subsystems:
+- State transitions on `HwCmd` and `Action` dispatches (`src/app.rs`, `src/hw/mod.rs`).
+- DPLL boundary clamping, RMS phase jitter, and frequency adaptation (`src/hw/mod.rs`).
+- Multi-tier variometer pitch bounds ($1500 \text{ Hz} \le f \le 2200 \text{ Hz}$, $600 \text{ Hz} \le f \le 1400 \text{ Hz}$, $250 \text{ Hz} \le f \le 500 \text{ Hz}$) and mismatch warning tone (180 Hz) (`src/audio.rs`).
+- Spindle tachometer rolling average windowing, sub-microsecond interval conversion, and jitter calculations (`src/hw/mod.rs`).
+- Dual-head "Both" mode consolidation, active pointer tracking, and mismatch handling (`src/app.rs`, `src/hw/mod.rs`, `src/ui.rs`).
+- TUI ribbon span coloring, phosphor decay interpolation, spinner animation, and dynamic text generation (`src/ui.rs`).
+- Hardware protocol packet encoders and opcode definitions (`src/hw/protocol.rs`).
 
 ---
 
