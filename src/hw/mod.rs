@@ -46,8 +46,8 @@ pub const STEPPER_WAKEUP_DELAY_MS: u64 = 15;
 pub const HEAD_SETTLE_TIME_MS: u64 = 30;
 /// Nominal serial read timeout (1000 ms) for USB flux capture margin.
 pub const DEFAULT_SERIAL_TIMEOUT_MS: u64 = 1000;
-/// Motor spin-up delay (300 ms) before reading flux.
-pub const SPIN_UP_DELAY_MS: u64 = 300;
+/// Motor spin-up delay (350 ms) before reading flux to allow spindle to reach 300 RPM and stabilize index.
+pub const SPIN_UP_DELAY_MS: u64 = 350;
 pub const SYNC_DELAY_MS: u64 = 30;
 
 /// Dwell time at track 0 during recalibration before stepping back to original track.
@@ -838,44 +838,77 @@ pub fn calculate_seek_timeout(current_track: u8, target_track: u8) -> Duration {
     Duration::from_millis(calculate_seek_timeout_ms(current_track, target_track))
 }
 
-/// Greaseweazle-compliant Phase-Locked Loop (PLL)
-pub fn pll_flux_to_mfm_bits(flux: &[u32], clock_ticks: f64) -> Vec<bool> {
-    let mut bit_array = Vec::with_capacity(flux.len() * 3);
-    let mut ticks = 0.0f64;
-    let mut clock = clock_ticks;
-    let clock_min = clock_ticks * 0.90;
-    let clock_max = clock_ticks * 1.10;
-    let pll_phase_adj = 0.60f64;
-    let pll_period_adj = 0.05f64;
+/// Greaseweazle-compliant Software Phase-Locked Loop (PLL) for MFM bitstream recovery
+#[derive(Clone, Debug)]
+pub struct SoftwarePll {
+    pub clock_centre: f64,
+    pub clock_min: f64,
+    pub clock_max: f64,
+    pub clock: f64,
+    pub phase_accumulator: f64,
+    pub phase_adj: f64,
+    pub period_adj: f64,
+}
 
-    for &x in flux {
-        ticks += x as f64;
-        if ticks < clock / 2.0 {
-            continue;
+impl SoftwarePll {
+    pub fn new(clock_ticks: f64) -> Self {
+        Self {
+            clock_centre: clock_ticks,
+            clock_min: clock_ticks * 0.90,
+            clock_max: clock_ticks * 1.10,
+            clock: clock_ticks,
+            phase_accumulator: 0.0,
+            phase_adj: 0.60,
+            period_adj: 0.05,
         }
-
-        let mut zeros = 0;
-        loop {
-            ticks -= clock;
-            if ticks < clock / 2.0 {
-                break;
-            }
-            zeros += 1;
-            bit_array.push(false);
-        }
-        bit_array.push(true);
-
-        let new_ticks = ticks * (1.0 - pll_phase_adj);
-        if zeros <= 3 {
-            clock += ticks * pll_period_adj;
-        } else {
-            clock += (clock_ticks - clock) * pll_period_adj;
-        }
-        clock = clock.clamp(clock_min, clock_max);
-        ticks = new_ticks;
     }
 
-    bit_array
+    /// Resets the PLL phase accumulator and bitcell period estimator at the beginning of each pass
+    pub fn reset(&mut self) {
+        self.clock = self.clock_centre;
+        self.phase_accumulator = 0.0;
+    }
+
+    /// Decodes raw flux intervals into MFM bitstream with clean PLL state initialization
+    pub fn decode_flux(&mut self, flux: &[u32]) -> Vec<bool> {
+        self.reset();
+        let mut bit_array = Vec::with_capacity(flux.len() * 3);
+
+        for &x in flux {
+            self.phase_accumulator += x as f64;
+            if self.phase_accumulator < self.clock / 2.0 {
+                continue;
+            }
+
+            let mut zeros = 0;
+            loop {
+                self.phase_accumulator -= self.clock;
+                if self.phase_accumulator < self.clock / 2.0 {
+                    break;
+                }
+                zeros += 1;
+                bit_array.push(false);
+            }
+            bit_array.push(true);
+
+            let new_ticks = self.phase_accumulator * (1.0 - self.phase_adj);
+            if zeros <= 3 {
+                self.clock += self.phase_accumulator * self.period_adj;
+            } else {
+                self.clock += (self.clock_centre - self.clock) * self.period_adj;
+            }
+            self.clock = self.clock.clamp(self.clock_min, self.clock_max);
+            self.phase_accumulator = new_ticks;
+        }
+
+        bit_array
+    }
+}
+
+/// Greaseweazle-compliant Phase-Locked Loop (PLL)
+pub fn pll_flux_to_mfm_bits(flux: &[u32], clock_ticks: f64) -> Vec<bool> {
+    let mut pll = SoftwarePll::new(clock_ticks);
+    pll.decode_flux(flux)
 }
 
 /// Computes physical PLL quality score (0..=100%) based on RMS Phase Jitter relative to theoretical MFM windows
@@ -2123,8 +2156,8 @@ pub fn handle_command(
             let _ = tx_status.send(status.clone());
         }
         HwCmd::MeasureRpm => {
+            let _ = port.clear(serialport::ClearBuffer::All);
             if status.mode == DisplayMode::RpmMeasure {
-                let _ = port.clear(serialport::ClearBuffer::All);
                 let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
                 ensure_unit_active(port, status.drive_unit, status.motor_on, status.head);
                 if status.rpm_measure.sample_count > 0 {
@@ -2138,9 +2171,7 @@ pub fn handle_command(
                 };
                 status.log_msg = String::from("Live RPM test stopped");
             } else {
-                let was_motor_off = !status.motor_on;
-                if was_motor_off {
-                    let _ = port.clear(serialport::ClearBuffer::All);
+                if !status.motor_on {
                     let _ = gw_send_raw(port, &[0x0E, 0x03, 0x01], 0);
                     let _ = gw_send_raw(port, &[0x0C, 0x03, status.drive_unit], 0);
                     let _ = gw_send_raw(port, &[0x03, 0x03, status.head], 0);
@@ -2664,16 +2695,19 @@ pub fn handle_command(
             let _ = tx_status.send(status.clone());
         }
         HwCmd::Analyze | HwCmd::StartAnalysis => {
-            let was_motor_off = !status.motor_on;
-            if was_motor_off {
-                let _ = port.clear(serialport::ClearBuffer::All);
+            // 1. Mandatory immediate purge of all preceding USB packet remnants
+            let _ = port.clear(serialport::ClearBuffer::All);
+
+            if !status.motor_on {
                 let _ = gw_send_raw(port, &[0x0E, 0x03, 0x01], 0);
                 let _ = gw_send_raw(port, &[0x0C, 0x03, status.drive_unit], 0);
                 let _ = gw_send_raw(port, &[0x03, 0x03, status.head], 0);
                 let _ = gw_set_motor(port, status.drive_unit, true);
                 status.motor_on = true;
                 status.drive_select = true;
+                // Allow physical time for disk to reach synchronous 300 RPM and stabilize index
                 thread::sleep(Duration::from_millis(SPIN_UP_DELAY_MS));
+                // Clear transient noise generated during motor acceleration
                 let _ = port.clear(serialport::ClearBuffer::Input);
             }
 
@@ -2698,16 +2732,19 @@ pub fn handle_command(
             let _ = tx_status.send(status.clone());
         }
         HwCmd::ReadData => {
-            let was_motor_off = !status.motor_on;
-            if was_motor_off {
-                let _ = port.clear(serialport::ClearBuffer::All);
+            // 1. Mandatory immediate purge of all preceding USB packet remnants
+            let _ = port.clear(serialport::ClearBuffer::All);
+
+            if !status.motor_on {
                 let _ = gw_send_raw(port, &[0x0E, 0x03, 0x01], 0);
                 let _ = gw_send_raw(port, &[0x0C, 0x03, status.drive_unit], 0);
                 let _ = gw_send_raw(port, &[0x03, 0x03, status.head], 0);
                 let _ = gw_set_motor(port, status.drive_unit, true);
                 status.motor_on = true;
                 status.drive_select = true;
+                // Allow physical time for disk to reach synchronous 300 RPM and stabilize index
                 thread::sleep(Duration::from_millis(SPIN_UP_DELAY_MS));
+                // Clear transient noise generated during motor acceleration
                 let _ = port.clear(serialport::ClearBuffer::Input);
             }
 
@@ -3918,7 +3955,7 @@ mod tests {
         assert_eq!(STEPPER_WAKEUP_DELAY_MS, 15);
         assert_eq!(HEAD_SETTLE_TIME_MS, 30);
         assert_eq!(DEFAULT_SERIAL_TIMEOUT_MS, 1000);
-        assert_eq!(SPIN_UP_DELAY_MS, 300);
+        assert_eq!(SPIN_UP_DELAY_MS, 350);
         assert_eq!(SYNC_DELAY_MS, 30);
         assert_eq!(DWELL_TIME_TRK0_MS, 60);
         assert_eq!(SEEK_TRK0_TIMEOUT_MS, 3000);
@@ -4070,7 +4107,7 @@ mod tests {
         // 1. Motor & unit activation
         status.motor_on = true;
         status.drive_select = true;
-        assert_eq!(SPIN_UP_DELAY_MS, 300);
+        assert_eq!(SPIN_UP_DELAY_MS, 350);
         assert_eq!(SYNC_DELAY_MS, 30);
 
         // 2. State transition to Analyze
@@ -4106,8 +4143,8 @@ mod tests {
         // 1. Motor activation & drive select
         status.motor_on = true;
         status.drive_select = true;
-        // 2. Hardware stabilization delay (300 ms)
-        assert_eq!(SPIN_UP_DELAY_MS, 300);
+        // 2. Hardware stabilization delay (350 ms)
+        assert_eq!(SPIN_UP_DELAY_MS, 350);
         // 3. State transition to Analyze
         status.analyzing = true;
         status.mode = DisplayMode::Analyze;
@@ -4118,6 +4155,29 @@ mod tests {
         assert_eq!(status.mode, DisplayMode::Analyze);
         assert_eq!(status.display_mode(), DisplayMode::Analyze);
         assert_eq!(status.activity, HwActivity::ReadingAnalyzing);
+    }
+
+    #[test]
+    fn test_software_pll_reset_and_decode() {
+        let mut pll = SoftwarePll::new(72.0);
+        assert_eq!(pll.clock, 72.0);
+        assert_eq!(pll.phase_accumulator, 0.0);
+
+        // Simulate some state deviation
+        pll.clock = 75.0;
+        pll.phase_accumulator = 12.5;
+
+        // Reset must cleanly restore initial parameters
+        pll.reset();
+        assert_eq!(pll.clock, 72.0);
+        assert_eq!(pll.phase_accumulator, 0.0);
+
+        // Test decoding with synthetic ideal flux (alternating 144 ticks -> 01 01 01)
+        let ideal_flux = vec![144, 144, 144, 144];
+        let bits = pll.decode_flux(&ideal_flux);
+        assert!(!bits.is_empty());
+        assert_eq!(pll.clock, 72.0);
+        assert_eq!(pll.phase_accumulator, 0.0);
     }
 
     #[test]
@@ -4773,7 +4833,7 @@ mod tests {
     #[test]
     fn test_nominal_capture_timing_parameters() {
         assert_eq!(DEFAULT_SERIAL_TIMEOUT_MS, 1000);
-        assert_eq!(SPIN_UP_DELAY_MS, 300);
+        assert_eq!(SPIN_UP_DELAY_MS, 350);
         assert_eq!(STEPPER_WAKEUP_DELAY_MS, 15);
     }
 

@@ -1,3 +1,3 @@
 [build]
-target-dir = "/tmp/cargo_target"
+target-dir = "target"
 incremental = false

@@ -757,6 +757,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         break;
                     }
                     KeyCode::Esc => {
+                        app.handle_action(Action::Stop);
                         let _ = tx_cmd.send(HwCmd::Stop);
                     }
                     KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right | KeyCode::Up => {

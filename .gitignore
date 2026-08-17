@@ -1,5 +1,6 @@
 /target
 /backups
+/backup
 *.tar.gz
 *.zip
 *:Zone.Identifier*

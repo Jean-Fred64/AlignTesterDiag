@@ -132,6 +132,7 @@ pub enum Action {
     ToggleDriveUnit,
     Analyze,
     StartAnalysis,
+    Stop,
 }
 
 /// Application state wrapper
@@ -214,6 +215,14 @@ impl App {
                 self.status.mode = DisplayMode::Analyze;
                 self.status.motor_on = true;
                 self.status.activity = HwActivity::ReadingAnalyzing;
+                self.clear_passes();
+            }
+            Action::Stop => {
+                self.status.analyzing = false;
+                self.status.motor_on = false;
+                self.status.mode = DisplayMode::None;
+                self.status.activity = HwActivity::Stopped;
+                self.status.index = false;
             }
         }
     }
@@ -424,6 +433,22 @@ mod tests {
         assert_eq!(app2.status.mode, DisplayMode::Analyze);
         assert!(app2.status.motor_on);
         assert_eq!(app2.status.activity, HwActivity::ReadingAnalyzing);
+    }
+
+    #[test]
+    fn test_app_handle_action_stop() {
+        let mut app = App::new();
+        app.handle_action(Action::Analyze);
+        assert!(app.status.analyzing);
+        assert!(app.status.motor_on);
+        assert_eq!(app.status.activity, HwActivity::ReadingAnalyzing);
+
+        app.handle_action(Action::Stop);
+        assert!(!app.status.analyzing);
+        assert!(!app.status.motor_on);
+        assert_eq!(app.status.mode, DisplayMode::None);
+        assert_eq!(app.status.activity, HwActivity::Stopped);
+        assert!(!app.status.index);
     }
 
     #[test]
