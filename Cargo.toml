@@ -2,6 +2,8 @@
 name = "aligntester-diag"
 version = "0.1.1-alpha"
 edition = "2021"
+authors = ["MonSieur JeAn-FReD"]
+license = "GPL-3.0-only"
 default-run = "aligntester-diag"
 
 [dependencies]
