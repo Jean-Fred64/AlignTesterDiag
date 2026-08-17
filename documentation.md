@@ -229,11 +229,11 @@ The diagnostic engine continuously measures head positioning accuracy relative t
 ### 5.1 Alignment Metric Calculation
 Alignment quality is calculated from the ratio of successfully decoded sectors matching the target cylinder vs. expected sectors:
 
-$$\text{Mechanical Alignment } (\%) = \left( \frac{\sum \text{Valid Sectors on Target Track}}{\text{Total Expected Sectors}} \right) \times 100$$
+$$\text{Mechanical Alignment (\%)} = \left( \frac{\sum \text{Valid Sectors on Target Track}}{\text{Total Expected Sectors}} \right) \times 100$$
 
-- **$\ge 95\%$ (Green):** Nominal factory alignment.
-- **$70\% - 94\%$ (Yellow):** Degraded alignment / marginal tracking.
-- **$< 70\%$ (Red):** Severe mechanical misalignment or corrupt track.
+- **≥ 95% (Green):** Nominal factory alignment.
+- **70% – 94% (Yellow):** Degraded alignment / marginal tracking.
+- **< 70% (Red):** Severe mechanical misalignment or corrupt track.
 
 ### 5.2 Single-Head vs. Dual-Head ("Both" Mode) Operation
 Users can toggle head acquisition mode using the <kbd>H</kbd> key:
