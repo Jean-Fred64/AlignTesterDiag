@@ -1,4 +1,4 @@
-# AlignTesterDiag — Comprehensive Technical Documentation & Architecture Manual 🖴⚡
+# 💾 AlignTesterDiag — Comprehensive Technical Documentation & Architecture Manual 
 
 Welcome to the definitive technical documentation for **AlignTesterDiag**, an ultra-responsive, non-blocking terminal user interface (TUI) diagnostics and calibration platform for floppy disk drives connected via the **Greaseweazle USB flux controller**.
 
