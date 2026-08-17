@@ -1,6 +1,6 @@
 [package]
 name = "aligntester-diag"
-version = "0.1.0"
+version = "0.1.1-alpha"
 edition = "2021"
 default-run = "aligntester-diag"
 

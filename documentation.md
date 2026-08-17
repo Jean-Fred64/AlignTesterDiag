@@ -23,33 +23,6 @@ Welcome to the definitive technical documentation for **AlignTesterDiag**, an ul
 
 AlignTesterDiag is engineered around a **100% non-blocking, multi-threaded architecture** designed to maintain a consistent ~60 Hz terminal rendering framerate while continuously capturing raw flux transitions over USB and synthesizing pitch-modulated audio feedback.
 
-```mermaid
-graph TD
-    subgraph UI_Thread ["UI / Event Loop Thread (~60 Hz)"]
-        A[Terminal Initialization\nEnterAlternateScreen / Raw Mode] --> B[Draw Ratatui Frame]
-        B --> C[Poll Keyboard Events\n15ms Timeout]
-        C --> D[Dispatch Action / HwCmd]
-        D --> B
-    end
-
-    subgraph HW_Thread ["Hardware Worker Thread (hw_thread)"]
-        E[Serial Port Init & Autodetect] --> F[Greaseweazle Command Loop]
-        F --> G[USB Flux Capture / READ_FLUX]
-        G --> H[DPLL Clock Recovery & MFM Decode]
-        H --> I[Compute Alignment & RPM Metrics]
-        I --> J[Publish DriveStatus Message]
-    end
-
-    subgraph Audio_Thread ["Audio Worker Thread (sound_worker)"]
-        K[Wait for AudioEvent] --> L[Drain Backlog Queue]
-        L --> M[Synthesize Dynamic Pitch / Beep]
-        M --> K
-    end
-
-    D -- "tx_cmd (HwCmd)" --> F
-    J -- "tx_status (DriveStatus)" --> B
-    I -- "tx_audio (AudioEvent)" --> K
-```
 
 ### 1.1 Concurrency Topology
 The application executes across three decoupled OS threads:
