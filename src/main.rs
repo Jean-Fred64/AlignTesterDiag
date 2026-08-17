@@ -589,43 +589,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                     } else {
                         let available_height = lower_chunks[1].height as usize;
-                        // Sliding history of 12 to 13 lines
-                        let max_vertical_items = available_height.saturating_sub(11).clamp(1, 13);
-                        let start_idx = status
-                            .sector_log
-                            .len()
-                            .saturating_sub(max_vertical_items);
-                        let recent_logs = &status.sector_log[start_idx..];
-
-                        if recent_logs.is_empty() {
-                            right_lines.push(Line::from(Span::styled(
-                                format!(
-                                    "T:{:02} H:{} : (Waiting read stream...)",
-                                    status.track, status.head
-                                ),
-                                Style::default().fg(Color::DarkGray),
-                            )));
-                        } else {
-                            for (i, log_line) in recent_logs.iter().enumerate() {
-                                let is_last = i == recent_logs.len().saturating_sub(1);
-                                let prefix = if is_last { " ► " } else { "   " };
-                                let prefix_span = Span::styled(
-                                    prefix,
-                                    Style::default()
-                                        .fg(Color::Yellow)
-                                        .add_modifier(Modifier::BOLD),
-                                );
-
-                                if status.verbose_mode {
-                                    let mut spans = vec![prefix_span];
-                                    spans.extend(build_verbose_line_spans(log_line, status.sector_count));
-                                    right_lines.push(Line::from(spans));
-                                } else {
-                                    let mut spans = vec![prefix_span];
-                                    spans.extend(build_standard_line_spans(log_line, status.sector_count));
-                                    right_lines.push(Line::from(spans));
-                                }
-                            }
+                        let stream_lines = build_single_head_stream_lines(&app, available_height);
+                        for line in stream_lines {
+                            right_lines.push(line);
                         }
                     }
 
@@ -1678,5 +1644,93 @@ mod tests {
         assert_eq!(metrics.total_off_track, 18);
         assert_eq!(metrics.off_track_details, "MISMATCH: Track 41 on Head 1");
     }
+
+    #[test]
+    fn test_single_head_stream_lines_spinner_and_decay_rendering() {
+        let mut app = App::new();
+        app.status.head_select = HeadSelection::Head0;
+        app.status.sector_count = 18;
+        app.status.sector_log = vec![
+            "T:00 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK)".to_string(),
+            "T:00 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK)".to_string(),
+            "T:00 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (18/18 OK)".to_string(),
+        ];
+
+        // Frame 0: spinner_idx = 0 -> '|'
+        app.stream_spinner_idx = 0;
+        app.last_capture_instant = std::time::Instant::now();
+
+        let lines = build_single_head_stream_lines(&app, 25);
+        assert_eq!(lines.len(), 3);
+
+        // Line 0 (history): prefix must be 6 neutral spaces "      "
+        assert_eq!(lines[0].spans[0].content, "      ");
+        // Line 0 valid blocks must be standard green Color::Rgb(0, 180, 0)
+        let hist_greens = lines[0]
+            .spans
+            .iter()
+            .filter(|s| s.content == "■ " && s.style.fg == Some(Color::Rgb(0, 180, 0)))
+            .count();
+        assert_eq!(hist_greens, 18);
+
+        // Line 1 (history): prefix must be 6 neutral spaces "      "
+        assert_eq!(lines[1].spans[0].content, "      ");
+
+        // Line 2 (last line): prefix must have spinner "▸ [|] "
+        assert_eq!(lines[2].spans[0].content, "▸ [|] ");
+
+        // Line 2 (last line): valid blocks must have TrueColor decay (since elapsed is near 0, factor ~ 1.0 -> Rgb(210, 255, 210))
+        let last_decay_blocks = lines[2]
+            .spans
+            .iter()
+            .filter(|s| {
+                if s.content == "■ " {
+                    if let Some(Color::Rgb(r, g, b)) = s.style.fg {
+                        return r >= 30 && g >= 180 && b >= 30;
+                    }
+                }
+                false
+            })
+            .count();
+        assert_eq!(last_decay_blocks, 18);
+
+        // Test spinner rotation
+        app.stream_spinner_idx = 1;
+        let lines_spin1 = build_single_head_stream_lines(&app, 25);
+        assert_eq!(lines_spin1[2].spans[0].content, "▸ [/] ");
+
+        app.stream_spinner_idx = 2;
+        let lines_spin2 = build_single_head_stream_lines(&app, 25);
+        assert_eq!(lines_spin2[2].spans[0].content, "▸ [-] ");
+
+        app.stream_spinner_idx = 3;
+        let lines_spin3 = build_single_head_stream_lines(&app, 25);
+        assert_eq!(lines_spin3[2].spans[0].content, "▸ [\\] ");
+    }
+
+    #[test]
+    fn test_single_head_stream_lines_error_priority_on_last_line() {
+        let mut app = App::new();
+        app.status.head_select = HeadSelection::Head0;
+        app.status.sector_count = 18;
+        app.status.sector_log = vec![
+            "T:35 H:0 Rate:500k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ░ ■ ■ ■ ] (17/18 CRC-DAT: Sec 15, MISSING: Sec 15)".to_string(),
+        ];
+        app.last_capture_instant = std::time::Instant::now();
+        app.stream_spinner_idx = 1;
+
+        let lines = build_single_head_stream_lines(&app, 25);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].content, "▸ [/] ");
+
+        // Missing sector (░) must be DarkGray
+        let dark_blocks = lines[0]
+            .spans
+            .iter()
+            .filter(|s| s.content == "░ " && s.style.fg == Some(Color::DarkGray))
+            .count();
+        assert_eq!(dark_blocks, 1);
+    }
 }
+
 
