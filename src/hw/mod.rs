@@ -1979,7 +1979,13 @@ pub fn process_track_diagnostic(
         && ok_count >= expected_count
         && detected_track_id == target_track;
 
-    let quality_pct = effective_diag.pll_quality_pct.unwrap_or(if is_ok { 99 } else { 50 });
+    let quality_pct = effective_diag.pll_quality_pct.unwrap_or(if is_ok {
+        99
+    } else if effective_diag.sector_count > 0 && effective_diag.sectors_known {
+        effective_diag.alignment_pct.round().clamp(0.0, 100.0) as u8
+    } else {
+        50
+    });
     let crc_errors = effective_diag.crc_err_count.min(255) as u8;
 
     let pass = DiagnosticPass {
@@ -3453,7 +3459,7 @@ mod tests {
         assert!(status.sector_log_verbose[0].contains("CRC-DAT: Sec 2"));
 
         let beeps: Vec<AudioEvent> = rx_sound.try_iter().collect();
-        assert_eq!(beeps, vec![AudioEvent::OffTrackOrCrcError]);
+        assert_eq!(beeps, vec![AudioEvent::AlignmentTone { pitch_hz: calculate_radar_pitch(33) }]);
     }
 
     #[test]
@@ -3498,7 +3504,7 @@ mod tests {
         assert!(status.sector_log_verbose[0].contains("Gap0:----"));
 
         let beeps: Vec<AudioEvent> = rx_sound.try_iter().collect();
-        assert_eq!(beeps, vec![AudioEvent::PerfectAlignment { pitch_hz: calculate_radar_pitch(99) }]);
+        assert_eq!(beeps, vec![AudioEvent::AlignmentTone { pitch_hz: calculate_radar_pitch(99) }]);
     }
 
     #[test]
@@ -3542,7 +3548,7 @@ mod tests {
         assert_eq!(status.sector_log_standard[0], "T:10 H:0 Rate:500k MFM [ ░ ░ ░ ■ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] (3/18 MISSING: Sec 1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)");
 
         let beeps: Vec<AudioEvent> = rx_sound.try_iter().collect();
-        assert_eq!(beeps, vec![AudioEvent::PerfectAlignment { pitch_hz: calculate_radar_pitch(99) }]);
+        assert_eq!(beeps, vec![AudioEvent::AlignmentTone { pitch_hz: calculate_radar_pitch(99) }]);
     }
 
     #[test]
@@ -3585,7 +3591,7 @@ mod tests {
         );
 
         let beeps: Vec<AudioEvent> = rx_sound.try_iter().collect();
-        assert_eq!(beeps, vec![AudioEvent::OffTrackOrCrcError]);
+        assert_eq!(beeps, vec![AudioEvent::ZeroDecodedSectors]);
     }
 
     #[test]
@@ -3629,7 +3635,7 @@ mod tests {
         assert_eq!(status.sector_log_standard[0], "T:10 H:0 Rate:500k MFM [ ■ ■ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ] (1/18 CRC-DAT: Sec 1)");
 
         let beeps: Vec<AudioEvent> = rx_sound.try_iter().collect();
-        assert_eq!(beeps, vec![AudioEvent::OffTrackOrCrcError]);
+        assert_eq!(beeps, vec![AudioEvent::AlignmentTone { pitch_hz: calculate_radar_pitch(50) }]);
     }
 
     #[test]
@@ -4027,7 +4033,7 @@ mod tests {
 
         // 4. Audio confirmation confirms perfect pass
         let beeps: Vec<AudioEvent> = rx_sound.try_iter().collect();
-        assert_eq!(beeps, vec![AudioEvent::PerfectAlignment { pitch_hz: calculate_radar_pitch(99) }]);
+        assert_eq!(beeps, vec![AudioEvent::AlignmentTone { pitch_hz: calculate_radar_pitch(99) }]);
     }
 
     #[test]

@@ -67,6 +67,13 @@ impl DiagnosticPass {
         is_ok: bool,
     ) -> Self {
         let crc_errors = if is_ok { 0 } else { expected_count.saturating_sub(ok_count) };
+        let quality_pct = if is_ok {
+            99
+        } else if expected_count > 0 {
+            ((ok_count as f32 / expected_count as f32) * 100.0).round().clamp(0.0, 100.0) as u8
+        } else {
+            50
+        };
         Self {
             track,
             track_id: track,
@@ -78,7 +85,7 @@ impl DiagnosticPass {
             valid_sectors: ok_count,
             expected_count,
             crc_errors,
-            quality_pct: if is_ok { 99 } else { 50 },
+            quality_pct,
             is_ok,
         }
     }
@@ -496,6 +503,7 @@ mod tests {
         let mut status = DriveStatus {
             track: 75,
             target_track: 75,
+            head: 1,
             head_select: HeadSelection::Both,
             ..Default::default()
         };
@@ -528,17 +536,18 @@ mod tests {
     }
 
     #[test]
-    fn test_crc_error_prevents_positive_radar_tone() {
-        use crate::audio::{evaluate_alignment_audio_event, AudioEvent};
+    fn test_crc_error_emits_marginal_tracking_tone() {
+        use crate::audio::{calculate_radar_pitch, evaluate_alignment_audio_event, AudioEvent};
 
         let mut status = DriveStatus {
             track: 40,
             target_track: 40,
+            head: 0,
             head_select: HeadSelection::Both,
             ..Default::default()
         };
 
-        // Head 0 has 1 CRC error
+        // Head 0 has 1 CRC error, quality 90%
         let pass_h0 = DiagnosticPass::with_details(
             40, 0, 500,
             "T:40 H:0".into(), "T:40 H:0".into(),
@@ -562,8 +571,10 @@ mod tests {
             status.sector_count,
         );
 
-        // CRC error must NOT trigger PerfectAlignment, but OffTrackOrCrcError
-        assert_eq!(event, Some(AudioEvent::OffTrackOrCrcError));
+        // Quality 90% is Marginal Tracking -> Medium tone (600 - 1400 Hz)
+        let expected_pitch = calculate_radar_pitch(90);
+        assert_eq!(event, Some(AudioEvent::AlignmentTone { pitch_hz: expected_pitch }));
+        assert_eq!(event, Some(AudioEvent::AlignmentTone { pitch_hz: 1267 }));
     }
 
     #[test]

@@ -1934,7 +1934,7 @@ mod tests {
 
         assert!(full_text.contains("Version:"));
         assert!(full_text.contains(env!("CARGO_PKG_VERSION")));
-        assert!(full_text.contains("MonSieur JeAn-FReD"));
+        assert!(full_text.contains("Mr JeAn-FReD"));
         assert!(full_text.contains("License: GPL-3.0"));
         assert!(full_text.contains("? / F1"));
         assert!(full_text.contains("Analyze"));
