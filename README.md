@@ -93,6 +93,8 @@ cargo run --release -- /dev/ttyACM0 --drive 1
 | <kbd>D</kbd> | **Read Data** | Read and test sector CRC integrity across the cylinder |
 | <kbd>L</kbd> | **Live RPM** | Live RPM tachometer & jitter stability test |
 | <kbd>P</kbd> | **Format Profile** | Cycle machine profile & format (Auto, PC, Amiga, Atari, CPC) |
+| <kbd>S</kbd> | **Toggle Step Rate** | Toggle Single (1:1) / Double (2:1) step mode (48/96 TPI) *(Reserved)* |
+| <kbd>T</kbd> | **Toggle Bus Type** | Switch interface bus mode: `IBM PC (0x01)` ➔ `Shugart (0x02)` |
 | <kbd>B</kbd> | **Beep (Audio Radar)** | Toggle acoustic pitch variometer on / off |
 | <kbd>H</kbd> | **Toggle Head** | Cycle head selection: `Head 0` ➔ `Head 1` ➔ `BOTH (0+1)` |
 | <kbd>U</kbd> | **Toggle Drive Unit** | Switch active drive: `Drive 0 (A:)` ➔ `Drive 1 (B:)` |
@@ -115,12 +117,17 @@ cargo run --release -- /dev/ttyACM0 --drive 1
 aligntester-diag [PORT] [OPTIONS]
 
 ARGUMENTS:
-  [PORT]               Serial port name (e.g. COM3, /dev/ttyACM0). Auto-detected if omitted.
+  [PORT]                  Serial port name (e.g. COM3, /dev/ttyACM0). Auto-detected if omitted.
 
 OPTIONS:
-  -d, --drive <0|1>    Select target floppy drive unit (0 = Drive A:, 1 = Drive B:). Default: 0
-      --drive=<0|1>    Alternative key-value syntax for drive unit selection
-  -h, --help           Print help information
+  -d, --drive <0|1>       Select target floppy drive unit (0 = Drive A:, 1 = Drive B:). Default: 0
+      --drive=<0|1>       Alternative key-value syntax for drive unit selection
+  -b, --bus <pc|shugart>  Select floppy interface bus type (pc | shugart). Default: pc
+      --bus=<pc|shugart>  Alternative key-value syntax for bus type selection
+      --shugart           Shorthand flag for Shugart bus mode (Amiga straight cable)
+  -p, --port <PORT>       Serial port connected to Greaseweazle
+  -h, --help              Print help information
+  -v, -V, --version       Print version information
 ```
 
 ---

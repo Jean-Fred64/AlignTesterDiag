@@ -363,8 +363,8 @@ pub fn build_standard_line_spans_with_color(
                 let del_dam_secs = extract_sector_ids_from_error(line, "DEL-DAM: Sec ");
                 let missing_secs = extract_sector_ids_from_error(line, "MISSING: Sec ");
 
-                let is_cpc_data = line.contains("Sec C") || (crc_dat_secs.iter().any(|&s| s >= 0xC1 && s <= 0xCA));
-                let is_cpc_sys = line.contains("Sec 4") || (crc_dat_secs.iter().any(|&s| s >= 0x41 && s <= 0x4A));
+                let is_cpc_data = line.contains("Sec C") || (crc_dat_secs.iter().any(|&s| (0xC1..=0xCA).contains(&s)));
+                let is_cpc_sys = line.contains("Sec 4") || (crc_dat_secs.iter().any(|&s| (0x41..=0x4A).contains(&s)));
                 let is_amiga_zero = line.contains("Sec 0") || crc_dat_secs.contains(&0) || crc_id_secs.contains(&0) || missing_secs.contains(&0);
 
                 let is_unformatted = line.contains("NO DATA") || line.contains("NO DISK") || (line.contains("MISSING") && !line.contains("MISSING: Sec"));
@@ -557,8 +557,8 @@ pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'st
                 let del_dam_secs = extract_sector_ids_from_error(line, "DEL-DAM: Sec ");
                 let missing_secs = extract_sector_ids_from_error(line, "MISSING: Sec ");
 
-                let is_cpc_data = line.contains("Sec C") || (crc_dat_secs.iter().any(|&s| s >= 0xC1 && s <= 0xCA));
-                let is_cpc_sys = line.contains("Sec 4") || (crc_dat_secs.iter().any(|&s| s >= 0x41 && s <= 0x4A));
+                let is_cpc_data = line.contains("Sec C") || (crc_dat_secs.iter().any(|&s| (0xC1..=0xCA).contains(&s)));
+                let is_cpc_sys = line.contains("Sec 4") || (crc_dat_secs.iter().any(|&s| (0x41..=0x4A).contains(&s)));
                 let is_amiga_zero = line.contains("Sec 0") || crc_dat_secs.contains(&0) || crc_id_secs.contains(&0) || missing_secs.contains(&0);
 
                 let is_unformatted = line.contains("NO DATA") || line.contains("NO DISK") || (line.contains("MISSING") && !line.contains("MISSING: Sec"));
@@ -1033,7 +1033,8 @@ pub fn build_help_modal_lines() -> Vec<Line<'static>> {
         shortcut_row("M", "Toggle Motor (Spindle motor ON / OFF)"),
         shortcut_row("P", "Profile / Retro Format (Auto -> PC -> Amiga -> Atari -> CPC Data -> CPC Sys)"),
         shortcut_row("R", "Recalibrate Seek (Track 0 seek & verify)"),
-        shortcut_row("S", "Step Rate (Single / Double step)"),
+        shortcut_row("S", "Toggle Step Rate (Single 1:1 / Double 2:1 for 48/96 TPI)"),
+        shortcut_row("T", "Toggle Bus Type (IBM PC <-> Shugart)"),
         shortcut_row("U", "Toggle Drive Unit (Drive 0 / Drive 1)"),
         shortcut_row("V", "Toggle Verbose (Standard vs Verbose detail)"),
         shortcut_row("W", "Write Data"),
@@ -1057,7 +1058,7 @@ pub fn build_help_modal_lines() -> Vec<Line<'static>> {
 /// Renders an interactive centered overlay help modal dialog
 pub fn render_help_modal(f: &mut Frame, area: Rect) {
     let modal_width = (area.width.saturating_sub(2)).clamp(86, 88).min(area.width);
-    let modal_height = (area.height.saturating_sub(2)).clamp(27, 28).min(area.height);
+    let modal_height = (area.height.saturating_sub(2)).clamp(28, 28).min(area.height);
     let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(x, y, modal_width, modal_height);

@@ -81,6 +81,48 @@ pub const ACK_BAD_PIN: u8 = 0x0A;
 /// Invalid cylinder number (> 83) (0x0B)
 pub const ACK_BAD_CYLINDER: u8 = 0x0B;
 
+/// Greaseweazle floppy interface bus type pinout configuration
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BusType {
+    /// Standard IBM PC Floppy Bus (0x01)
+    #[default]
+    IbmPc = 0x01,
+    /// Shugart Standard Floppy Bus (0x02, e.g. Amiga / Atari / Commodore / CPC native drives)
+    Shugart = 0x02,
+}
+
+impl BusType {
+    /// Returns the raw opcode payload byte for Greaseweazle CMD_SET_BUS_TYPE
+    pub fn opcode_val(self) -> u8 {
+        self as u8
+    }
+
+    /// Returns human-readable name of the bus interface
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BusType::IbmPc => "IBM PC",
+            BusType::Shugart => "Shugart",
+        }
+    }
+
+    /// Toggles between IBM PC and Shugart bus modes
+    pub fn toggle(self) -> Self {
+        match self {
+            BusType::IbmPc => BusType::Shugart,
+            BusType::Shugart => BusType::IbmPc,
+        }
+    }
+
+    /// Converts a raw u8 value to BusType if valid
+    pub fn from_u8(val: u8) -> Option<Self> {
+        match val {
+            0x01 => Some(BusType::IbmPc),
+            0x02 => Some(BusType::Shugart),
+            _ => None,
+        }
+    }
+}
+
 // ============================================================================
 // Guard Timing & Timeout Constants
 // ============================================================================
@@ -124,6 +166,7 @@ pub fn build_deselect_packet() -> [u8; 2] {
 
 /// Builds a 3-byte `CMD_SET_BUS_TYPE` packet: `[0x0E, 0x03, bus_type]`.
 /// `0x01` = Standard IBM PC Floppy Bus.
+/// `0x02` = Shugart Standard Floppy Bus.
 pub fn build_bus_type_packet(bus_type: u8) -> [u8; 3] {
     [CMD_SET_BUS_TYPE, 0x03, bus_type]
 }
@@ -164,6 +207,21 @@ mod tests {
     }
 
     #[test]
+    fn test_bus_type_enum() {
+        assert_eq!(BusType::default(), BusType::IbmPc);
+        assert_eq!(BusType::IbmPc.opcode_val(), 0x01);
+        assert_eq!(BusType::Shugart.opcode_val(), 0x02);
+        assert_eq!(BusType::IbmPc.as_str(), "IBM PC");
+        assert_eq!(BusType::Shugart.as_str(), "Shugart");
+        assert_eq!(BusType::IbmPc.toggle(), BusType::Shugart);
+        assert_eq!(BusType::Shugart.toggle(), BusType::IbmPc);
+        assert_eq!(BusType::from_u8(1), Some(BusType::IbmPc));
+        assert_eq!(BusType::from_u8(2), Some(BusType::Shugart));
+        assert_eq!(BusType::from_u8(0), None);
+        assert_eq!(BusType::from_u8(3), None);
+    }
+
+    #[test]
     fn test_protocol_packet_builders() {
         assert_eq!(build_reset_packet(), [0x00, 0x03, 0x00]);
         assert_eq!(build_motor_packet(0, true), [0x06, 0x04, 0x00, 0x01]);
@@ -171,7 +229,8 @@ mod tests {
         assert_eq!(build_head_packet(1), [0x03, 0x03, 0x01]);
         assert_eq!(build_select_packet(0), [0x0C, 0x03, 0x00]);
         assert_eq!(build_deselect_packet(), [0x0D, 0x02]);
-        assert_eq!(build_bus_type_packet(1), [0x0E, 0x03, 0x01]);
+        assert_eq!(build_bus_type_packet(BusType::IbmPc.opcode_val()), [0x0E, 0x03, 0x01]);
+        assert_eq!(build_bus_type_packet(BusType::Shugart.opcode_val()), [0x0E, 0x03, 0x02]);
         assert_eq!(build_seek_packet(40), [0x02, 0x03, 40]);
         assert_eq!(build_read_flux_packet(3), [0x07, 0x08, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00]);
         assert_eq!(build_get_pin_packet(28), [0x14, 0x03, 28]);

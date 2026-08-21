@@ -301,6 +301,7 @@ pub struct DriveStatus {
     pub read_status: DriveReadStatus,
     pub port_name: String,
     pub disk_format: DiskFormat,
+    pub bus_type: BusType,
 }
 
 impl Default for DriveStatus {
@@ -349,6 +350,7 @@ impl Default for DriveStatus {
             read_status: DriveReadStatus::Ok,
             port_name: String::new(),
             disk_format: DiskFormat::AutoDetect,
+            bus_type: BusType::IbmPc,
         }
     }
 }
@@ -384,6 +386,8 @@ pub enum HwCmd {
     PanicReset,
     SetDiskFormat(DiskFormat),
     CycleDiskFormat,
+    SetBusType(BusType),
+    ToggleBusType,
     Exit,
 }
 
@@ -470,22 +474,25 @@ fn gw_send_raw(
 
 fn ensure_unit_active(
     port: &mut Box<dyn serialport::SerialPort>,
+    bus_type: BusType,
     unit: u8,
     motor_on: bool,
     head: u8,
 ) {
-    let _ = gw_send_raw(port, &[0x0E, 0x03, 0x01], 0);
-    let _ = gw_send_raw(port, &[0x0C, 0x03, unit], 0);
-    let _ = gw_send_raw(port, &[0x03, 0x03, head], 0);
+    let _ = gw_send_raw(port, &build_bus_type_packet(bus_type.opcode_val()), 0);
+    let _ = gw_send_raw(port, &build_select_packet(unit), 0);
+    let _ = gw_send_raw(port, &build_head_packet(head), 0);
     if motor_on {
-        let _ = gw_send_raw(port, &[0x06, 0x04, unit, 0x01], 0);
+        let _ = gw_send_raw(port, &build_motor_packet(unit, true), 0);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gw_send_timeout(
     port: &mut Box<dyn serialport::SerialPort>,
     cmd: &[u8],
     extra_read: usize,
+    bus_type: BusType,
     unit: u8,
     motor_on: bool,
     head: u8,
@@ -496,22 +503,24 @@ fn gw_send_timeout(
         Ok((7, _)) => {
             // Greaseweazle ACK_BUSY (code 7) -> wait 30 ms, ensure unit active, retry once
             thread::sleep(Duration::from_millis(30));
-            ensure_unit_active(port, unit, motor_on, head);
+            ensure_unit_active(port, bus_type, unit, motor_on, head);
             gw_send_raw_timeout(port, cmd, extra_read, timeout)
         }
         other => other,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gw_send(
     port: &mut Box<dyn serialport::SerialPort>,
     cmd: &[u8],
     extra_read: usize,
+    bus_type: BusType,
     unit: u8,
     motor_on: bool,
     head: u8,
 ) -> Result<(u8, Vec<u8>), Box<dyn std::error::Error>> {
-    gw_send_timeout(port, cmd, extra_read, unit, motor_on, head, Duration::from_millis(ACK_GUARD_TIMEOUT_MS))
+    gw_send_timeout(port, cmd, extra_read, bus_type, unit, motor_on, head, Duration::from_millis(ACK_GUARD_TIMEOUT_MS))
 }
 
 /// Performs a motor-gated seek operation.
@@ -520,8 +529,10 @@ fn gw_send(
 /// motor power, waits STEPPER_WAKEUP_DELAY_MS (15 ms) for electronic power stabilization, executes
 /// the seek, and then de-asserts motor power.
 /// If motor_on is already true (active modes like Analyze, ReadData, Live RPM), no extra packet or delay is added.
+#[allow(clippy::too_many_arguments)]
 pub fn perform_motor_gated_seek(
     port: &mut Box<dyn serialport::SerialPort>,
+    bus_type: BusType,
     unit: u8,
     target_track: u8,
     motor_on: bool,
@@ -530,14 +541,15 @@ pub fn perform_motor_gated_seek(
 ) -> Result<(u8, Vec<u8>), Box<dyn std::error::Error>> {
     let gated = !motor_on;
     if gated {
-        let _ = gw_send_raw(port, &[0x06, 0x04, unit, 0x01], 0);
+        let _ = gw_send_raw(port, &build_motor_packet(unit, true), 0);
         thread::sleep(Duration::from_millis(STEPPER_WAKEUP_DELAY_MS));
     }
 
     let res = gw_send_timeout(
         port,
-        &[0x02, 0x03, target_track],
+        &build_seek_packet(target_track),
         0,
+        bus_type,
         unit,
         true,
         head,
@@ -545,7 +557,7 @@ pub fn perform_motor_gated_seek(
     );
 
     if gated {
-        let _ = gw_send_raw(port, &[0x06, 0x04, unit, 0x00], 0);
+        let _ = gw_send_raw(port, &build_motor_packet(unit, false), 0);
     }
 
     res
@@ -555,14 +567,16 @@ pub fn perform_motor_gated_seek(
 /// Floppy pin 28 is active-low: 0 = asserted (write protected), 1 = negated (write enabled)
 pub fn query_write_protect(
     port: &mut Box<dyn serialport::SerialPort>,
+    bus_type: BusType,
     unit: u8,
     motor_on: bool,
     head: u8,
 ) -> Option<bool> {
     match gw_send_timeout(
         port,
-        &[0x14, 0x03, 28],
+        &build_get_pin_packet(28),
         1,
+        bus_type,
         unit,
         motor_on,
         head,
@@ -1722,6 +1736,7 @@ impl Default for TrackAnalysisResult {
 
 fn read_motor_rpm_diagnostic(
     port: &mut Box<dyn serialport::SerialPort>,
+    bus_type: BusType,
     unit: u8,
     motor_on: bool,
     head: u8,
@@ -1733,8 +1748,8 @@ fn read_motor_rpm_diagnostic(
         }
         Err(e) => {
             let _ = port.clear(serialport::ClearBuffer::All);
-            let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
-            ensure_unit_active(port, unit, motor_on, head);
+            let _ = gw_send_raw(port, &build_reset_packet(), 32);
+            ensure_unit_active(port, bus_type, unit, motor_on, head);
             Err(e)
         }
     }
@@ -2790,7 +2805,7 @@ pub fn handle_command(
             );
             let _ = gw_set_motor(port, status.drive_unit, false);
             let _ = gw_send_raw(port, &build_head_packet(0), 0);
-            let _ = gw_send_raw(port, &build_bus_type_packet(0x01), 0);
+            let _ = gw_send_raw(port, &build_bus_type_packet(status.bus_type.opcode_val()), 0);
             let _ = gw_send_raw(port, &build_select_packet(status.drive_unit), 0);
 
             // 4. Clear both RX and TX serial buffers
@@ -2845,7 +2860,7 @@ pub fn handle_command(
             let _ = port.clear(serialport::ClearBuffer::All);
             if status.mode == DisplayMode::RpmMeasure {
                 let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
-                ensure_unit_active(port, status.drive_unit, status.motor_on, status.head);
+                ensure_unit_active(port, status.bus_type, status.drive_unit, status.motor_on, status.head);
                 if status.rpm_measure.sample_count > 0 {
                     status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
                 }
@@ -2858,7 +2873,7 @@ pub fn handle_command(
                 status.log_msg = String::from("Live RPM test stopped");
             } else {
                 if !status.motor_on {
-                    let _ = gw_send_raw(port, &[0x0E, 0x03, 0x01], 0);
+                    let _ = gw_send_raw(port, &build_bus_type_packet(status.bus_type.opcode_val()), 0);
                     let _ = gw_send_raw(port, &[0x0C, 0x03, status.drive_unit], 0);
                     let _ = gw_send_raw(port, &[0x03, 0x03, status.head], 0);
                     let _ = gw_set_motor(port, status.drive_unit, true);
@@ -2877,7 +2892,7 @@ pub fn handle_command(
         HwCmd::ToggleMotor => {
             let new_state = !status.motor_on;
             let _ = port.clear(serialport::ClearBuffer::All);
-            let _ = gw_send_raw(port, &build_bus_type_packet(0x01), 0);
+            let _ = gw_send_raw(port, &build_bus_type_packet(status.bus_type.opcode_val()), 0);
             let _ = gw_send_raw(port, &build_select_packet(status.drive_unit), 0);
             let _ = gw_send_raw(port, &build_head_packet(status.head), 0);
             let _ = port.clear(serialport::ClearBuffer::Input);
@@ -2939,6 +2954,7 @@ pub fn handle_command(
 
             let res = perform_motor_gated_seek(
                 port,
+                status.bus_type,
                 status.drive_unit,
                 track,
                 status.motor_on,
@@ -2968,6 +2984,7 @@ pub fn handle_command(
             // Non-blocking WP query on Seek
             if let Some(wp) = query_write_protect(
                 port,
+                status.bus_type,
                 status.drive_unit,
                 status.motor_on,
                 status.head,
@@ -2984,7 +3001,7 @@ pub fn handle_command(
             if status.mode == DisplayMode::RpmMeasure {
                 let _ = port.clear(serialport::ClearBuffer::All);
                 let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
-                ensure_unit_active(port, status.drive_unit, status.motor_on, status.head);
+                ensure_unit_active(port, status.bus_type, status.drive_unit, status.motor_on, status.head);
                 if status.rpm_measure.sample_count > 0 {
                     status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
                 }
@@ -3026,8 +3043,9 @@ pub fn handle_command(
             let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
             let res0 = gw_send_timeout(
                 port,
-                &[0x02, 0x03, 0x00],
+                &build_seek_packet(0),
                 0,
+                status.bus_type,
                 status.drive_unit,
                 true,
                 status.head,
@@ -3042,8 +3060,9 @@ pub fn handle_command(
                     let _ = port.set_timeout(t_back);
                     let res_back = gw_send_timeout(
                         port,
-                        &[0x02, 0x03, origin],
+                        &build_seek_packet(origin),
                         0,
+                        status.bus_type,
                         status.drive_unit,
                         true,
                         status.head,
@@ -3076,8 +3095,9 @@ pub fn handle_command(
                     let _ = port.set_timeout(Duration::from_millis(1250));
                     let _ = gw_send_timeout(
                         port,
-                        &[0x02, 0x03, 2],
+                        &build_seek_packet(2),
                         0,
+                        status.bus_type,
                         status.drive_unit,
                         true,
                         status.head,
@@ -3088,8 +3108,9 @@ pub fn handle_command(
                     let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
                     let res_zero = gw_send_timeout(
                         port,
-                        &[0x02, 0x03, 0],
+                        &build_seek_packet(0),
                         0,
+                        status.bus_type,
                         status.drive_unit,
                         true,
                         status.head,
@@ -3138,6 +3159,7 @@ pub fn handle_command(
             // Non-blocking WP query on Recalibrate
             if let Some(wp) = query_write_protect(
                 port,
+                status.bus_type,
                 status.drive_unit,
                 status.motor_on,
                 status.head,
@@ -3149,7 +3171,7 @@ pub fn handle_command(
             if status.mode == DisplayMode::RpmMeasure {
                 let _ = port.clear(serialport::ClearBuffer::All);
                 let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
-                ensure_unit_active(port, status.drive_unit, status.motor_on, status.head);
+                ensure_unit_active(port, status.bus_type, status.drive_unit, status.motor_on, status.head);
                 status.mode = DisplayMode::None;
                 status.activity = if status.motor_on {
                     HwActivity::Idle
@@ -3171,7 +3193,7 @@ pub fn handle_command(
             if status.mode == DisplayMode::RpmMeasure {
                 let _ = port.clear(serialport::ClearBuffer::All);
                 let _ = gw_send_raw(port, &[0x00, 0x03, 0x00], 32);
-                ensure_unit_active(port, status.drive_unit, status.motor_on, status.head);
+                ensure_unit_active(port, status.bus_type, status.drive_unit, status.motor_on, status.head);
                 if status.rpm_measure.sample_count > 0 {
                     status.rpm_display = format!("{:.1} RPM", status.rpm_measure.avg_rpm);
                 }
@@ -3188,6 +3210,7 @@ pub fn handle_command(
             let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
             let res = perform_motor_gated_seek(
                 port,
+                status.bus_type,
                 status.drive_unit,
                 0,
                 status.motor_on,
@@ -3221,6 +3244,7 @@ pub fn handle_command(
             // Non-blocking WP query on ZeroTrack
             if let Some(wp) = query_write_protect(
                 port,
+                status.bus_type,
                 status.drive_unit,
                 status.motor_on,
                 status.head,
@@ -3260,8 +3284,9 @@ pub fn handle_command(
             };
             let res = gw_send(
                 port,
-                &[0x03, 0x03, head],
+                &build_head_packet(head),
                 0,
+                status.bus_type,
                 status.drive_unit,
                 status.motor_on,
                 head,
@@ -3301,8 +3326,9 @@ pub fn handle_command(
             };
             let res = gw_send(
                 port,
-                &[0x03, 0x03, target_physical_head],
+                &build_head_packet(target_physical_head),
                 0,
+                status.bus_type,
                 status.drive_unit,
                 status.motor_on,
                 target_physical_head,
@@ -3345,8 +3371,9 @@ pub fn handle_command(
             };
             let res = gw_send(
                 port,
-                &[0x03, 0x03, target_physical_head],
+                &build_head_packet(target_physical_head),
                 0,
+                status.bus_type,
                 status.drive_unit,
                 status.motor_on,
                 target_physical_head,
@@ -3385,7 +3412,7 @@ pub fn handle_command(
             let _ = port.clear(serialport::ClearBuffer::All);
 
             if !status.motor_on {
-                let _ = gw_send_raw(port, &[0x0E, 0x03, 0x01], 0);
+                let _ = gw_send_raw(port, &build_bus_type_packet(status.bus_type.opcode_val()), 0);
                 let _ = gw_send_raw(port, &[0x0C, 0x03, status.drive_unit], 0);
                 let _ = gw_send_raw(port, &[0x03, 0x03, status.head], 0);
                 let _ = gw_set_motor(port, status.drive_unit, true);
@@ -3400,6 +3427,7 @@ pub fn handle_command(
             // Non-blocking WP query at start of Analyze
             if let Some(wp) = query_write_protect(
                 port,
+                status.bus_type,
                 status.drive_unit,
                 status.motor_on,
                 status.head,
@@ -3422,7 +3450,7 @@ pub fn handle_command(
             let _ = port.clear(serialport::ClearBuffer::All);
 
             if !status.motor_on {
-                let _ = gw_send_raw(port, &[0x0E, 0x03, 0x01], 0);
+                let _ = gw_send_raw(port, &build_bus_type_packet(status.bus_type.opcode_val()), 0);
                 let _ = gw_send_raw(port, &[0x0C, 0x03, status.drive_unit], 0);
                 let _ = gw_send_raw(port, &[0x03, 0x03, status.head], 0);
                 let _ = gw_set_motor(port, status.drive_unit, true);
@@ -3437,6 +3465,7 @@ pub fn handle_command(
             // Non-blocking WP query at start of ReadData
             if let Some(wp) = query_write_protect(
                 port,
+                status.bus_type,
                 status.drive_unit,
                 status.motor_on,
                 status.head,
@@ -3501,7 +3530,7 @@ pub fn handle_command(
                 let _ = tx_status.send(status.clone());
             } else {
                 let _ = port.clear(serialport::ClearBuffer::All);
-                let _ = gw_send_raw(port, &build_bus_type_packet(0x01), 0);
+                let _ = gw_send_raw(port, &build_bus_type_packet(status.bus_type.opcode_val()), 0);
                 let _ = gw_send_raw(port, &build_select_packet(status.drive_unit), 0);
                 let _ = gw_send_raw(port, &build_head_packet(status.head), 0);
                 let _ = port.clear(serialport::ClearBuffer::Input);
@@ -3548,6 +3577,7 @@ pub fn handle_command(
             status.unit_id = next_unit;
             ensure_unit_active(
                 port,
+                status.bus_type,
                 status.drive_unit,
                 status.motor_on,
                 status.head,
@@ -3556,6 +3586,7 @@ pub fn handle_command(
             let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
             let _ = perform_motor_gated_seek(
                 port,
+                status.bus_type,
                 status.drive_unit,
                 0,
                 status.motor_on,
@@ -3567,6 +3598,7 @@ pub fn handle_command(
 
             if let Some(wp) = query_write_protect(
                 port,
+                status.bus_type,
                 status.drive_unit,
                 status.motor_on,
                 status.head,
@@ -3606,6 +3638,7 @@ pub fn handle_command(
             }
             ensure_unit_active(
                 port,
+                status.bus_type,
                 status.drive_unit,
                 status.motor_on,
                 status.head,
@@ -3614,6 +3647,7 @@ pub fn handle_command(
             let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
             let _ = perform_motor_gated_seek(
                 port,
+                status.bus_type,
                 status.drive_unit,
                 0,
                 status.motor_on,
@@ -3625,6 +3659,7 @@ pub fn handle_command(
 
             if let Some(wp) = query_write_protect(
                 port,
+                status.bus_type,
                 status.drive_unit,
                 status.motor_on,
                 status.head,
@@ -3661,6 +3696,32 @@ pub fn handle_command(
             status.log_msg = format!("Format Profile: {}", status.disk_format.name());
             let _ = tx_status.send(status.clone());
         }
+        HwCmd::SetBusType(bus) => {
+            status.bus_type = bus;
+            let _ = gw_send_raw(port, &build_bus_type_packet(status.bus_type.opcode_val()), 0);
+            ensure_unit_active(
+                port,
+                status.bus_type,
+                status.drive_unit,
+                status.motor_on,
+                status.head,
+            );
+            status.log_msg = format!("Bus Type: {} ({})", status.bus_type.as_str(), if status.bus_type == BusType::Shugart { "Amiga / Shugart DS0 Pin 10" } else { "IBM PC Standard" });
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::ToggleBusType => {
+            status.bus_type = status.bus_type.toggle();
+            let _ = gw_send_raw(port, &build_bus_type_packet(status.bus_type.opcode_val()), 0);
+            ensure_unit_active(
+                port,
+                status.bus_type,
+                status.drive_unit,
+                status.motor_on,
+                status.head,
+            );
+            status.log_msg = format!("Bus Type: {} ({})", status.bus_type.as_str(), if status.bus_type == BusType::Shugart { "Amiga / Shugart DS0 Pin 10" } else { "IBM PC Standard" });
+            let _ = tx_status.send(status.clone());
+        }
     }
     should_exit
 }
@@ -3670,6 +3731,7 @@ pub fn hw_thread(
     rx_cmd: Receiver<HwCmd>,
     port_arg: Option<String>,
     initial_drive_unit: u8,
+    initial_bus_type: BusType,
 ) {
     let mut status = DriveStatus::default();
     if let Some(ref p) = port_arg {
@@ -3677,6 +3739,7 @@ pub fn hw_thread(
     }
     status.drive_unit = initial_drive_unit.min(1);
     status.unit_id = status.drive_unit;
+    status.bus_type = initial_bus_type;
     let mut rpm_sampler = RpmSampler::new(4);
 
     let (tx_sound, rx_sound) = crossbeam_channel::unbounded::<AudioEvent>();
@@ -3705,8 +3768,9 @@ pub fn hw_thread(
                     // 1. INFO (0x00)
                     let info_res = gw_send(
                         &mut port,
-                        &[0x00, 0x03, 0x00],
+                        &build_reset_packet(),
                         32,
+                        status.bus_type,
                         status.drive_unit,
                         status.motor_on,
                         status.head,
@@ -3727,8 +3791,9 @@ pub fn hw_thread(
                     // 2. SET_BUS ON (0x0E)
                     let bus_res = gw_send(
                         &mut port,
-                        &[0x0E, 0x03, 0x01],
+                        &build_bus_type_packet(status.bus_type.opcode_val()),
                         0,
+                        status.bus_type,
                         status.drive_unit,
                         status.motor_on,
                         status.head,
@@ -3742,22 +3807,24 @@ pub fn hw_thread(
                         thread::sleep(Duration::from_millis(100));
                         continue;
                     }
-                    status.log_msg = format!("Bus enabled on {}", name);
+                    status.log_msg = format!("Bus enabled ({}) on {}", status.bus_type.as_str(), name);
                     let _ = tx_status.send(status.clone());
 
                     // 3. SELECT_UNIT (0x0C)
                     let _ = gw_send(
                         &mut port,
-                        &[0x0C, 0x03, status.drive_unit],
+                        &build_select_packet(status.drive_unit),
                         0,
+                        status.bus_type,
                         status.drive_unit,
                         status.motor_on,
                         status.head,
                     );
                     let _ = gw_send(
                         &mut port,
-                        &[0x03, 0x03, status.head],
+                        &build_head_packet(status.head),
                         0,
+                        status.bus_type,
                         status.drive_unit,
                         status.motor_on,
                         status.head,
@@ -3770,8 +3837,9 @@ pub fn hw_thread(
                     // 4. SET_MOTOR ON (0x06)
                     let _ = gw_send(
                         &mut port,
-                        &[0x06, 0x04, status.drive_unit, 0x01],
+                        &build_motor_packet(status.drive_unit, true),
                         0,
+                        status.bus_type,
                         status.drive_unit,
                         true,
                         status.head,
@@ -3785,8 +3853,9 @@ pub fn hw_thread(
                     let _ = port.set_timeout(Duration::from_millis(SEEK_TRK0_TIMEOUT_MS));
                     let _ = gw_send_timeout(
                         &mut port,
-                        &[0x02, 0x03, 0x00],
+                        &build_seek_packet(0),
                         0,
+                        status.bus_type,
                         status.drive_unit,
                         status.motor_on,
                         status.head,
@@ -3800,6 +3869,7 @@ pub fn hw_thread(
                     // Non-blocking WP query at initial connection
                     if let Some(wp) = query_write_protect(
                         &mut port,
+                        status.bus_type,
                         status.drive_unit,
                         status.motor_on,
                         status.head,
@@ -3842,6 +3912,7 @@ pub fn hw_thread(
 
                             match read_motor_rpm_diagnostic(
                                 &mut port,
+                                status.bus_type,
                                 status.drive_unit,
                                 status.motor_on,
                                 status.head,
@@ -3889,8 +3960,8 @@ pub fn hw_thread(
                                 }
                                 Err(e) => {
                                     let _ = port.clear(serialport::ClearBuffer::All);
-                                    let _ = gw_send_raw(&mut port, &[0x00, 0x03, 0x00], 32);
-                                    ensure_unit_active(&mut port, status.drive_unit, status.motor_on, status.head);
+                                    let _ = gw_send_raw(&mut port, &build_reset_packet(), 32);
+                                    ensure_unit_active(&mut port, status.bus_type, status.drive_unit, status.motor_on, status.head);
                                     status.index = false;
                                     status.log_msg = format!("RPM Test I/O Error: {}", e);
                                 }
@@ -3905,8 +3976,9 @@ pub fn hw_thread(
                                 let next_head = if status.head == 0 { 1 } else { 0 };
                                 let _ = gw_send(
                                     &mut port,
-                                    &[0x03, 0x03, next_head],
+                                    &build_head_packet(next_head),
                                     0,
+                                    status.bus_type,
                                     status.drive_unit,
                                     status.motor_on,
                                     next_head,
@@ -3974,8 +4046,9 @@ pub fn hw_thread(
                             if status.motor_on {
                                 let _ = gw_send(
                                     &mut port,
-                                    &[0x03, 0x03, status.head],
+                                    &build_head_packet(status.head),
                                     0,
+                                    status.bus_type,
                                     status.drive_unit,
                                     status.motor_on,
                                     status.head,
@@ -4017,7 +4090,7 @@ pub fn hw_thread(
             status.activity = HwActivity::WaitingPort;
             status.rpm = 0;
             status.index = false;
-            status.log_msg = String::from("Searching for Greaseweazle serial port...");
+            status.log_msg = String::from("Searching for Greaseweazle...");
             let _ = tx_status.send(status.clone());
             thread::sleep(Duration::from_millis(100));
         }
@@ -5893,6 +5966,22 @@ mod tests {
         assert_eq!(fmt.short_name(), "CPC-SYS");
         fmt = fmt.cycle_next();
         assert_eq!(fmt, DiskFormat::AutoDetect);
+    }
+
+    #[test]
+    fn test_bus_type_status_and_command_dispatch() {
+        let mut status = DriveStatus::default();
+        assert_eq!(status.bus_type, BusType::IbmPc);
+        status.bus_type = BusType::Shugart;
+        assert_eq!(status.bus_type, BusType::Shugart);
+        assert_eq!(status.bus_type.opcode_val(), 0x02);
+        assert_eq!(status.bus_type.as_str(), "Shugart");
+
+        let cmd_toggle = HwCmd::ToggleBusType;
+        assert_eq!(cmd_toggle, HwCmd::ToggleBusType);
+
+        let cmd_set = HwCmd::SetBusType(BusType::Shugart);
+        assert_eq!(cmd_set, HwCmd::SetBusType(BusType::Shugart));
     }
 }
 

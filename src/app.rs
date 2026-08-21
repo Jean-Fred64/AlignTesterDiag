@@ -1,4 +1,4 @@
-use crate::hw::{DiskFormat, DisplayMode, DriveStatus, HwActivity};
+use crate::hw::{BusType, DiskFormat, DisplayMode, DriveStatus, HwActivity};
 
 /// Three-state head selection mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -151,6 +151,8 @@ pub enum Action {
     PanicReset,
     CycleDiskFormat,
     SetDiskFormat(DiskFormat),
+    ToggleBusType,
+    SetBusType(BusType),
 }
 
 /// Application state wrapper
@@ -166,18 +168,24 @@ pub struct App {
     pub stream_spinner_idx: usize,
     pub show_help: bool,
     pub disk_format: DiskFormat,
+    pub bus_type: BusType,
 }
 
 impl App {
     pub fn new() -> Self {
-        Self::with_drive_unit(0)
+        Self::with_config(0, BusType::IbmPc)
     }
 
     pub fn with_drive_unit(drive_unit: u8) -> Self {
+        Self::with_config(drive_unit, BusType::IbmPc)
+    }
+
+    pub fn with_config(drive_unit: u8, bus_type: BusType) -> Self {
         let unit = drive_unit.min(1);
         let status = DriveStatus {
             drive_unit: unit,
             unit_id: unit,
+            bus_type,
             ..Default::default()
         };
         Self {
@@ -192,6 +200,7 @@ impl App {
             stream_spinner_idx: 0,
             show_help: false,
             disk_format: DiskFormat::AutoDetect,
+            bus_type,
         }
     }
 
@@ -236,6 +245,7 @@ impl App {
 
         self.motor_on = status.motor_on;
         self.disk_format = status.disk_format;
+        self.bus_type = status.bus_type;
         self.status = status;
         self.drive_unit = self.status.drive_unit;
         self.head_selection = self.status.head_select;
@@ -289,11 +299,27 @@ impl App {
         self.disk_format
     }
 
+    pub fn toggle_bus_type(&mut self) {
+        self.bus_type = self.bus_type.toggle();
+        self.status.bus_type = self.bus_type;
+    }
+
+    pub fn set_bus_type(&mut self, bus: BusType) {
+        self.bus_type = bus;
+        self.status.bus_type = bus;
+    }
+
+    pub fn bus_type(&self) -> BusType {
+        self.bus_type
+    }
+
     pub fn handle_action(&mut self, action: Action) {
         match action {
             Action::ToggleDriveUnit => self.toggle_drive_unit(),
             Action::CycleDiskFormat => self.cycle_disk_format(),
             Action::SetDiskFormat(fmt) => self.set_disk_format(fmt),
+            Action::ToggleBusType => self.toggle_bus_type(),
+            Action::SetBusType(bus) => self.set_bus_type(bus),
             Action::Analyze | Action::StartAnalysis => {
                 self.motor_on = true;
                 self.status.analyzing = true;
@@ -814,6 +840,22 @@ mod tests {
         assert!(app.last_pass_h1.is_none());
         assert_eq!(app.status.log_msg, "PANIC RESET: Hardware reset & serial buffers purged successfully");
         assert_eq!(app.drive_status().activity, HwActivity::Idle);
+    }
+
+    #[test]
+    fn test_app_bus_type_actions_and_config() {
+        let mut app = App::with_config(1, BusType::Shugart);
+        assert_eq!(app.drive_unit, 1);
+        assert_eq!(app.bus_type(), BusType::Shugart);
+        assert_eq!(app.status.bus_type, BusType::Shugart);
+
+        app.handle_action(Action::ToggleBusType);
+        assert_eq!(app.bus_type(), BusType::IbmPc);
+        assert_eq!(app.status.bus_type, BusType::IbmPc);
+
+        app.handle_action(Action::SetBusType(BusType::Shugart));
+        assert_eq!(app.bus_type(), BusType::Shugart);
+        assert_eq!(app.status.bus_type, BusType::Shugart);
     }
 }
 

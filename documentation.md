@@ -69,6 +69,8 @@ pub enum HwCmd {
     PanicReset,
     SetDiskFormat(DiskFormat),
     CycleDiskFormat,
+    SetBusType(BusType),
+    ToggleBusType,
     Exit,
 }
 ```
@@ -93,8 +95,8 @@ All commands follow the Greaseweazle frame format: `[CMD_OPCODE, FRAME_LENGTH, A
 | Opcode (Hex) | Command Name | Arguments | Response Payload | Purpose |
 |:---|:---|:---|:---|:---|
 | `0x00` | `CMD_GET_INFO` | `[0x00, 0x03, 0x00]` | 32 bytes | Query firmware version, hardware model, sample clock frequency |
-| `0x0E` | `CMD_SET_BUS_TYPE` | `[0x0E, 0x03, 0x01]` | 0 bytes | Configure interface pinout (`0x01` = IBM PC standard) |
-| `0x0C` | `CMD_SELECT` | `[0x0C, 0x03, unit]` | 0 bytes | Assert drive select line (`0` = Drive A, `1` = Drive B) |
+| `0x0E` | `CMD_SET_BUS_TYPE` | `[0x0E, 0x03, bus_type]` | 0 bytes | Configure interface pinout (`0x01` = IBM PC standard, `0x02` = Shugart standard) |
+| `0x0C` | `CMD_SELECT` | `[0x0C, 0x03, unit]` | 0 bytes | Assert drive select line (`0` = Drive A / DS0, `1` = Drive B / DS1) |
 | `0x0D` | `CMD_DESELECT` | `[0x0D, 0x02]` | 0 bytes | Deselect all drive units / release interface bus |
 | `0x06` | `CMD_MOTOR` | `[0x06, 0x04, unit, state]` | 0 bytes | Control spindle motor (`1` = ON, `0` = OFF) |
 | `0x02` | `CMD_SEEK` | `[0x02, 0x03, cyl]` | 0 bytes | Step head carriage to logical cylinder (`0` to `83`) |
@@ -416,14 +418,15 @@ All keyboard inputs are captured in raw mode via Crossterm non-blocking polling 
 | <kbd>P</kbd> / <kbd>p</kbd> | **Cycle Machine Profile & Disk Format** | `UI` & `Hardware I/O` | Dispatches `HwCmd::CycleDiskFormat` and `Action::CycleDiskFormat`. Cycles active machine profile and sector decoding format: `AutoDetect` ➔ `IbmPc` ➔ `AmigaDos` ➔ `AtariSt` ➔ `AmstradCpcData` ➔ `AmstradCpcSystem`. Updates expected sector count, IDAM parsing rules, even/odd Paula bit-deinterleaving, or CPC sector ID offsets accordingly. |
 | <kbd>F</kbd> / <kbd>f</kbd> | **Low-Level Track Formatter** | `Hardware I/O` *(Reserved)* | Reserved shortcut for full-track low-level MFM formatting and bulk magnetic degaussing utility in Roadmap Phase 3. |
 | <kbd>I</kbd> / <kbd>i</kbd> | **Track Flux Imaging Utility** | `Hardware I/O` *(Reserved)* | Reserved shortcut for raw multi-revolution flux imaging and flux-level surface degradation heatmaps in Roadmap Phase 4. |
-| <kbd>S</kbd> / <kbd>s</kbd> | **Step Rate / Double-Step Toggle** | `Hardware I/O` *(Reserved)* | Reserved shortcut for 40-track / 80-track double-stepping toggle and custom stepper pulse timing configurations. |
+| <kbd>S</kbd> / <kbd>s</kbd> | **Toggle Step Rate (Single 1:1 / Double 2:1 for 48/96 TPI)** | `Hardware I/O` *(Reserved)* | Reserved shortcut for 40-track / 80-track double-stepping toggle (Single Step 1:1 / Double Step 2:1 for 48 TPI diskettes on 96 TPI drives like in ImageDisk) and custom stepper pulse timing configurations. |
+| <kbd>T</kbd> / <kbd>t</kbd> | **Toggle Bus Type (IBM PC <-> Shugart)** | `UI` & `Hardware I/O` | Dispatches `HwCmd::ToggleBusType` and `Action::ToggleBusType`. Toggles floppy interface between IBM PC bus (`0x01`) and Shugart standard bus (`0x02`, e.g. Amiga / Atari / Commodore / CPC native drives). Dynamically updates pinout configuration and unit drive selection. |
 | <kbd>W</kbd> / <kbd>w</kbd> | **Write Sector Integrity Test** | `Hardware I/O` *(Reserved)* | Reserved shortcut for non-destructive sector rewrite and magnetic surface test patterns in Roadmap Phase 3. |
 
 ---
 
 ## 9. Automated Test & Verification Suite
 
-AlignTesterDiag includes an exhaustive **118-test automated unit test suite** built directly into Cargo (100% success rate).
+AlignTesterDiag includes an exhaustive **122-test automated unit test suite** built directly into Cargo (100% success rate).
 
 ### 9.1 Automated Unit Test Harness
 Run the full test suite using Cargo:
@@ -431,7 +434,7 @@ Run the full test suite using Cargo:
 cargo test
 ```
 
-The 118 unit tests provide complete coverage across all subsystems:
+The 122 unit tests provide complete coverage across all subsystems:
 - State transitions on `HwCmd` and `Action` dispatches (`src/app.rs`, `src/hw/mod.rs`).
 - DPLL boundary clamping, RMS phase jitter, and frequency adaptation (`src/hw/mod.rs`).
 - Multi-tier variometer pitch bounds ($1500 \text{ Hz} \le f \le 2200 \text{ Hz}$, $600 \text{ Hz} \le f \le 1400 \text{ Hz}$, $250 \text{ Hz} \le f \le 500 \text{ Hz}$) and mismatch warning tone (180 Hz) (`src/audio.rs`).
