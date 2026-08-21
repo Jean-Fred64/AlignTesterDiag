@@ -43,7 +43,7 @@ Arguments:
   [PORT]                  Serial port connected to Greaseweazle (e.g. COM3, /dev/ttyACM0)
 
 Options:
-  -d, --drive <0|1>       Select physical drive unit (0 for Drive A:, 1 for Drive B:) [default: 0]
+  -d, --drive <0-3>       Select physical drive unit (0..1 for PC, 0..3 for Shugart) [default: 0]
   -b, --bus <pc|shugart>  Select floppy interface bus type (pc | shugart) [default: pc]
   -p, --port <PORT>       Serial port connected to Greaseweazle
   -h, --help              Print help information
@@ -76,7 +76,7 @@ pub fn format_log_line(msg: &str) -> String {
 
 pub fn parse_cli_args(args: &[String]) -> (Option<String>, u8, BusType) {
     let mut port: Option<String> = None;
-    let mut drive_unit: u8 = 0;
+    let mut raw_drive_unit: u8 = 0;
     let mut bus_type: BusType = BusType::IbmPc;
     let mut i = 1;
 
@@ -85,17 +85,17 @@ pub fn parse_cli_args(args: &[String]) -> (Option<String>, u8, BusType) {
         if arg == "--drive" || arg == "-d" {
             if i + 1 < args.len() {
                 if let Ok(u) = args[i + 1].parse::<u8>() {
-                    drive_unit = u.min(1);
+                    raw_drive_unit = u.min(3);
                 }
                 i += 1;
             }
         } else if let Some(stripped) = arg.strip_prefix("--drive=") {
             if let Ok(u) = stripped.parse::<u8>() {
-                drive_unit = u.min(1);
+                raw_drive_unit = u.min(3);
             }
         } else if let Some(stripped) = arg.strip_prefix("-d=") {
             if let Ok(u) = stripped.parse::<u8>() {
-                drive_unit = u.min(1);
+                raw_drive_unit = u.min(3);
             }
         } else if arg == "--bus" || arg == "-b" || arg == "--bus-type" {
             if i + 1 < args.len() {
@@ -147,6 +147,9 @@ pub fn parse_cli_args(args: &[String]) -> (Option<String>, u8, BusType) {
         i += 1;
     }
 
+    let max_unit = if bus_type == BusType::IbmPc { 1 } else { 3 };
+    let drive_unit = raw_drive_unit.min(max_unit);
+
     (port, drive_unit, bus_type)
 }
 
@@ -189,7 +192,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ])
                 .split(f.size());
 
-            let drive_letter = if status.drive_unit == 0 { "A:" } else { "B:" };
+            let drive_letter = format_drive_unit_short(status.bus_type, status.drive_unit);
             let expected_ids = get_status_expected_sector_ids(status);
             let sec_count_str = format_disk_format_header(status.disk_format, status.bitrate, status.sector_count);
 
@@ -339,7 +342,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Line::from(" Insert formatted"),
                 Line::from(" diskette"),
                 Line::from(""),
-                Line::from(format!(" UNIT : Drive {} ({})", status.drive_unit, if status.drive_unit == 0 { "A:" } else { "B:" })),
+                Line::from(format!(" UNIT : {}", format_drive_unit_label(status.bus_type, status.drive_unit))),
                 Line::from(format!(" BUS  : {}", status.bus_type.as_str())),
                 Line::from(format!(" PROF : {}", status.disk_format.short_name())),
                 Line::from(format!(" STAT : {}", state_label)),
@@ -381,7 +384,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Line::from(" R = Recal/seek"),
                 Line::from(" S = Step S/D (48/96 TPI)"),
                 Line::from(" T = Shugart/PC Bus"),
-                Line::from(" U = Unit (Drive 0/1)"),
+                Line::from(format_unit_menu_shortcut(status.bus_type)),
                 Line::from(" V = Verbose on/off"),
                 Line::from(" W = Write data"),
                 Line::from(" Z = Zero track"),
@@ -752,9 +755,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                     )));
                     right_lines.push(Line::from(format!(
-                        "Drive Selection   : Drive {} ({}) ({})",
-                        status.drive_unit,
-                        if status.drive_unit == 0 { "A:" } else { "B:" },
+                        "Drive Selection   : {} ({})",
+                        format_drive_unit_label(status.bus_type, status.drive_unit),
                         if status.drive_select { "Active" } else { "Inactive" }
                     )));
                     right_lines.push(Line::from(format!(
@@ -1738,10 +1740,28 @@ mod tests {
         assert_eq!(port, Some("COM5".to_string()));
         assert_eq!(unit, 1);
 
-        // Saturation to 1
-        let args_out_of_bounds = vec!["aligntester".to_string(), "--drive".to_string(), "4".to_string()];
-        let (_port, unit, _bus) = parse_cli_args(&args_out_of_bounds);
+        // Saturation to 1 in PC mode
+        let args_out_of_bounds_pc = vec!["aligntester".to_string(), "--drive".to_string(), "4".to_string()];
+        let (_port, unit, bus) = parse_cli_args(&args_out_of_bounds_pc);
         assert_eq!(unit, 1);
+        assert_eq!(bus, BusType::IbmPc);
+
+        // Support for units 2 and 3 in Shugart mode
+        let args_shugart_unit2 = vec!["aligntester".to_string(), "--bus".to_string(), "shugart".to_string(), "--drive".to_string(), "2".to_string()];
+        let (_port, unit, bus) = parse_cli_args(&args_shugart_unit2);
+        assert_eq!(unit, 2);
+        assert_eq!(bus, BusType::Shugart);
+
+        let args_shugart_unit3 = vec!["aligntester".to_string(), "--shugart".to_string(), "-d=3".to_string()];
+        let (_port, unit, bus) = parse_cli_args(&args_shugart_unit3);
+        assert_eq!(unit, 3);
+        assert_eq!(bus, BusType::Shugart);
+
+        // Saturation to 3 in Shugart mode
+        let args_shugart_out_of_bounds = vec!["aligntester".to_string(), "--shugart".to_string(), "--drive".to_string(), "9".to_string()];
+        let (_port, unit, bus) = parse_cli_args(&args_shugart_out_of_bounds);
+        assert_eq!(unit, 3);
+        assert_eq!(bus, BusType::Shugart);
     }
 
     #[test]

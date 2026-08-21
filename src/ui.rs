@@ -1035,7 +1035,7 @@ pub fn build_help_modal_lines() -> Vec<Line<'static>> {
         shortcut_row("R", "Recalibrate Seek (Track 0 seek & verify)"),
         shortcut_row("S", "Toggle Step Rate (Single 1:1 / Double 2:1 for 48/96 TPI)"),
         shortcut_row("T", "Toggle Bus Type (IBM PC <-> Shugart)"),
-        shortcut_row("U", "Toggle Drive Unit (Drive 0 / Drive 1)"),
+        shortcut_row("U", "Toggle Drive Unit (PC: A/B, Shugart: DS0..DS3)"),
         shortcut_row("V", "Toggle Verbose (Standard vs Verbose detail)"),
         shortcut_row("W", "Write Data"),
         shortcut_row("Z", "Zero Track (Direct seek to Track 0)"),

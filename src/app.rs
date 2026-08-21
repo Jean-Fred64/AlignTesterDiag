@@ -181,7 +181,11 @@ impl App {
     }
 
     pub fn with_config(drive_unit: u8, bus_type: BusType) -> Self {
-        let unit = drive_unit.min(1);
+        let max_unit = match bus_type {
+            BusType::IbmPc => 1,
+            BusType::Shugart => 3,
+        };
+        let unit = drive_unit.min(max_unit);
         let status = DriveStatus {
             drive_unit: unit,
             unit_id: unit,
@@ -274,15 +278,30 @@ impl App {
     }
 
     pub fn toggle_drive_unit(&mut self) {
-        self.drive_unit = if self.drive_unit == 0 { 1 } else { 0 };
+        self.drive_unit = match self.bus_type {
+            BusType::IbmPc => (self.drive_unit + 1) % 2,
+            BusType::Shugart => (self.drive_unit + 1) % 4,
+        };
         self.status.drive_unit = self.drive_unit;
         self.status.unit_id = self.drive_unit;
     }
 
     pub fn set_drive_unit(&mut self, unit: u8) {
-        self.drive_unit = unit.min(1);
+        let max_unit = match self.bus_type {
+            BusType::IbmPc => 1,
+            BusType::Shugart => 3,
+        };
+        self.drive_unit = unit.min(max_unit);
         self.status.drive_unit = self.drive_unit;
         self.status.unit_id = self.drive_unit;
+    }
+
+    pub fn format_drive_unit_label(&self) -> String {
+        format_drive_unit_label(self.bus_type, self.drive_unit)
+    }
+
+    pub fn format_drive_unit_short(&self) -> &'static str {
+        format_drive_unit_short(self.bus_type, self.drive_unit)
     }
 
     pub fn cycle_disk_format(&mut self) {
@@ -301,12 +320,22 @@ impl App {
 
     pub fn toggle_bus_type(&mut self) {
         self.bus_type = self.bus_type.toggle();
+        if self.bus_type == BusType::IbmPc && self.drive_unit > 1 {
+            self.drive_unit = 0;
+        }
         self.status.bus_type = self.bus_type;
+        self.status.drive_unit = self.drive_unit;
+        self.status.unit_id = self.drive_unit;
     }
 
     pub fn set_bus_type(&mut self, bus: BusType) {
         self.bus_type = bus;
-        self.status.bus_type = bus;
+        if self.bus_type == BusType::IbmPc && self.drive_unit > 1 {
+            self.drive_unit = 0;
+        }
+        self.status.bus_type = self.bus_type;
+        self.status.drive_unit = self.drive_unit;
+        self.status.unit_id = self.drive_unit;
     }
 
     pub fn bus_type(&self) -> BusType {
@@ -575,6 +604,52 @@ impl App {
 impl Default for App {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Formats the drive unit label based on bus type:
+/// - IBM PC: Unit 0 -> `Drive 0 (A:)`, Unit 1 -> `Drive 1 (B:)`
+/// - Shugart: Unit 0 -> `Unit 0 (DS0)`, Unit 1 -> `Unit 1 (DS1)`, Unit 2 -> `Unit 2 (DS2)`, Unit 3 -> `Unit 3 (DS3)`
+pub fn format_drive_unit_label(bus_type: BusType, drive_unit: u8) -> String {
+    match bus_type {
+        BusType::IbmPc => match drive_unit {
+            0 => "Drive 0 (A:)".to_string(),
+            _ => "Drive 1 (B:)".to_string(),
+        },
+        BusType::Shugart => match drive_unit {
+            0 => "Unit 0 (DS0)".to_string(),
+            1 => "Unit 1 (DS1)".to_string(),
+            2 => "Unit 2 (DS2)".to_string(),
+            _ => "Unit 3 (DS3)".to_string(),
+        },
+    }
+}
+
+/// Formats the short drive code for top header banner:
+/// - IBM PC: `A:` / `B:`
+/// - Shugart: `DS0` / `DS1` / `DS2` / `DS3`
+pub fn format_drive_unit_short(bus_type: BusType, drive_unit: u8) -> &'static str {
+    match bus_type {
+        BusType::IbmPc => match drive_unit {
+            0 => "A:",
+            _ => "B:",
+        },
+        BusType::Shugart => match drive_unit {
+            0 => "DS0",
+            1 => "DS1",
+            2 => "DS2",
+            _ => "DS3",
+        },
+    }
+}
+
+/// Formats the menu shortcut description for drive unit:
+/// - IBM PC: ` U = Unit (A: / B:)`
+/// - Shugart: ` U = Unit (DS0..DS3)`
+pub fn format_unit_menu_shortcut(bus_type: BusType) -> &'static str {
+    match bus_type {
+        BusType::IbmPc => " U = Unit (A: / B:)",
+        BusType::Shugart => " U = Unit (DS0..DS3)",
     }
 }
 
@@ -856,6 +931,99 @@ mod tests {
         app.handle_action(Action::SetBusType(BusType::Shugart));
         assert_eq!(app.bus_type(), BusType::Shugart);
         assert_eq!(app.status.bus_type, BusType::Shugart);
+    }
+
+    #[test]
+    fn test_app_drive_unit_cycling_pc_mode() {
+        let mut app = App::with_config(0, BusType::IbmPc);
+        assert_eq!(app.drive_unit, 0);
+        assert_eq!(app.format_drive_unit_label(), "Drive 0 (A:)");
+        assert_eq!(app.format_drive_unit_short(), "A:");
+
+        app.toggle_drive_unit();
+        assert_eq!(app.drive_unit, 1);
+        assert_eq!(app.format_drive_unit_label(), "Drive 1 (B:)");
+        assert_eq!(app.format_drive_unit_short(), "B:");
+
+        app.toggle_drive_unit();
+        assert_eq!(app.drive_unit, 0);
+        assert_eq!(app.format_drive_unit_label(), "Drive 0 (A:)");
+        assert_eq!(app.format_drive_unit_short(), "A:");
+    }
+
+    #[test]
+    fn test_app_drive_unit_cycling_shugart_mode() {
+        let mut app = App::with_config(0, BusType::Shugart);
+        assert_eq!(app.drive_unit, 0);
+        assert_eq!(app.format_drive_unit_label(), "Unit 0 (DS0)");
+        assert_eq!(app.format_drive_unit_short(), "DS0");
+
+        app.toggle_drive_unit();
+        assert_eq!(app.drive_unit, 1);
+        assert_eq!(app.format_drive_unit_label(), "Unit 1 (DS1)");
+        assert_eq!(app.format_drive_unit_short(), "DS1");
+
+        app.toggle_drive_unit();
+        assert_eq!(app.drive_unit, 2);
+        assert_eq!(app.format_drive_unit_label(), "Unit 2 (DS2)");
+        assert_eq!(app.format_drive_unit_short(), "DS2");
+
+        app.toggle_drive_unit();
+        assert_eq!(app.drive_unit, 3);
+        assert_eq!(app.format_drive_unit_label(), "Unit 3 (DS3)");
+        assert_eq!(app.format_drive_unit_short(), "DS3");
+
+        app.toggle_drive_unit();
+        assert_eq!(app.drive_unit, 0);
+        assert_eq!(app.format_drive_unit_label(), "Unit 0 (DS0)");
+        assert_eq!(app.format_drive_unit_short(), "DS0");
+    }
+
+    #[test]
+    fn test_app_bus_type_fallback_on_switch() {
+        // Switching to PC with Unit 3 resets to 0
+        let mut app = App::with_config(3, BusType::Shugart);
+        assert_eq!(app.drive_unit, 3);
+        app.toggle_bus_type();
+        assert_eq!(app.bus_type(), BusType::IbmPc);
+        assert_eq!(app.drive_unit, 0);
+        assert_eq!(app.status.drive_unit, 0);
+
+        // Switching to PC with Unit 2 resets to 0
+        let mut app2 = App::with_config(2, BusType::Shugart);
+        assert_eq!(app2.drive_unit, 2);
+        app2.set_bus_type(BusType::IbmPc);
+        assert_eq!(app2.bus_type(), BusType::IbmPc);
+        assert_eq!(app2.drive_unit, 0);
+        assert_eq!(app2.status.drive_unit, 0);
+
+        // Switching to PC with Unit 1 stays 1
+        let mut app3 = App::with_config(1, BusType::Shugart);
+        assert_eq!(app3.drive_unit, 1);
+        app3.toggle_bus_type();
+        assert_eq!(app3.bus_type(), BusType::IbmPc);
+        assert_eq!(app3.drive_unit, 1);
+        assert_eq!(app3.status.drive_unit, 1);
+    }
+
+    #[test]
+    fn test_formatting_drive_labels_and_shortcuts() {
+        assert_eq!(format_drive_unit_label(BusType::IbmPc, 0), "Drive 0 (A:)");
+        assert_eq!(format_drive_unit_label(BusType::IbmPc, 1), "Drive 1 (B:)");
+        assert_eq!(format_drive_unit_label(BusType::Shugart, 0), "Unit 0 (DS0)");
+        assert_eq!(format_drive_unit_label(BusType::Shugart, 1), "Unit 1 (DS1)");
+        assert_eq!(format_drive_unit_label(BusType::Shugart, 2), "Unit 2 (DS2)");
+        assert_eq!(format_drive_unit_label(BusType::Shugart, 3), "Unit 3 (DS3)");
+
+        assert_eq!(format_drive_unit_short(BusType::IbmPc, 0), "A:");
+        assert_eq!(format_drive_unit_short(BusType::IbmPc, 1), "B:");
+        assert_eq!(format_drive_unit_short(BusType::Shugart, 0), "DS0");
+        assert_eq!(format_drive_unit_short(BusType::Shugart, 1), "DS1");
+        assert_eq!(format_drive_unit_short(BusType::Shugart, 2), "DS2");
+        assert_eq!(format_drive_unit_short(BusType::Shugart, 3), "DS3");
+
+        assert_eq!(format_unit_menu_shortcut(BusType::IbmPc), " U = Unit (A: / B:)");
+        assert_eq!(format_unit_menu_shortcut(BusType::Shugart), " U = Unit (DS0..DS3)");
     }
 }
 

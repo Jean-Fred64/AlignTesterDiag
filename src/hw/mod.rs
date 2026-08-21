@@ -3568,7 +3568,8 @@ pub fn handle_command(
             }
         }
         HwCmd::ToggleDriveUnit => {
-            let next_unit = if status.drive_unit == 0 { 1 } else { 0 };
+            let max_units = if status.bus_type == BusType::IbmPc { 2 } else { 4 };
+            let next_unit = (status.drive_unit + 1) % max_units;
             if status.motor_on {
                 let _ = gw_send_raw(port, &[0x06, 0x04, status.drive_unit, 0x00], 0);
             }
@@ -3619,15 +3620,16 @@ pub fn handle_command(
             } else {
                 HwActivity::Stopped
             };
+            let unit_lbl = crate::app::format_drive_unit_label(status.bus_type, status.drive_unit);
             status.log_msg = format!(
-                "Drive {} ({}) selected & Recalibrated Track 0",
-                status.drive_unit,
-                if status.drive_unit == 0 { "A:" } else { "B:" }
+                "{} selected & Recalibrated Track 0",
+                unit_lbl
             );
             let _ = tx_status.send(status.clone());
         }
         HwCmd::SelectUnit(unit) => {
-            let target_unit = unit.min(1);
+            let max_unit = if status.bus_type == BusType::IbmPc { 1 } else { 3 };
+            let target_unit = unit.min(max_unit);
             if target_unit != status.drive_unit {
                 if status.motor_on {
                     let _ = gw_send_raw(port, &[0x06, 0x04, status.drive_unit, 0x00], 0);
@@ -3680,9 +3682,10 @@ pub fn handle_command(
             } else {
                 HwActivity::Stopped
             };
+            let unit_lbl = crate::app::format_drive_unit_label(status.bus_type, status.drive_unit);
             status.log_msg = format!(
-                "Select Unit {} & Recalibrate Track 0",
-                status.drive_unit
+                "Select {} & Recalibrate Track 0",
+                unit_lbl
             );
             let _ = tx_status.send(status.clone());
         }
@@ -3698,6 +3701,10 @@ pub fn handle_command(
         }
         HwCmd::SetBusType(bus) => {
             status.bus_type = bus;
+            if status.bus_type == BusType::IbmPc && status.drive_unit > 1 {
+                status.drive_unit = 0;
+                status.unit_id = 0;
+            }
             let _ = gw_send_raw(port, &build_bus_type_packet(status.bus_type.opcode_val()), 0);
             ensure_unit_active(
                 port,
@@ -3711,6 +3718,10 @@ pub fn handle_command(
         }
         HwCmd::ToggleBusType => {
             status.bus_type = status.bus_type.toggle();
+            if status.bus_type == BusType::IbmPc && status.drive_unit > 1 {
+                status.drive_unit = 0;
+                status.unit_id = 0;
+            }
             let _ = gw_send_raw(port, &build_bus_type_packet(status.bus_type.opcode_val()), 0);
             ensure_unit_active(
                 port,
@@ -3737,7 +3748,8 @@ pub fn hw_thread(
     if let Some(ref p) = port_arg {
         status.port_name = p.clone();
     }
-    status.drive_unit = initial_drive_unit.min(1);
+    let max_unit = if initial_bus_type == BusType::IbmPc { 1 } else { 3 };
+    status.drive_unit = initial_drive_unit.min(max_unit);
     status.unit_id = status.drive_unit;
     status.bus_type = initial_bus_type;
     let mut rpm_sampler = RpmSampler::new(4);
@@ -5982,6 +5994,37 @@ mod tests {
 
         let cmd_set = HwCmd::SetBusType(BusType::Shugart);
         assert_eq!(cmd_set, HwCmd::SetBusType(BusType::Shugart));
+    }
+
+    #[test]
+    fn test_drive_unit_bus_type_dispatch() {
+        let mut status_pc = DriveStatus::default();
+        status_pc.bus_type = BusType::IbmPc;
+        status_pc.drive_unit = 0;
+        let max_units_pc = if status_pc.bus_type == BusType::IbmPc { 2 } else { 4 };
+        status_pc.drive_unit = (status_pc.drive_unit + 1) % max_units_pc;
+        assert_eq!(status_pc.drive_unit, 1);
+        status_pc.drive_unit = (status_pc.drive_unit + 1) % max_units_pc;
+        assert_eq!(status_pc.drive_unit, 0);
+
+        let mut status_shugart = DriveStatus::default();
+        status_shugart.bus_type = BusType::Shugart;
+        status_shugart.drive_unit = 0;
+        let max_units_sh = if status_shugart.bus_type == BusType::IbmPc { 2 } else { 4 };
+        for expected in [1, 2, 3, 0] {
+            status_shugart.drive_unit = (status_shugart.drive_unit + 1) % max_units_sh;
+            assert_eq!(status_shugart.drive_unit, expected);
+        }
+
+        // Test fallback on bus switch
+        status_shugart.drive_unit = 3;
+        status_shugart.bus_type = status_shugart.bus_type.toggle();
+        if status_shugart.bus_type == BusType::IbmPc && status_shugart.drive_unit > 1 {
+            status_shugart.drive_unit = 0;
+            status_shugart.unit_id = 0;
+        }
+        assert_eq!(status_shugart.bus_type, BusType::IbmPc);
+        assert_eq!(status_shugart.drive_unit, 0);
     }
 }
 
