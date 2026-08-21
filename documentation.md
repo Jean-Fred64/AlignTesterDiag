@@ -1,4 +1,4 @@
-# 💾 AlignTesterDiag — Comprehensive Technical Documentation & Architecture Manual 
+# 💾 AlignTesterDiag v0.2.0-alpha — Comprehensive Technical Documentation & Architecture Manual
 
 Welcome to the definitive technical documentation for **AlignTesterDiag**, an ultra-responsive, non-blocking terminal user interface (TUI) diagnostics and calibration platform for floppy disk drives connected via the **Greaseweazle USB flux controller**.
 
@@ -67,6 +67,8 @@ pub enum HwCmd {
     SetBeep(bool),
     Stop,
     PanicReset,
+    SetDiskFormat(DiskFormat),
+    CycleDiskFormat,
     Exit,
 }
 ```
@@ -344,7 +346,7 @@ The UI renders an intuitive centering gauge depicting deviation from the nominal
 The interface is divided into three primary functional zones: Top Header, Left Control Menu, and Right Diagnostic Panel.
 
 ```text
-┌─ AlignTesterDiag v0.1.1-alpha ─────────────────────────────────────────────────────────────────── [ Port: COM3 ] ──┐
+┌─ AlignTesterDiag v0.2.0-alpha ─────────────────────────────────────────────────────────────────── [ Port: COM3 ] ──┐
 │ A: 500k HD    T40  H0     Flags: [-wRz-]   WP: WRITE-ENABLED     18x512  27  84         ► [READING / ANALYZING /]        │
 │  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18                                                                   │
 │ 0....+....1....+....2....+....3....+....4....+....5....+....6....+....7....+....8...                                   │
@@ -411,7 +413,7 @@ All keyboard inputs are captured in raw mode via Crossterm non-blocking polling 
 | <kbd>B</kbd> / <kbd>b</kbd> | **Toggle Acoustic Variometer** | `Audio` & `UI` | Dispatches `HwCmd::ToggleBeep`. Toggles real-time acoustic alignment radar audio feedback. When enabled (`BEEP : ON (Radar)`), the sound worker thread synthesizes multi-tier pitch-modulated tones ($1500\text{ Hz} \le f \le 2200\text{ Hz}$ for nominal, $600\text{ Hz} \le f \le 1400\text{ Hz}$ for marginal, $250\text{ Hz} \le f \le 500\text{ Hz}$ continuous for severe, and $180\text{ Hz}$ pulsed buzz for cross-track mismatch). |
 | <kbd>V</kbd> / <kbd>v</kbd> | **Toggle Verbose Stream Mode** | `UI` & `Hardware I/O` | Dispatches `HwCmd::ToggleVerbose`. Switches stream display between Standard mode (compact graphical sector blocks `[ ■ ■ ■ ]`) and Verbose History mode (detailed microsecond cell timings, DPLL phase drift, instantaneous RPM per revolution, and individual error causes). |
 | <kbd>Q</kbd> / <kbd>q</kbd> / <kbd>X</kbd> / <kbd>x</kbd> / <kbd>Ctrl</kbd>+<kbd>C</kbd> | **Clean Application Exit** | `UI` & `Hardware I/O` | Dispatches `HwCmd::Exit`. Gracefully terminates background worker threads, shuts down spindle motor, deselects drive unit (`CMD_DESELECT`), tri-states interface bus (`CMD_SET_BUS_TYPE 0`), lowers DTR/RTS lines, restores terminal raw mode, and exits the application cleanly. |
-| <kbd>P</kbd> / <kbd>p</kbd> | **Format Parameters Configuration** | `UI` *(Reserved)* | Reserved menu shortcut for interactive format parameters adjustment (Interleave ratio, Gap 1/2/3/4 lengths, fill byte, sector count) in Roadmap Phase 3. |
+| <kbd>P</kbd> / <kbd>p</kbd> | **Cycle Machine Profile & Disk Format** | `UI` & `Hardware I/O` | Dispatches `HwCmd::CycleDiskFormat` and `Action::CycleDiskFormat`. Cycles active machine profile and sector decoding format: `AutoDetect` ➔ `IbmPc` ➔ `AmigaDos` ➔ `AtariSt` ➔ `AmstradCpcData` ➔ `AmstradCpcSystem`. Updates expected sector count, IDAM parsing rules, even/odd Paula bit-deinterleaving, or CPC sector ID offsets accordingly. |
 | <kbd>F</kbd> / <kbd>f</kbd> | **Low-Level Track Formatter** | `Hardware I/O` *(Reserved)* | Reserved shortcut for full-track low-level MFM formatting and bulk magnetic degaussing utility in Roadmap Phase 3. |
 | <kbd>I</kbd> / <kbd>i</kbd> | **Track Flux Imaging Utility** | `Hardware I/O` *(Reserved)* | Reserved shortcut for raw multi-revolution flux imaging and flux-level surface degradation heatmaps in Roadmap Phase 4. |
 | <kbd>S</kbd> / <kbd>s</kbd> | **Step Rate / Double-Step Toggle** | `Hardware I/O` *(Reserved)* | Reserved shortcut for 40-track / 80-track double-stepping toggle and custom stepper pulse timing configurations. |
@@ -421,7 +423,7 @@ All keyboard inputs are captured in raw mode via Crossterm non-blocking polling 
 
 ## 9. Automated Test & Verification Suite
 
-AlignTesterDiag includes an exhaustive **109-test automated unit test suite** built directly into Cargo.
+AlignTesterDiag includes an exhaustive **118-test automated unit test suite** built directly into Cargo (100% success rate).
 
 ### 9.1 Automated Unit Test Harness
 Run the full test suite using Cargo:
@@ -429,11 +431,12 @@ Run the full test suite using Cargo:
 cargo test
 ```
 
-The 109 unit tests provide complete coverage across all subsystems:
+The 118 unit tests provide complete coverage across all subsystems:
 - State transitions on `HwCmd` and `Action` dispatches (`src/app.rs`, `src/hw/mod.rs`).
 - DPLL boundary clamping, RMS phase jitter, and frequency adaptation (`src/hw/mod.rs`).
 - Multi-tier variometer pitch bounds ($1500 \text{ Hz} \le f \le 2200 \text{ Hz}$, $600 \text{ Hz} \le f \le 1400 \text{ Hz}$, $250 \text{ Hz} \le f \le 500 \text{ Hz}$) and mismatch warning tone (180 Hz) (`src/audio.rs`).
 - Spindle tachometer rolling average windowing, sub-microsecond interval conversion, and jitter calculations (`src/hw/mod.rs`).
+- Multi-system retro encoding & decoding engines (Amiga Paula even/odd bit deinterleaving & 32-bit XOR checksums, Atari ST 9/10/11 sectors & overtracks, Amstrad CPC DATA/SYSTEM sector ID formats) (`src/hw/mod.rs`, `src/app.rs`, `src/ui.rs`).
 - Dual-head "Both" mode consolidation, active pointer tracking, and mismatch handling (`src/app.rs`, `src/hw/mod.rs`, `src/ui.rs`).
 - TUI ribbon span coloring, phosphor decay interpolation, spinner animation, and dynamic text generation (`src/ui.rs`).
 - Hardware protocol packet encoders and opcode definitions (`src/hw/protocol.rs`).
@@ -447,7 +450,7 @@ AlignTesterDiag Roadmap
 ├── ✅ Phase 1: Core TUI, Greaseweazle Driver, DPLL Engine & Audio Variometer
 ├── 🔄 Phase 2: Mechanical Diagnostics (Endurance Seek, Random Seek, Head Cleaning)
 ├── 📅 Phase 3: Interactive Low-Level MFM Formatter (Interleave & Cylinder Skew)
-└── 📅 Phase 4: Retro Multi-System Encodings (Atari ST, Amiga Paula, Amstrad CPC)
+└── ✅ Phase 4: Retro Multi-System Encodings (Atari ST, Amiga Paula, Amstrad CPC)
 ```
 
 <details>

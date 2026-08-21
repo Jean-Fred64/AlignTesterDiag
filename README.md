@@ -1,6 +1,7 @@
 # 💾 AlignTesterDiag 🛠️
 
 [![Rust](https://img.shields.io/badge/rust-2021%20edition-orange.svg?logo=rust)](https://www.rust-lang.org)
+[![Version](https://img.shields.io/badge/version-v0.2.0--alpha-blue.svg)]()
 [![TUI](https://img.shields.io/badge/ui-Ratatui%20%2B%20Crossterm-blue.svg)](https://ratatui.rs)
 [![Hardware](https://img.shields.io/badge/hardware-Greaseweazle%20v4-green.svg)](https://github.com/keirf/greaseweazle)
 [![Architecture](https://img.shields.io/badge/concurrency-100%25%20Non--Blocking-brightgreen.svg)]()
@@ -13,8 +14,12 @@
 ## 🌟 Key Highlights
 
 - ⚡ **100% Non-Blocking Architecture (~60 Hz TUI):** Strict decoupling between the interactive Ratatui/Crossterm rendering loop, the USB hardware acquisition worker thread, and a dedicated real-time audio thread via lock-free `crossbeam-channel` queues.
+- 🕹️ **Multi-System Retro Platform Support (IBM PC, Amiga, Atari ST, Amstrad CPC):**
+  - **Amiga (Paula MFM):** Décodage bit-level *even/odd*, checksums 32-bit XOR, 11 secteurs/piste en DD (880 Ko) et 22 secteurs en HD (1.76 Mo).
+  - **Atari ST (WD1772):** Support des formats étendus 9, 10 et 11 secteurs (jusqu'à 880 Ko) et pistes 80 à 82.
+  - **Amstrad CPC (µPD765 / 3"):** Formats DATA (`0xC1..0xC9`), SYSTEM (`0x41..0x49`) et CPM.
 - 🎯 **Real-Time Mechanical Alignment Radar:** Continuous on-track vs. off-track sector validation with live percentage gauge calculation, detecting misaligned head carriages, tracking errors, and invalid track IDs.
-- 🔊 **Dynamic Pitch Acoustic Variometer:** Auditory feedback inspired by glider variometers. Continuously modulates multi-tier audio frequency (**1500 Hz – 2200 Hz** for nominal alignment, **600 Hz – 1400 Hz** for marginal tracking, **250 Hz – 500 Hz** continuous tone for severe misalignment), with instantaneous **180 Hz pulsed warning buzz** on cross-track mismatch and **150 Hz hum** on zero decoded sectors.
+- 🔊 **Dynamic Pitch Acoustic Variometer:** Auditory feedback inspired by glider variometers. Continuously modulates multi-tier audio frequency (**1500 Hz – 2200 Hz** for nominal alignment $\ge 95\%$, **600 Hz – 1400 Hz** for marginal tracking $70\text{--}94\%$, **250 Hz – 500 Hz** continuous tone for severe misalignment $< 70\%$), with instantaneous **180 Hz pulsed warning buzz** on cross-track mismatch and **150 Hz hum** on zero decoded sectors.
 - ⏱️ **72 MHz Spindle Tachometer & Live RPM Jitter Gauge:** Sub-microsecond revolution interval timing extracted directly from hardware index pulses. Computes instant RPM, 10-revolution rolling average, peak-to-peak jitter ($\Delta\text{RPM}$, $\pm\Delta\%$), and displays a 21-character visual centering gauge.
 - 🔄 **Dual-Head ("Both" Mode) Acquisition:** Alternating Head 0 & Head 1 acquisition with automated cross-track divergence detection ($T_{\text{H0}} \ne T_{\text{H1}}$) and consolidated dual-head health scoring.
 - 🔌 **Universal Drive Support (26-Pin FFC & 34-Pin Shugart/PC):** Motor-gated seek with 15 ms electronic wake-up delay (`STEPPER_WAKEUP_DELAY_MS`) to eliminate stepper motor driver lockups on slim laptop mechanisms (e.g. TEAC FD-05HG). Dynamic drive selection (`Drive 0` / `Drive 1`).
@@ -83,10 +88,11 @@ cargo run --release -- /dev/ttyACM0 --drive 1
 
 | Key | Action | Description |
 |:---:|:---|:---|
-| <kbd>?</kbd> / <kbd>F1</kbd> | **Help Modal** | Toggle full-screen interactive help & shortcut reference overlay |
+| <kbd>?</kbd> / <kbd>F1</kbd> | **Help Modal** | Open interactive help modal overlay |
 | <kbd>A</kbd> | **Analyze** | Start continuous real-time track alignment analysis |
 | <kbd>D</kbd> | **Read Data** | Read and test sector CRC integrity across the cylinder |
-| <kbd>L</kbd> | **Live RPM** | Launch 72 MHz high-precision spindle tachometer mode |
+| <kbd>L</kbd> | **Live RPM** | Live RPM tachometer & jitter stability test |
+| <kbd>P</kbd> | **Format Profile** | Cycle machine profile & format (Auto, PC, Amiga, Atari, CPC) |
 | <kbd>B</kbd> | **Beep (Audio Radar)** | Toggle acoustic pitch variometer on / off |
 | <kbd>H</kbd> | **Toggle Head** | Cycle head selection: `Head 0` ➔ `Head 1` ➔ `BOTH (0+1)` |
 | <kbd>U</kbd> | **Toggle Drive Unit** | Switch active drive: `Drive 0 (A:)` ➔ `Drive 1 (B:)` |
