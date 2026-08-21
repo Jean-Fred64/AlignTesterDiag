@@ -40,6 +40,114 @@ pub enum DriveReadStatus {
     Aborted,
 }
 
+/// Multi-format retro disk profile
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DiskFormat {
+    #[default]
+    AutoDetect,
+    IbmPc,
+    AmigaDos,
+    AtariSt,
+    AmstradCpcData,
+    AmstradCpcSystem,
+}
+
+impl DiskFormat {
+    pub fn name(&self) -> &'static str {
+        match self {
+            DiskFormat::AutoDetect => "Auto-Detect",
+            DiskFormat::IbmPc => "IBM PC (FAT)",
+            DiskFormat::AmigaDos => "AmigaDOS (Paula)",
+            DiskFormat::AtariSt => "Atari ST (WD1772)",
+            DiskFormat::AmstradCpcData => "Amstrad CPC (DATA)",
+            DiskFormat::AmstradCpcSystem => "Amstrad CPC (SYSTEM)",
+        }
+    }
+
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            DiskFormat::AutoDetect => "AUTO",
+            DiskFormat::IbmPc => "PC",
+            DiskFormat::AmigaDos => "AMIGA",
+            DiskFormat::AtariSt => "ATARI",
+            DiskFormat::AmstradCpcData => "CPC-DATA",
+            DiskFormat::AmstradCpcSystem => "CPC-SYS",
+        }
+    }
+
+    pub fn cycle_next(&self) -> Self {
+        match self {
+            DiskFormat::AutoDetect => DiskFormat::IbmPc,
+            DiskFormat::IbmPc => DiskFormat::AmigaDos,
+            DiskFormat::AmigaDos => DiskFormat::AtariSt,
+            DiskFormat::AtariSt => DiskFormat::AmstradCpcData,
+            DiskFormat::AmstradCpcData => DiskFormat::AmstradCpcSystem,
+            DiskFormat::AmstradCpcSystem => DiskFormat::AutoDetect,
+        }
+    }
+
+    pub fn expected_sector_count(&self, bitrate: u16, detected_count: u8) -> u8 {
+        match self {
+            DiskFormat::AmigaDos => {
+                if bitrate == 500 {
+                    22
+                } else {
+                    11
+                }
+            }
+            DiskFormat::AmstradCpcData => {
+                if detected_count >= 10 {
+                    10
+                } else {
+                    9
+                }
+            }
+            DiskFormat::AmstradCpcSystem => 9,
+            DiskFormat::AtariSt => {
+                if detected_count >= 11 {
+                    11
+                } else if detected_count == 10 {
+                    10
+                } else {
+                    9
+                }
+            }
+            DiskFormat::IbmPc => {
+                if bitrate == 500 {
+                    if detected_count == 15 {
+                        15
+                    } else {
+                        18
+                    }
+                } else {
+                    9
+                }
+            }
+            DiskFormat::AutoDetect => {
+                if bitrate == 500 {
+                    if detected_count == 15 {
+                        15
+                    } else if detected_count == 22 {
+                        22
+                    } else if detected_count > 18 {
+                        detected_count
+                    } else {
+                        18
+                    }
+                } else if detected_count == 11 {
+                    11
+                } else if detected_count == 10 {
+                    10
+                } else if detected_count > 0 {
+                    detected_count
+                } else {
+                    9
+                }
+            }
+        }
+    }
+}
+
 /// Minimal electronic head switch settle time (1 ms) for SIDE1 selection.
 pub const HEAD_SWITCH_SETTLE_MS: u64 = 1;
 /// Stepper motor driver electronic wake-up delay (15 ms) for 26-pin FFC drives (e.g. TEAC FD-05HG).
@@ -192,6 +300,7 @@ pub struct DriveStatus {
     pub last_pass_h1: Option<DiagnosticPass>,
     pub read_status: DriveReadStatus,
     pub port_name: String,
+    pub disk_format: DiskFormat,
 }
 
 impl Default for DriveStatus {
@@ -239,6 +348,7 @@ impl Default for DriveStatus {
             last_pass_h1: None,
             read_status: DriveReadStatus::Ok,
             port_name: String::new(),
+            disk_format: DiskFormat::AutoDetect,
         }
     }
 }
@@ -272,6 +382,8 @@ pub enum HwCmd {
     SetBeep(bool),
     Stop,
     PanicReset,
+    SetDiskFormat(DiskFormat),
+    CycleDiskFormat,
     Exit,
 }
 
@@ -1047,6 +1159,307 @@ pub fn calculate_jitter_pct(index_timestamps: &[u32]) -> Option<f64> {
     None
 }
 
+/// Decodes a 32-bit Amiga longword from separate even and odd MFM 32-bit words (Paula MFM split)
+#[inline(always)]
+pub fn decode_amiga_longword(even_mfm: u32, odd_mfm: u32) -> u32 {
+    ((even_mfm & 0x5555_5555) << 1) | (odd_mfm & 0x5555_5555)
+}
+
+/// Computes Amiga 32-bit XOR checksum over an array of 32-bit longwords, masked to 0x55555555 (Paula format)
+#[inline]
+pub fn calculate_amiga_checksum(longwords: &[u32]) -> u32 {
+    let mut chk = 0u32;
+    for &lw in longwords {
+        chk ^= lw;
+    }
+    chk & 0x5555_5555
+}
+
+/// Helper to extract a 32-bit word from a bit slice (MSB first)
+#[inline(always)]
+fn extract_u32_from_bits(bits: &[bool], start: usize) -> u32 {
+    let mut w = 0u32;
+    for k in 0..32 {
+        w = (w << 1) | (if bits[start + k] { 1 } else { 0 });
+    }
+    w
+}
+
+/// Decodes Amiga Paula MFM bitstream into DecodedSector records
+pub fn decode_amiga_sectors_from_bits(bits: &[bool]) -> Vec<DecodedSector> {
+    let mut sectors = Vec::with_capacity(22);
+    decode_amiga_sectors_into(bits, &mut sectors);
+    sectors
+}
+
+/// Decodes Amiga Paula MFM bitstream into a preallocated DecodedSector vector
+pub fn decode_amiga_sectors_into(bits: &[bool], sectors: &mut Vec<DecodedSector>) {
+    // Amiga sync word: 0x44894489 (32 bits)
+    // 0100 0100 1000 1001 0100 0100 1000 1001
+    const SYNC_32: [bool; 32] = [
+        false, true, false, false, false, true, false, false,
+        true, false, false, false, true, false, false, true,
+        false, true, false, false, false, true, false, false,
+        true, false, false, false, true, false, false, true,
+    ];
+
+    let mut i = 0;
+    // Total bits per sector after sync:
+    // info: 2 * 32 = 64 bits
+    // label: 8 * 32 = 256 bits
+    // hdr_chk: 2 * 32 = 64 bits
+    // data_chk: 2 * 32 = 64 bits
+    // data: 256 * 32 = 8192 bits
+    // Total = 8640 bits
+    const SECTOR_BITS_AFTER_SYNC: usize = 64 + 256 + 64 + 64 + 8192;
+
+    while i + 32 + SECTOR_BITS_AFTER_SYNC <= bits.len() {
+        if bits[i..i + 32] == SYNC_32 {
+            let offset = i + 32;
+
+            // 1. Info: 2 words (even, odd)
+            let even_info = extract_u32_from_bits(bits, offset);
+            let odd_info = extract_u32_from_bits(bits, offset + 32);
+            let info = decode_amiga_longword(even_info, odd_info);
+
+            let format_byte = (info >> 24) as u8;
+            let track_num = ((info >> 16) & 0xFF) as u8;
+            let sec_id = ((info >> 8) & 0xFF) as u8;
+            let _secs_to_gap = (info & 0xFF) as u8;
+
+            let cyl = track_num / 2;
+            let head = track_num % 2;
+
+            // 2. Label: 8 words (4 even, 4 odd)
+            let mut even_label = [0u32; 4];
+            let mut odd_label = [0u32; 4];
+            for l_idx in 0..4 {
+                even_label[l_idx] = extract_u32_from_bits(bits, offset + 64 + l_idx * 32);
+                odd_label[l_idx] = extract_u32_from_bits(bits, offset + 64 + 128 + l_idx * 32);
+            }
+
+            // 3. Header checksum: 2 words
+            let even_hdr_chk = extract_u32_from_bits(bits, offset + 320);
+            let odd_hdr_chk = extract_u32_from_bits(bits, offset + 352);
+
+            // Compute header checksum: XOR 32-bit over MFM components (info + sector labels) masked to 0x55555555
+            let calc_hdr_chk = calculate_amiga_checksum(&[
+                even_info,
+                odd_info,
+                even_label[0],
+                even_label[1],
+                even_label[2],
+                even_label[3],
+                odd_label[0],
+                odd_label[1],
+                odd_label[2],
+                odd_label[3],
+            ]);
+            let stored_hdr_chk = calculate_amiga_checksum(&[even_hdr_chk, odd_hdr_chk]);
+            let hdr_ok = (calc_hdr_chk == stored_hdr_chk)
+                && (format_byte == 0xFF || format_byte == 0x00 || format_byte == 0x01);
+
+            // 4. Data checksum: 2 words
+            let even_data_chk = extract_u32_from_bits(bits, offset + 384);
+            let odd_data_chk = extract_u32_from_bits(bits, offset + 416);
+
+            // 5. Data: 256 words (128 even, 128 odd)
+            let data_start = offset + 448;
+            let mut data_mfm = [0u32; 256];
+            for d_idx in 0..128 {
+                data_mfm[d_idx] = extract_u32_from_bits(bits, data_start + d_idx * 32);
+                data_mfm[128 + d_idx] = extract_u32_from_bits(bits, data_start + 128 * 32 + d_idx * 32);
+            }
+
+            let calc_data_chk = calculate_amiga_checksum(&data_mfm);
+            let stored_data_chk = calculate_amiga_checksum(&[even_data_chk, odd_data_chk]);
+            let data_ok = calc_data_chk == stored_data_chk;
+
+            let status = if !hdr_ok {
+                SectorStatus::CrcId
+            } else if !data_ok {
+                SectorStatus::CrcData
+            } else {
+                SectorStatus::Ok
+            };
+
+            let crc_ok = matches!(status, SectorStatus::Ok);
+
+            // Amiga DD sectors are 0..10 (or up to 21 for HD)
+            if sec_id <= 21 {
+                if let Some(existing) = sectors.iter_mut().find(|s| s.sec_id == sec_id && s.cyl == cyl) {
+                    if !existing.crc_ok && crc_ok {
+                        *existing = DecodedSector {
+                            cyl,
+                            head,
+                            sec_id,
+                            size_code: 2, // 512 bytes
+                            crc_ok,
+                            status,
+                        };
+                    }
+                } else {
+                    sectors.push(DecodedSector {
+                        cyl,
+                        head,
+                        sec_id,
+                        size_code: 2, // 512 bytes
+                        crc_ok,
+                        status,
+                    });
+                }
+            }
+
+            i += 32 + SECTOR_BITS_AFTER_SYNC;
+            continue;
+        }
+        i += 1;
+    }
+}
+
+pub fn format_sector_id_str(id: u8) -> String {
+    if id >= 0x40 {
+        format!("{:02X}", id)
+    } else {
+        id.to_string()
+    }
+}
+
+pub fn get_format_expected_sector_ids(
+    format: DiskFormat,
+    bitrate: u16,
+    detected_sectors: &[DecodedSector],
+) -> Vec<u8> {
+    match format {
+        DiskFormat::AmstradCpcData => {
+            let max_sec = detected_sectors.iter().map(|s| s.sec_id).max().unwrap_or(0xC9);
+            let count = if max_sec >= 0xCA { 10 } else { 9 };
+            (0xC1..0xC1 + count).collect()
+        }
+        DiskFormat::AmstradCpcSystem => {
+            let max_sec = detected_sectors.iter().map(|s| s.sec_id).max().unwrap_or(0x49);
+            let count = if max_sec >= 0x4A { 10 } else { 9 };
+            (0x41..0x41 + count).collect()
+        }
+        DiskFormat::AmigaDos => {
+            let count = if bitrate == 500 { 22 } else { 11 };
+            (0..count).collect()
+        }
+        DiskFormat::AtariSt => {
+            let max_id = detected_sectors.iter().map(|s| s.sec_id).max().unwrap_or(9);
+            let count = if max_id >= 11 || detected_sectors.len() >= 11 {
+                11
+            } else if max_id == 10 || detected_sectors.len() == 10 {
+                10
+            } else {
+                9
+            };
+            (1..=count).collect()
+        }
+        DiskFormat::IbmPc => {
+            let count = if bitrate == 500 {
+                let max_id = detected_sectors.iter().map(|s| s.sec_id).max().unwrap_or(18);
+                if max_id == 15 || detected_sectors.len() == 15 {
+                    15
+                } else if detected_sectors.len() > 18 {
+                    detected_sectors.len() as u8
+                } else {
+                    18
+                }
+            } else if detected_sectors.len() > 9 {
+                detected_sectors.len() as u8
+            } else {
+                9
+            };
+            (1..=count).collect()
+        }
+        DiskFormat::AutoDetect => {
+            if detected_sectors.iter().any(|s| s.sec_id >= 0xC1 && s.sec_id <= 0xCA) {
+                let max_sec = detected_sectors.iter().map(|s| s.sec_id).max().unwrap_or(0xC9);
+                let count = if max_sec >= 0xCA { 10 } else { 9 };
+                (0xC1..0xC1 + count).collect()
+            } else if detected_sectors.iter().any(|s| s.sec_id >= 0x41 && s.sec_id <= 0x4A) {
+                let max_sec = detected_sectors.iter().map(|s| s.sec_id).max().unwrap_or(0x49);
+                let count = if max_sec >= 0x4A { 10 } else { 9 };
+                (0x41..0x41 + count).collect()
+            } else if detected_sectors.iter().any(|s| s.sec_id == 0) {
+                let count = if bitrate == 500 { 22 } else { 11 };
+                (0..count).collect()
+            } else if bitrate == 250 {
+                let count = if detected_sectors.len() > 9 {
+                    detected_sectors.len() as u8
+                } else {
+                    9
+                };
+                (1..=count).collect()
+            } else if bitrate == 500 {
+                let max_id = detected_sectors.iter().map(|s| s.sec_id).max().unwrap_or(18);
+                let count = if max_id == 15 || detected_sectors.len() == 15 {
+                    15
+                } else if detected_sectors.len() > 18 {
+                    detected_sectors.len() as u8
+                } else {
+                    18
+                };
+                (1..=count).collect()
+            } else {
+                let count = if !detected_sectors.is_empty() {
+                    detected_sectors.len() as u8
+                } else {
+                    18
+                };
+                (1..=count).collect()
+            }
+        }
+    }
+}
+
+pub fn get_status_expected_sector_ids(status: &DriveStatus) -> Vec<u8> {
+    let has_cpc_data = status.sectors.iter().any(|s| s.sec_id >= 0xC1 && s.sec_id <= 0xCA)
+        || status.disk_format == DiskFormat::AmstradCpcData;
+    let has_cpc_sys = status.sectors.iter().any(|s| s.sec_id >= 0x41 && s.sec_id <= 0x4A)
+        || status.disk_format == DiskFormat::AmstradCpcSystem;
+    let is_amiga = status.disk_format == DiskFormat::AmigaDos
+        || status.sectors.iter().any(|s| s.sec_id == 0);
+
+    if has_cpc_data {
+        let max_sec = status.sectors.iter().map(|s| s.sec_id).max().unwrap_or(0xC9);
+        let count = if max_sec >= 0xCA { 10 } else { 9 };
+        (0xC1..0xC1 + count).collect()
+    } else if has_cpc_sys {
+        let max_sec = status.sectors.iter().map(|s| s.sec_id).max().unwrap_or(0x49);
+        let count = if max_sec >= 0x4A { 10 } else { 9 };
+        (0x41..0x41 + count).collect()
+    } else if is_amiga {
+        let count = if status.bitrate == 500 { 22 } else { 11 };
+        (0..count).collect()
+    } else if status.disk_format == DiskFormat::AtariSt {
+        let max_id = status
+            .sectors
+            .iter()
+            .map(|s| s.sec_id)
+            .max()
+            .unwrap_or(status.sector_count.max(9));
+        let count = if max_id >= 11 {
+            11
+        } else if max_id == 10 {
+            10
+        } else {
+            9
+        };
+        (1..=count).collect()
+    } else {
+        let count = if status.sector_count > 0 {
+            status.sector_count
+        } else if status.bitrate == 500 {
+            18
+        } else {
+            9
+        };
+        (1..=count).collect()
+    }
+}
+
 pub fn decode_idam_sectors_from_bits(bits: &[bool]) -> Vec<DecodedSector> {
     let mut sectors = Vec::new();
     let sync_48 = [
@@ -1137,7 +1550,11 @@ pub fn decode_idam_sectors_from_bits(bits: &[bool]) -> Vec<DecodedSector> {
 
                 let final_crc_ok = matches!(status, SectorStatus::Ok | SectorStatus::DelDam);
 
-                if (1..=36).contains(&sec_id)
+                let valid_sec_id = (0..=36).contains(&sec_id)
+                    || (0x41..=0x4A).contains(&sec_id)
+                    || (0xC1..=0xCA).contains(&sec_id);
+
+                if valid_sec_id
                     && size_code <= 4
                     && !sectors
                         .iter()
@@ -1159,6 +1576,98 @@ pub fn decode_idam_sectors_from_bits(bits: &[bool]) -> Vec<DecodedSector> {
         i += 1;
     }
     sectors
+}
+
+/// Unified decoder pipeline that decodes raw flux intervals based on active or detected DiskFormat
+pub fn decode_track_flux(
+    flux: &[u32],
+    format: DiskFormat,
+) -> (DiskFormat, u16, f64, Vec<DecodedSector>) {
+    if flux.is_empty() {
+        return (format, 500, 72.0, Vec::new());
+    }
+
+    match format {
+        DiskFormat::AmigaDos => {
+            let bits_dd = pll_flux_to_mfm_bits(flux, 144.0);
+            let sectors_dd = decode_amiga_sectors_from_bits(&bits_dd);
+            if !sectors_dd.is_empty() {
+                return (DiskFormat::AmigaDos, 250, 144.0, sectors_dd);
+            }
+            let bits_hd = pll_flux_to_mfm_bits(flux, 72.0);
+            let sectors_hd = decode_amiga_sectors_from_bits(&bits_hd);
+            if !sectors_hd.is_empty() {
+                return (DiskFormat::AmigaDos, 500, 72.0, sectors_hd);
+            }
+            (DiskFormat::AmigaDos, 250, 144.0, Vec::new())
+        }
+        DiskFormat::AtariSt
+        | DiskFormat::AmstradCpcData
+        | DiskFormat::AmstradCpcSystem
+        | DiskFormat::IbmPc => {
+            let bits_dd = pll_flux_to_mfm_bits(flux, 144.0);
+            let sectors_dd = decode_idam_sectors_from_bits(&bits_dd);
+            if !sectors_dd.is_empty() {
+                return (format, 250, 144.0, sectors_dd);
+            }
+            let bits_hd = pll_flux_to_mfm_bits(flux, 72.0);
+            let sectors_hd = decode_idam_sectors_from_bits(&bits_hd);
+            if !sectors_hd.is_empty() {
+                return (format, 500, 72.0, sectors_hd);
+            }
+            (
+                format,
+                if format == DiskFormat::IbmPc { 500 } else { 250 },
+                144.0,
+                Vec::new(),
+            )
+        }
+        DiskFormat::AutoDetect => {
+            // 1. Try DD 250k IBM MFM
+            let bits_dd = pll_flux_to_mfm_bits(flux, 144.0);
+            let sectors_ibm_dd = decode_idam_sectors_from_bits(&bits_dd);
+            if !sectors_ibm_dd.is_empty() {
+                let detected = if sectors_ibm_dd
+                    .iter()
+                    .any(|s| s.sec_id >= 0xC1 && s.sec_id <= 0xCA)
+                {
+                    DiskFormat::AmstradCpcData
+                } else if sectors_ibm_dd
+                    .iter()
+                    .any(|s| s.sec_id >= 0x41 && s.sec_id <= 0x4A)
+                {
+                    DiskFormat::AmstradCpcSystem
+                } else if sectors_ibm_dd.len() >= 10 || sectors_ibm_dd.iter().any(|s| s.sec_id >= 10)
+                {
+                    DiskFormat::AtariSt
+                } else {
+                    DiskFormat::IbmPc
+                };
+                return (detected, 250, 144.0, sectors_ibm_dd);
+            }
+
+            // 2. Try DD 250k Amiga Paula MFM
+            let sectors_amiga_dd = decode_amiga_sectors_from_bits(&bits_dd);
+            if !sectors_amiga_dd.is_empty() {
+                return (DiskFormat::AmigaDos, 250, 144.0, sectors_amiga_dd);
+            }
+
+            // 3. Try HD 500k IBM MFM
+            let bits_hd = pll_flux_to_mfm_bits(flux, 72.0);
+            let sectors_ibm_hd = decode_idam_sectors_from_bits(&bits_hd);
+            if !sectors_ibm_hd.is_empty() {
+                return (DiskFormat::IbmPc, 500, 72.0, sectors_ibm_hd);
+            }
+
+            // 4. Try HD 500k Amiga Paula MFM
+            let sectors_amiga_hd = decode_amiga_sectors_from_bits(&bits_hd);
+            if !sectors_amiga_hd.is_empty() {
+                return (DiskFormat::AmigaDos, 500, 72.0, sectors_amiga_hd);
+            }
+
+            (DiskFormat::AutoDetect, 500, 72.0, Vec::new())
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -1307,7 +1816,11 @@ pub fn update_revolution_progress(
     last_sector: Option<&DecodedSector>,
 ) {
     if let Some(sec) = last_sector {
-        if !status.sectors.iter().any(|s| s.sec_id == sec.sec_id && s.track == sec.cyl) {
+        if !status
+            .sectors
+            .iter()
+            .any(|s| s.sec_id == sec.sec_id && s.track == sec.cyl)
+        {
             status.sectors.push(SectorInfo {
                 track: sec.cyl,
                 sec_id: sec.sec_id,
@@ -1390,9 +1903,15 @@ fn read_and_decode_track_diagnostic(
                 let idx_end = decoded_gw.index_timestamps[1];
                 let delta = (idx_end.wrapping_sub(idx_start)) & 0x0FFF_FFFF;
                 let rev_ms = (delta as f64 / sample_rate) * 1000.0;
-                let rpm = if rev_ms > 0.0 { 60_000.0 / rev_ms } else { 0.0 };
+                let rpm = if rev_ms > 0.0 {
+                    60_000.0 / rev_ms
+                } else {
+                    0.0
+                };
                 (rev_ms, if rpm > 0.0 { Some(rpm) } else { None })
-            } else if let Some((rpm, delta_ticks)) = calculate_rpm_from_mfm_headers(&decoded_gw.flux) {
+            } else if let Some((rpm, delta_ticks)) =
+                calculate_rpm_from_mfm_headers(&decoded_gw.flux)
+            {
                 let rev_ms = (delta_ticks as f64 / sample_rate) * 1000.0;
                 (rev_ms, Some(rpm as f64))
             } else {
@@ -1401,7 +1920,10 @@ fn read_and_decode_track_diagnostic(
 
             let jitter_pct = calculate_jitter_pct(&decoded_gw.index_timestamps);
 
-            if dat.len() < 100 || decoded_gw.flux.len() < 100 || decoded_gw.index_timestamps.is_empty() {
+            if dat.len() < 100
+                || decoded_gw.flux.len() < 100
+                || decoded_gw.index_timestamps.is_empty()
+            {
                 start_revolution_progress(status, tx_status, expected_cyl, status.head, 500, 18);
                 return TrackAnalysisResult {
                     has_disk: false,
@@ -1428,50 +1950,22 @@ fn read_and_decode_track_diagnostic(
 
             let flux = decoded_gw.flux;
 
-            // Decode DD 250k (144.0 ticks) then fallback HD 500k (72.0 ticks)
-            let bits_dd = pll_flux_to_mfm_bits(&flux, 144.0);
-            let mut sectors = decode_idam_sectors_from_bits(&bits_dd);
-            let mut bitrate = 250;
-            let mut clock = 144.0;
-            let mut active_bits = &bits_dd;
-
-            let bits_hd;
-            if sectors.is_empty() {
-                bits_hd = pll_flux_to_mfm_bits(&flux, 72.0);
-                let sec_hd = decode_idam_sectors_from_bits(&bits_hd);
-                if !sec_hd.is_empty() {
-                    sectors = sec_hd;
-                    bitrate = 500;
-                    clock = 72.0;
-                    active_bits = &bits_hd;
-                }
+            // Unified fast-path decode pipeline based on format profile
+            let (detected_format, bitrate, clock, sectors) =
+                decode_track_flux(&flux, status.disk_format);
+            if status.disk_format == DiskFormat::AutoDetect
+                && detected_format != DiskFormat::AutoDetect
+            {
+                status.disk_format = detected_format;
             }
 
+            let expected_ids = get_format_expected_sector_ids(status.disk_format, bitrate, &sectors);
+            let expected_count = expected_ids.len() as u8;
             let sectors_known = !sectors.is_empty();
             let sector_count = if sectors_known {
-                if bitrate == 500 {
-                    if sectors.len() > 9 {
-                        sectors.len() as u8
-                    } else {
-                        18
-                    }
-                } else if !sectors.is_empty() {
-                    sectors.len() as u8
-                } else {
-                    9
-                }
+                sectors.len() as u8
             } else {
                 0
-            };
-
-            let expected_count = if bitrate == 250 {
-                if sector_count > 9 { sector_count } else { 9 }
-            } else if sector_count == 15 || (sectors.iter().map(|s| s.sec_id).max().unwrap_or(0) == 15 && sector_count <= 15) {
-                15
-            } else if sector_count > 18 {
-                sector_count
-            } else {
-                18
             };
 
             // 1. Initial state at start of revolution (0/expected_count)
@@ -1500,17 +1994,33 @@ fn read_and_decode_track_diagnostic(
                 }
             }
 
-            let sync_48 = [
-                false, true, false, false, false, true, false, false, true, false, false, false, true,
-                false, false, true, false, true, false, false, false, true, false, false, true, false,
-                false, false, true, false, false, true, false, true, false, false, false, true, false,
-                false, true, false, false, false, true, false, false, true,
-            ];
-            let first_idam_bit = active_bits.windows(48).position(|w| w == sync_48);
-            let gap0_us = first_idam_bit.and_then(|b_idx| {
-                let raw_us = (b_idx as f64 * clock / 72.0).round() as u32;
-                get_valid_gap0(bitrate, raw_us)
-            });
+            let bits = pll_flux_to_mfm_bits(&flux, clock);
+            let gap0_us = if status.disk_format == DiskFormat::AmigaDos {
+                const SYNC_32: [bool; 32] = [
+                    false, true, false, false, false, true, false, false,
+                    true, false, false, false, true, false, false, true,
+                    false, true, false, false, false, true, false, false,
+                    true, false, false, false, true, false, false, true,
+                ];
+                let first_sync_bit = bits.windows(32).position(|w| w == SYNC_32);
+                first_sync_bit.and_then(|b_idx| {
+                    let raw_us = (b_idx as f64 * clock / 72.0).round() as u32;
+                    get_valid_gap0(bitrate, raw_us)
+                })
+            } else {
+                let sync_48 = [
+                    false, true, false, false, false, true, false, false, true, false, false,
+                    false, true, false, false, true, false, true, false, false, false, true,
+                    false, false, true, false, false, false, true, false, false, true, false,
+                    true, false, false, false, true, false, false, true, false, false, false,
+                    true, false, false, true,
+                ];
+                let first_idam_bit = bits.windows(48).position(|w| w == sync_48);
+                first_idam_bit.and_then(|b_idx| {
+                    let raw_us = (b_idx as f64 * clock / 72.0).round() as u32;
+                    get_valid_gap0(bitrate, raw_us)
+                })
+            };
 
             let has_crc_errs = sectors.iter().any(|s| !s.crc_ok);
             let pll_quality_pct = if sectors_known {
@@ -1624,27 +2134,54 @@ pub fn build_verbose_pass_line(
         );
     }
 
-    let expected_count = if diag.bitrate == 250 {
-        if diag.sector_count > 9 { diag.sector_count } else { 9 }
-    } else if diag.bitrate == 500 {
-        if diag.sector_count == 15 || (diag.sectors.iter().map(|s| s.sec_id).max().unwrap_or(0) == 15 && diag.sector_count <= 15) {
-            15
-        } else if diag.sector_count > 18 {
-            diag.sector_count
-        } else {
-            18
-        }
-    } else if diag.sector_count > 0 {
-        if diag.sector_count <= 9 {
-            9
-        } else if diag.sector_count <= 15 {
-            15
-        } else {
-            18
-        }
+    let has_cpc_data = diag.sectors.iter().any(|s| s.sec_id >= 0xC1 && s.sec_id <= 0xCA);
+    let has_cpc_sys = diag.sectors.iter().any(|s| s.sec_id >= 0x41 && s.sec_id <= 0x4A);
+    let is_amiga_zero = diag.sectors.iter().any(|s| s.sec_id == 0);
+
+    let expected_ids: Vec<u8> = if has_cpc_data {
+        let max_sec = diag.sectors.iter().map(|s| s.sec_id).max().unwrap_or(0xC9);
+        let count = if max_sec >= 0xCA { 10 } else { 9 };
+        (0xC1..0xC1 + count).collect()
+    } else if has_cpc_sys {
+        let max_sec = diag.sectors.iter().map(|s| s.sec_id).max().unwrap_or(0x49);
+        let count = if max_sec >= 0x4A { 10 } else { 9 };
+        (0x41..0x41 + count).collect()
+    } else if is_amiga_zero {
+        let count = if diag.bitrate == 500 { 22 } else { 11 };
+        (0..count).collect()
     } else {
-        18
+        let expected_count = if diag.bitrate == 250 {
+            if diag.sector_count > 9 {
+                diag.sector_count
+            } else {
+                9
+            }
+        } else if diag.bitrate == 500 {
+            if diag.sector_count == 15
+                || (diag.sectors.iter().map(|s| s.sec_id).max().unwrap_or(0) == 15
+                    && diag.sector_count <= 15)
+            {
+                15
+            } else if diag.sector_count > 18 {
+                diag.sector_count
+            } else {
+                18
+            }
+        } else if diag.sector_count > 0 {
+            if diag.sector_count <= 9 {
+                9
+            } else if diag.sector_count <= 15 {
+                15
+            } else {
+                18
+            }
+        } else {
+            18
+        };
+        (1..=expected_count).collect()
     };
+
+    let expected_count = expected_ids.len() as u8;
 
     let mut blocks_vec = Vec::with_capacity(expected_count as usize);
     let mut ok_count: u32 = 0;
@@ -1654,8 +2191,12 @@ pub fn build_verbose_pass_line(
     let mut del_dam_secs: Vec<u8> = Vec::new();
     let mut missing_secs: Vec<u8> = Vec::new();
 
-    for sec_id in 1..=expected_count {
-        if let Some(sec) = diag.sectors.iter().find(|s| s.sec_id == sec_id && s.cyl == track) {
+    for &sec_id in &expected_ids {
+        if let Some(sec) = diag
+            .sectors
+            .iter()
+            .find(|s| s.sec_id == sec_id && s.cyl == track)
+        {
             match sec.status {
                 SectorStatus::Ok => {
                     ok_count += 1;
@@ -1693,31 +2234,69 @@ pub fn build_verbose_pass_line(
     let raw_ribbon = format!("[ {} ]", blocks_vec.join(" "));
     let ribbon_col = format!("{:<39}", raw_ribbon);
 
-    let status_str = if diag.off_track_count > 0 && diag.off_track_details.starts_with("MISALIGNED") {
-        format!("({}/{} {})", diag.sectors.len(), expected_count, diag.off_track_details)
-    } else if ok_count == expected_count as u32 && diag.crc_err_count == 0 && diag.off_track_count == 0 {
+    let status_str = if diag.off_track_count > 0
+        && diag.off_track_details.starts_with("MISALIGNED")
+    {
+        format!(
+            "({}/{} {})",
+            diag.sectors.len(),
+            expected_count,
+            diag.off_track_details
+        )
+    } else if ok_count == expected_count as u32
+        && diag.crc_err_count == 0
+        && diag.off_track_count == 0
+    {
         if expected_count == 9 {
             String::from("(9/9 OK)  ")
         } else {
             format!("({}/{} OK)", expected_count, expected_count)
         }
     } else if !crc_dat_secs.is_empty() {
-        let list: Vec<String> = crc_dat_secs.iter().map(|s| s.to_string()).collect();
-        format!("({}/{} CRC-DAT: Sec {})", ok_count, expected_count, list.join(", "))
+        let list: Vec<String> = crc_dat_secs.iter().map(|&s| format_sector_id_str(s)).collect();
+        format!(
+            "({}/{} CRC-DAT: Sec {})",
+            ok_count,
+            expected_count,
+            list.join(", ")
+        )
     } else if !crc_id_secs.is_empty() {
-        let list: Vec<String> = crc_id_secs.iter().map(|s| s.to_string()).collect();
-        format!("({}/{} CRC-ID: Sec {})", ok_count, expected_count, list.join(", "))
+        let list: Vec<String> = crc_id_secs.iter().map(|&s| format_sector_id_str(s)).collect();
+        format!(
+            "({}/{} CRC-ID: Sec {})",
+            ok_count,
+            expected_count,
+            list.join(", ")
+        )
     } else if !no_dam_secs.is_empty() {
-        let list: Vec<String> = no_dam_secs.iter().map(|s| s.to_string()).collect();
-        format!("({}/{} NO-DAM: Sec {})", ok_count, expected_count, list.join(", "))
+        let list: Vec<String> = no_dam_secs.iter().map(|&s| format_sector_id_str(s)).collect();
+        format!(
+            "({}/{} NO-DAM: Sec {})",
+            ok_count,
+            expected_count,
+            list.join(", ")
+        )
     } else if !del_dam_secs.is_empty() {
-        let list: Vec<String> = del_dam_secs.iter().map(|s| s.to_string()).collect();
-        format!("({}/{} DEL-DAM: Sec {})", ok_count, expected_count, list.join(", "))
+        let list: Vec<String> = del_dam_secs.iter().map(|&s| format_sector_id_str(s)).collect();
+        format!(
+            "({}/{} DEL-DAM: Sec {})",
+            ok_count,
+            expected_count,
+            list.join(", ")
+        )
     } else if !missing_secs.is_empty() {
-        let list: Vec<String> = missing_secs.iter().map(|s| s.to_string()).collect();
-        format!("({}/{} MISSING: Sec {})", ok_count, expected_count, list.join(", "))
+        let list: Vec<String> = missing_secs.iter().map(|&s| format_sector_id_str(s)).collect();
+        format!(
+            "({}/{} MISSING: Sec {})",
+            ok_count,
+            expected_count,
+            list.join(", ")
+        )
     } else if diag.off_track_count > 0 {
-        format!("({}/{} OFF-TRK: {})", ok_count, expected_count, diag.off_track_details)
+        format!(
+            "({}/{} OFF-TRK: {})",
+            ok_count, expected_count, diag.off_track_details
+        )
     } else if ok_count < expected_count as u32 {
         format!("({}/{} BAD)", ok_count, expected_count)
     } else {
@@ -1766,30 +2345,60 @@ pub fn build_standard_pass_line(
     if !diag.has_disk || !diag.sectors_known || diag.sectors.is_empty() {
         let ribbon_col = format!("{:<39}", "[ ? ]");
         let status_col = "(0/0 NO DATA / NO DISK)";
-        return format!("T:{:02} H:{} Rate:---k --- {} {}", track, head, ribbon_col, status_col);
+        return format!(
+            "T:{:02} H:{} Rate:---k --- {} {}",
+            track, head, ribbon_col, status_col
+        );
     }
 
-    let expected_count = if diag.bitrate == 250 {
-        if diag.sector_count > 9 { diag.sector_count } else { 9 }
-    } else if diag.bitrate == 500 {
-        if diag.sector_count == 15 || (diag.sectors.iter().map(|s| s.sec_id).max().unwrap_or(0) == 15 && diag.sector_count <= 15) {
-            15
-        } else if diag.sector_count > 18 {
-            diag.sector_count
-        } else {
-            18
-        }
-    } else if diag.sector_count > 0 {
-        if diag.sector_count <= 9 {
-            9
-        } else if diag.sector_count <= 15 {
-            15
-        } else {
-            18
-        }
+    let has_cpc_data = diag.sectors.iter().any(|s| s.sec_id >= 0xC1 && s.sec_id <= 0xCA);
+    let has_cpc_sys = diag.sectors.iter().any(|s| s.sec_id >= 0x41 && s.sec_id <= 0x4A);
+    let is_amiga_zero = diag.sectors.iter().any(|s| s.sec_id == 0);
+
+    let expected_ids: Vec<u8> = if has_cpc_data {
+        let max_sec = diag.sectors.iter().map(|s| s.sec_id).max().unwrap_or(0xC9);
+        let count = if max_sec >= 0xCA { 10 } else { 9 };
+        (0xC1..0xC1 + count).collect()
+    } else if has_cpc_sys {
+        let max_sec = diag.sectors.iter().map(|s| s.sec_id).max().unwrap_or(0x49);
+        let count = if max_sec >= 0x4A { 10 } else { 9 };
+        (0x41..0x41 + count).collect()
+    } else if is_amiga_zero {
+        let count = if diag.bitrate == 500 { 22 } else { 11 };
+        (0..count).collect()
     } else {
-        18
+        let expected_count = if diag.bitrate == 250 {
+            if diag.sector_count > 9 {
+                diag.sector_count
+            } else {
+                9
+            }
+        } else if diag.bitrate == 500 {
+            if diag.sector_count == 15
+                || (diag.sectors.iter().map(|s| s.sec_id).max().unwrap_or(0) == 15
+                    && diag.sector_count <= 15)
+            {
+                15
+            } else if diag.sector_count > 18 {
+                diag.sector_count
+            } else {
+                18
+            }
+        } else if diag.sector_count > 0 {
+            if diag.sector_count <= 9 {
+                9
+            } else if diag.sector_count <= 15 {
+                15
+            } else {
+                18
+            }
+        } else {
+            18
+        };
+        (1..=expected_count).collect()
     };
+
+    let expected_count = expected_ids.len() as u8;
 
     let mut blocks_vec = Vec::with_capacity(expected_count as usize);
     let mut ok_count: u32 = 0;
@@ -1799,8 +2408,12 @@ pub fn build_standard_pass_line(
     let mut del_dam_secs: Vec<u8> = Vec::new();
     let mut missing_secs: Vec<u8> = Vec::new();
 
-    for sec_id in 1..=expected_count {
-        if let Some(sec) = diag.sectors.iter().find(|s| s.sec_id == sec_id && s.cyl == track) {
+    for &sec_id in &expected_ids {
+        if let Some(sec) = diag
+            .sectors
+            .iter()
+            .find(|s| s.sec_id == sec_id && s.cyl == track)
+        {
             match sec.status {
                 SectorStatus::Ok => {
                     ok_count += 1;
@@ -1838,27 +2451,65 @@ pub fn build_standard_pass_line(
     let raw_ribbon = format!("[ {} ]", blocks_vec.join(" "));
     let ribbon_col = format!("{:<39}", raw_ribbon);
 
-    let status_str = if diag.off_track_count > 0 && diag.off_track_details.starts_with("MISALIGNED") {
-        format!("({}/{} {})", diag.sectors.len(), expected_count, diag.off_track_details)
-    } else if ok_count == expected_count as u32 && diag.crc_err_count == 0 && diag.off_track_count == 0 {
+    let status_str = if diag.off_track_count > 0
+        && diag.off_track_details.starts_with("MISALIGNED")
+    {
+        format!(
+            "({}/{} {})",
+            diag.sectors.len(),
+            expected_count,
+            diag.off_track_details
+        )
+    } else if ok_count == expected_count as u32
+        && diag.crc_err_count == 0
+        && diag.off_track_count == 0
+    {
         format!("({}/{} OK)", expected_count, expected_count)
     } else if !crc_dat_secs.is_empty() {
-        let list: Vec<String> = crc_dat_secs.iter().map(|s| s.to_string()).collect();
-        format!("({}/{} CRC-DAT: Sec {})", ok_count, expected_count, list.join(", "))
+        let list: Vec<String> = crc_dat_secs.iter().map(|&s| format_sector_id_str(s)).collect();
+        format!(
+            "({}/{} CRC-DAT: Sec {})",
+            ok_count,
+            expected_count,
+            list.join(", ")
+        )
     } else if !crc_id_secs.is_empty() {
-        let list: Vec<String> = crc_id_secs.iter().map(|s| s.to_string()).collect();
-        format!("({}/{} CRC-ID: Sec {})", ok_count, expected_count, list.join(", "))
+        let list: Vec<String> = crc_id_secs.iter().map(|&s| format_sector_id_str(s)).collect();
+        format!(
+            "({}/{} CRC-ID: Sec {})",
+            ok_count,
+            expected_count,
+            list.join(", ")
+        )
     } else if !no_dam_secs.is_empty() {
-        let list: Vec<String> = no_dam_secs.iter().map(|s| s.to_string()).collect();
-        format!("({}/{} NO-DAM: Sec {})", ok_count, expected_count, list.join(", "))
+        let list: Vec<String> = no_dam_secs.iter().map(|&s| format_sector_id_str(s)).collect();
+        format!(
+            "({}/{} NO-DAM: Sec {})",
+            ok_count,
+            expected_count,
+            list.join(", ")
+        )
     } else if !del_dam_secs.is_empty() {
-        let list: Vec<String> = del_dam_secs.iter().map(|s| s.to_string()).collect();
-        format!("({}/{} DEL-DAM: Sec {})", ok_count, expected_count, list.join(", "))
+        let list: Vec<String> = del_dam_secs.iter().map(|&s| format_sector_id_str(s)).collect();
+        format!(
+            "({}/{} DEL-DAM: Sec {})",
+            ok_count,
+            expected_count,
+            list.join(", ")
+        )
     } else if !missing_secs.is_empty() {
-        let list: Vec<String> = missing_secs.iter().map(|s| s.to_string()).collect();
-        format!("({}/{} MISSING: Sec {})", ok_count, expected_count, list.join(", "))
+        let list: Vec<String> = missing_secs.iter().map(|&s| format_sector_id_str(s)).collect();
+        format!(
+            "({}/{} MISSING: Sec {})",
+            ok_count,
+            expected_count,
+            list.join(", ")
+        )
     } else if diag.off_track_count > 0 {
-        format!("({}/{} OFF-TRK: {})", ok_count, expected_count, diag.off_track_details)
+        format!(
+            "({}/{} OFF-TRK: {})",
+            ok_count, expected_count, diag.off_track_details
+        )
     } else if ok_count < expected_count as u32 {
         format!("({}/{} BAD)", ok_count, expected_count)
     } else {
@@ -2998,6 +3649,16 @@ pub fn handle_command(
                 "Select Unit {} & Recalibrate Track 0",
                 status.drive_unit
             );
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::CycleDiskFormat => {
+            status.disk_format = status.disk_format.cycle_next();
+            status.log_msg = format!("Format Profile: {}", status.disk_format.name());
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::SetDiskFormat(fmt) => {
+            status.disk_format = fmt;
+            status.log_msg = format!("Format Profile: {}", status.disk_format.name());
             let _ = tx_status.send(status.clone());
         }
     }
@@ -5005,6 +5666,233 @@ mod tests {
         assert_eq!(status.on_track_count, 18);
         assert_eq!(status.off_track_count, 18);
         assert_eq!(status.off_track_details, "MISMATCH: Track 41 on Head 1");
+    }
+
+    #[test]
+    fn test_decode_amiga_longword_and_checksum() {
+        let val: u32 = 0xDEADBEEF;
+        let even = (val >> 1) & 0x5555_5555;
+        let odd = val & 0x5555_5555;
+        assert_eq!(decode_amiga_longword(even, odd), val);
+
+        let vals = vec![0x12345678, 0x9ABCDEF0, 0x0FEDCBA9];
+        let chk = calculate_amiga_checksum(&vals);
+        assert_eq!(chk, (0x12345678 ^ 0x9ABCDEF0 ^ 0x0FEDCBA9) & 0x5555_5555);
+    }
+
+    fn push_u32_to_bits(bits: &mut Vec<bool>, val: u32) {
+        for k in (0..32).rev() {
+            bits.push((val & (1 << k)) != 0);
+        }
+    }
+
+    fn build_amiga_sector_bits(cyl: u8, head: u8, sec_id: u8) -> Vec<bool> {
+        let mut bits = Vec::new();
+        // Sync 0x44894489
+        push_u32_to_bits(&mut bits, 0x44894489);
+
+        let track_num = (cyl << 1) | (head & 1);
+        let format_byte = 0xFFu8;
+        let info = ((format_byte as u32) << 24)
+            | ((track_num as u32) << 16)
+            | ((sec_id as u32) << 8)
+            | (11 - sec_id as u32);
+        let even_info = (info >> 1) & 0x5555_5555;
+        let odd_info = info & 0x5555_5555;
+        push_u32_to_bits(&mut bits, even_info);
+        push_u32_to_bits(&mut bits, odd_info);
+
+        let label = [0x11111111u32, 0x22222222u32, 0x33333333u32, 0x44444444u32];
+        let mut even_labels = [0u32; 4];
+        let mut odd_labels = [0u32; 4];
+        for i in 0..4 {
+            even_labels[i] = (label[i] >> 1) & 0x5555_5555;
+            odd_labels[i] = label[i] & 0x5555_5555;
+            push_u32_to_bits(&mut bits, even_labels[i]);
+        }
+        for i in 0..4 {
+            push_u32_to_bits(&mut bits, odd_labels[i]);
+        }
+
+        let hdr_chk = calculate_amiga_checksum(&[
+            even_info,
+            odd_info,
+            even_labels[0],
+            even_labels[1],
+            even_labels[2],
+            even_labels[3],
+            odd_labels[0],
+            odd_labels[1],
+            odd_labels[2],
+            odd_labels[3],
+        ]);
+        let even_hdr_chk = (hdr_chk >> 1) & 0x5555_5555;
+        let odd_hdr_chk = hdr_chk & 0x5555_5555;
+        push_u32_to_bits(&mut bits, even_hdr_chk);
+        push_u32_to_bits(&mut bits, odd_hdr_chk);
+
+        let mut data = [0u32; 128];
+        for (i, item) in data.iter_mut().enumerate() {
+            *item = (sec_id as u32 * 1000) + i as u32;
+        }
+
+        let mut even_data = [0u32; 128];
+        let mut odd_data = [0u32; 128];
+        let mut all_data_mfm = [0u32; 256];
+        for i in 0..128 {
+            even_data[i] = (data[i] >> 1) & 0x5555_5555;
+            odd_data[i] = data[i] & 0x5555_5555;
+            all_data_mfm[i] = even_data[i];
+            all_data_mfm[128 + i] = odd_data[i];
+        }
+
+        let data_chk = calculate_amiga_checksum(&all_data_mfm);
+        let even_data_chk = (data_chk >> 1) & 0x5555_5555;
+        let odd_data_chk = data_chk & 0x5555_5555;
+        push_u32_to_bits(&mut bits, even_data_chk);
+        push_u32_to_bits(&mut bits, odd_data_chk);
+
+        for d in even_data {
+            push_u32_to_bits(&mut bits, d);
+        }
+        for d in odd_data {
+            push_u32_to_bits(&mut bits, d);
+        }
+
+        bits
+    }
+
+    #[test]
+    fn test_decode_amiga_sectors_11_dd() {
+        let mut bits = Vec::new();
+        for sec in 0..11 {
+            bits.extend(build_amiga_sector_bits(40, 0, sec));
+        }
+
+        let sectors = decode_amiga_sectors_from_bits(&bits);
+        assert_eq!(sectors.len(), 11);
+        for (i, sec) in sectors.iter().enumerate() {
+            assert_eq!(sec.cyl, 40);
+            assert_eq!(sec.head, 0);
+            assert_eq!(sec.sec_id, i as u8);
+            assert_eq!(sec.status, SectorStatus::Ok);
+            assert!(sec.crc_ok);
+        }
+    }
+
+    #[test]
+    fn test_decode_amiga_sectors_head_and_cyl_validation() {
+        let mut bits_h1 = Vec::new();
+        for sec in 0..11 {
+            bits_h1.extend(build_amiga_sector_bits(79, 1, sec));
+        }
+
+        let sectors = decode_amiga_sectors_from_bits(&bits_h1);
+        assert_eq!(sectors.len(), 11);
+        for (i, sec) in sectors.iter().enumerate() {
+            assert_eq!(sec.cyl, 79);
+            assert_eq!(sec.head, 1);
+            assert_eq!(sec.sec_id, i as u8);
+            assert_eq!(sec.status, SectorStatus::Ok);
+            assert!(sec.crc_ok);
+        }
+    }
+
+    #[test]
+    fn test_amstrad_cpc_data_format_recognition() {
+        let diag = TrackAnalysisResult {
+            has_disk: true,
+            bitrate: 250,
+            sector_count: 9,
+            sectors_known: true,
+            sectors: (0xC1..=0xC9)
+                .map(|id| DecodedSector::new(20, 0, id, 2, true))
+                .collect(),
+            on_track_count: 9,
+            off_track_count: 0,
+            off_track_details: String::from("NONE (Perfect)"),
+            crc_err_count: 0,
+            alignment_pct: 100.0,
+            ..Default::default()
+        };
+
+        let line_std = build_standard_pass_line(20, 0, &diag);
+        assert!(line_std.contains("Rate:250k MFM"));
+        assert!(line_std.contains("(9/9 OK)"));
+
+        let line_verb = build_verbose_pass_line(20, 0, &diag);
+        assert!(line_verb.contains("(9/9 OK)"));
+    }
+
+    #[test]
+    fn test_atari_st_overformatting_10_and_11_sectors() {
+        let sectors_10: Vec<DecodedSector> = (1..=10)
+            .map(|id| DecodedSector::new(80, 0, id, 2, true))
+            .collect();
+        let diag_10 = TrackAnalysisResult {
+            has_disk: true,
+            bitrate: 250,
+            sector_count: 10,
+            sectors_known: true,
+            sectors: sectors_10,
+            on_track_count: 10,
+            off_track_count: 0,
+            off_track_details: String::from("NONE (Perfect)"),
+            crc_err_count: 0,
+            alignment_pct: 100.0,
+            ..Default::default()
+        };
+
+        let line_std_10 = build_standard_pass_line(80, 0, &diag_10);
+        assert!(line_std_10.contains("(10/10 OK)"));
+
+        let sectors_11: Vec<DecodedSector> = (1..=11)
+            .map(|id| DecodedSector::new(82, 0, id, 2, true))
+            .collect();
+        let diag_11 = TrackAnalysisResult {
+            has_disk: true,
+            bitrate: 250,
+            sector_count: 11,
+            sectors_known: true,
+            sectors: sectors_11,
+            on_track_count: 11,
+            off_track_count: 0,
+            off_track_details: String::from("NONE (Perfect)"),
+            crc_err_count: 0,
+            alignment_pct: 100.0,
+            ..Default::default()
+        };
+
+        let line_std_11 = build_standard_pass_line(82, 0, &diag_11);
+        assert!(line_std_11.contains("(11/11 OK)"));
+    }
+
+    #[test]
+    fn test_disk_format_cycling_and_expected_counts() {
+        let mut fmt = DiskFormat::AutoDetect;
+        assert_eq!(fmt.short_name(), "AUTO");
+        fmt = fmt.cycle_next();
+        assert_eq!(fmt, DiskFormat::IbmPc);
+        assert_eq!(fmt.short_name(), "PC");
+        fmt = fmt.cycle_next();
+        assert_eq!(fmt, DiskFormat::AmigaDos);
+        assert_eq!(fmt.short_name(), "AMIGA");
+        assert_eq!(fmt.expected_sector_count(250, 0), 11);
+        assert_eq!(fmt.expected_sector_count(500, 0), 22);
+        fmt = fmt.cycle_next();
+        assert_eq!(fmt, DiskFormat::AtariSt);
+        assert_eq!(fmt.short_name(), "ATARI");
+        assert_eq!(fmt.expected_sector_count(250, 10), 10);
+        assert_eq!(fmt.expected_sector_count(250, 11), 11);
+        fmt = fmt.cycle_next();
+        assert_eq!(fmt, DiskFormat::AmstradCpcData);
+        assert_eq!(fmt.short_name(), "CPC-DATA");
+        assert_eq!(fmt.expected_sector_count(250, 9), 9);
+        fmt = fmt.cycle_next();
+        assert_eq!(fmt, DiskFormat::AmstradCpcSystem);
+        assert_eq!(fmt.short_name(), "CPC-SYS");
+        fmt = fmt.cycle_next();
+        assert_eq!(fmt, DiskFormat::AutoDetect);
     }
 }
 

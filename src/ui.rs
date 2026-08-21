@@ -225,7 +225,7 @@ pub fn build_alignment_gauge(pct: f32) -> String {
     format!("{}{}", "█".repeat(filled_bars), "-".repeat(empty_bars))
 }
 
-/// Helper to extract list of sector IDs from error text like "Sec 3, 15" or "Sec 8"
+/// Helper to extract list of sector IDs from error text like "Sec 3, 15", "Sec 8", "Sec C1, C5", "Sec 41"
 pub fn extract_sector_ids_from_error(line: &str, marker: &str) -> Vec<usize> {
     if let Some(pos) = line.find(marker) {
         let after = &line[pos + marker.len()..];
@@ -233,10 +233,86 @@ pub fn extract_sector_ids_from_error(line: &str, marker: &str) -> Vec<usize> {
         let sec_str = &after[..end];
         return sec_str
             .split(',')
-            .filter_map(|s| s.trim().parse::<usize>().ok())
+            .filter_map(|s| {
+                let trimmed = s.trim();
+                // If it's a CPC hex sector ID (0x41..=0x4A or 0xC1..=0xCA), parse as hex
+                if let Ok(v) = usize::from_str_radix(trimmed, 16) {
+                    if (0x41..=0x4A).contains(&v) || (0xC1..=0xCA).contains(&v) {
+                        return Some(v);
+                    }
+                }
+                // Otherwise standard decimal ID (0..=36)
+                if let Ok(v) = trimmed.parse::<usize>() {
+                    return Some(v);
+                }
+                // Fallback to hex if decimal failed (e.g. C1 without 0x)
+                usize::from_str_radix(trimmed, 16).ok()
+            })
             .collect();
     }
     Vec::new()
+}
+
+/// Formats the header title of the disk format profile for the top header bar
+pub fn format_disk_format_header(
+    format: crate::hw::DiskFormat,
+    bitrate: u16,
+    sector_count: u8,
+) -> String {
+    match format {
+        crate::hw::DiskFormat::AmigaDos => {
+            if bitrate == 500 {
+                "AmigaDOS HD 22x512".to_string()
+            } else {
+                "AmigaDOS DD 11x512".to_string()
+            }
+        }
+        crate::hw::DiskFormat::AtariSt => {
+            if sector_count >= 11 {
+                "Atari ST 11x512".to_string()
+            } else if sector_count == 10 {
+                "Atari ST 10x512".to_string()
+            } else {
+                "Atari ST 9x512".to_string()
+            }
+        }
+        crate::hw::DiskFormat::AmstradCpcData => {
+            if sector_count >= 10 {
+                "CPC Data 10x512".to_string()
+            } else {
+                "CPC Data 9x512".to_string()
+            }
+        }
+        crate::hw::DiskFormat::AmstradCpcSystem => "CPC System 9x512".to_string(),
+        crate::hw::DiskFormat::IbmPc => {
+            if bitrate == 500 {
+                if sector_count == 15 {
+                    "PC HD 15x512 (1.2M)".to_string()
+                } else {
+                    "PC HD 18x512 (1.44M)".to_string()
+                }
+            } else {
+                "PC DD 9x512 (720K)".to_string()
+            }
+        }
+        crate::hw::DiskFormat::AutoDetect => {
+            if bitrate == 500 {
+                if sector_count == 15 {
+                    "PC HD 15x512 (1.2M)".to_string()
+                } else if sector_count == 22 {
+                    "AmigaDOS HD 22x512".to_string()
+                } else {
+                    "PC HD 18x512 (1.44M)".to_string()
+                }
+            } else if sector_count == 11 {
+                "AmigaDOS DD 11x512".to_string()
+            } else if sector_count == 10 {
+                "Atari ST 10x512".to_string()
+            } else {
+                "PC DD 9x512 (720K)".to_string()
+            }
+        }
+    }
 }
 
 /// Builds rich styled spans for Standard / Normal mode lines, with individual coloring for each segment:
@@ -287,21 +363,41 @@ pub fn build_standard_line_spans_with_color(
                 let del_dam_secs = extract_sector_ids_from_error(line, "DEL-DAM: Sec ");
                 let missing_secs = extract_sector_ids_from_error(line, "MISSING: Sec ");
 
+                let is_cpc_data = line.contains("Sec C") || (crc_dat_secs.iter().any(|&s| s >= 0xC1 && s <= 0xCA));
+                let is_cpc_sys = line.contains("Sec 4") || (crc_dat_secs.iter().any(|&s| s >= 0x41 && s <= 0x4A));
+                let is_amiga_zero = line.contains("Sec 0") || crc_dat_secs.contains(&0) || crc_id_secs.contains(&0) || missing_secs.contains(&0);
+
                 let is_unformatted = line.contains("NO DATA") || line.contains("NO DISK") || (line.contains("MISSING") && !line.contains("MISSING: Sec"));
                 let is_misaligned = line.contains("MISALIGNED");
 
                 let mut block_idx = 1usize;
                 for ch in ribbon_inner.chars() {
                     if ch == '█' || ch == '■' {
+                        let sec_id = if is_cpc_data {
+                            0xC0 + block_idx
+                        } else if is_cpc_sys {
+                            0x40 + block_idx
+                        } else if is_amiga_zero {
+                            block_idx.saturating_sub(1)
+                        } else {
+                            block_idx
+                        };
+
+                        let is_crc_dat = crc_dat_secs.contains(&sec_id) || crc_dat_secs.contains(&block_idx);
+                        let is_crc_id = crc_id_secs.contains(&sec_id) || crc_id_secs.contains(&block_idx);
+                        let is_no_dam = no_dam_secs.contains(&sec_id) || no_dam_secs.contains(&block_idx);
+                        let is_del_dam = del_dam_secs.contains(&sec_id) || del_dam_secs.contains(&block_idx);
+                        let is_missing = missing_secs.contains(&sec_id) || missing_secs.contains(&block_idx);
+
                         let style = if is_unformatted {
                             Style::default().fg(Color::DarkGray)
                         } else if is_misaligned {
                             Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD)
-                        } else if crc_dat_secs.contains(&block_idx) || crc_id_secs.contains(&block_idx) {
+                        } else if is_crc_dat || is_crc_id {
                             Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
-                        } else if no_dam_secs.contains(&block_idx) || del_dam_secs.contains(&block_idx) {
+                        } else if is_no_dam || is_del_dam {
                             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                        } else if missing_secs.contains(&block_idx) {
+                        } else if is_missing {
                             Style::default().fg(Color::DarkGray)
                         } else {
                             Style::default().fg(valid_color).add_modifier(Modifier::BOLD)
@@ -461,21 +557,41 @@ pub fn build_verbose_line_spans(line: &str, _expected_count: u8) -> Vec<Span<'st
                 let del_dam_secs = extract_sector_ids_from_error(line, "DEL-DAM: Sec ");
                 let missing_secs = extract_sector_ids_from_error(line, "MISSING: Sec ");
 
+                let is_cpc_data = line.contains("Sec C") || (crc_dat_secs.iter().any(|&s| s >= 0xC1 && s <= 0xCA));
+                let is_cpc_sys = line.contains("Sec 4") || (crc_dat_secs.iter().any(|&s| s >= 0x41 && s <= 0x4A));
+                let is_amiga_zero = line.contains("Sec 0") || crc_dat_secs.contains(&0) || crc_id_secs.contains(&0) || missing_secs.contains(&0);
+
                 let is_unformatted = line.contains("NO DATA") || line.contains("NO DISK") || (line.contains("MISSING") && !line.contains("MISSING: Sec"));
                 let is_misaligned = line.contains("MISALIGNED");
 
                 let mut block_idx = 1usize;
                 for ch in ribbon_inner.chars() {
                     if ch == '■' || ch == '█' {
+                        let sec_id = if is_cpc_data {
+                            0xC0 + block_idx
+                        } else if is_cpc_sys {
+                            0x40 + block_idx
+                        } else if is_amiga_zero {
+                            block_idx.saturating_sub(1)
+                        } else {
+                            block_idx
+                        };
+
+                        let is_crc_dat = crc_dat_secs.contains(&sec_id) || crc_dat_secs.contains(&block_idx);
+                        let is_crc_id = crc_id_secs.contains(&sec_id) || crc_id_secs.contains(&block_idx);
+                        let is_no_dam = no_dam_secs.contains(&sec_id) || no_dam_secs.contains(&block_idx);
+                        let is_del_dam = del_dam_secs.contains(&sec_id) || del_dam_secs.contains(&block_idx);
+                        let is_missing = missing_secs.contains(&sec_id) || missing_secs.contains(&block_idx);
+
                         let style = if is_unformatted {
                             Style::default().fg(Color::DarkGray)
                         } else if is_misaligned {
                             Style::default().fg(Color::Rgb(255, 140, 0)).add_modifier(Modifier::BOLD)
-                        } else if crc_dat_secs.contains(&block_idx) || crc_id_secs.contains(&block_idx) {
+                        } else if is_crc_dat || is_crc_id {
                             Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
-                        } else if no_dam_secs.contains(&block_idx) || del_dam_secs.contains(&block_idx) {
+                        } else if is_no_dam || is_del_dam {
                             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                        } else if missing_secs.contains(&block_idx) {
+                        } else if is_missing {
                             Style::default().fg(Color::DarkGray)
                         } else {
                             Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
@@ -748,52 +864,32 @@ pub fn build_both_mode_display_lines(status: &crate::hw::DriveStatus) -> Vec<Lin
             Span::styled("  ", Style::default())
         };
 
-        let pass_opt = if head_idx == 0 {
+        let last_pass = if head_idx == 0 {
             &status.last_pass_h0
         } else {
             &status.last_pass_h1
         };
 
-        let content_spans = if let Some(pass) = pass_opt {
+        if let Some(pass) = last_pass {
             if status.verbose_mode {
-                build_verbose_line_spans(&pass.line_verbose, pass.expected_count)
+                let mut spans = vec![prefix_span];
+                spans.extend(build_verbose_line_spans(&pass.line_verbose, expected));
+                Line::from(spans)
             } else {
-                build_standard_line_spans(&pass.line_standard, pass.expected_count)
-            }
-        } else if is_active && !status.sector_log.is_empty() {
-            let last_log = status.sector_log.last().unwrap();
-            if status.verbose_mode {
-                build_verbose_line_spans(last_log, expected)
-            } else {
-                build_standard_line_spans(last_log, expected)
+                let mut spans = vec![prefix_span];
+                spans.extend(build_standard_line_spans(&pass.line_standard, expected));
+                Line::from(spans)
             }
         } else {
-            let empty_vec: Vec<&str> = (0..expected).map(|_| "░").collect();
-            let empty_blocks = empty_vec.join(" ");
-            let raw_ribbon = format!("[ {} ]", empty_blocks);
-            let ribbon_col = format!("{:<40}", raw_ribbon);
-            let status_col = format!("( 0/{})", expected);
-            let line_str = if status.verbose_mode {
-                format!(
-                    "T:{:02} H:{} Rate:{}k MFM {}  {} IL:--- Gap0:---- Q:--%",
-                    status.track, head_idx, status.bitrate, ribbon_col, status_col
-                )
-            } else {
-                format!(
-                    "T:{:02} H:{} Rate:{}k MFM {}  {}",
-                    status.track, head_idx, status.bitrate, ribbon_col, status_col
-                )
-            };
-            if status.verbose_mode {
-                build_verbose_line_spans(&line_str, expected)
-            } else {
-                build_standard_line_spans(&line_str, expected)
-            }
-        };
-
-        let mut spans = vec![prefix_span];
-        spans.extend(content_spans);
-        Line::from(spans)
+            let empty_text = format!(
+                "T:{:02} H:{} : (Waiting read stream...)",
+                status.track, head_idx
+            );
+            Line::from(vec![
+                prefix_span,
+                Span::styled(empty_text, Style::default().fg(Color::DarkGray)),
+            ])
+        }
     };
 
     lines.push(format_head_line(0));
@@ -935,7 +1031,7 @@ pub fn build_help_modal_lines() -> Vec<Line<'static>> {
         shortcut_row("I", "Track Image (Capture raw MFM flux stream)"),
         shortcut_row("L", "Live RPM (High-precision continuous tachometer test)"),
         shortcut_row("M", "Toggle Motor (Spindle motor ON / OFF)"),
-        shortcut_row("P", "Format Parameters"),
+        shortcut_row("P", "Profile / Retro Format (Auto -> PC -> Amiga -> Atari -> CPC Data -> CPC Sys)"),
         shortcut_row("R", "Recalibrate Seek (Track 0 seek & verify)"),
         shortcut_row("S", "Step Rate (Single / Double step)"),
         shortcut_row("U", "Toggle Drive Unit (Drive 0 / Drive 1)"),

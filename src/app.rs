@@ -1,4 +1,4 @@
-use crate::hw::{DisplayMode, DriveStatus, HwActivity};
+use crate::hw::{DiskFormat, DisplayMode, DriveStatus, HwActivity};
 
 /// Three-state head selection mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -14,7 +14,7 @@ impl HeadSelection {
         match self {
             HeadSelection::Head0 => HeadSelection::Head1,
             HeadSelection::Head1 => HeadSelection::Both,
-            HeadSelection::Both  => HeadSelection::Head0,
+            HeadSelection::Both => HeadSelection::Head0,
         }
     }
 
@@ -22,7 +22,7 @@ impl HeadSelection {
         match self {
             HeadSelection::Head0 => "0",
             HeadSelection::Head1 => "1",
-            HeadSelection::Both  => "BOTH (0+1)",
+            HeadSelection::Both => "BOTH (0+1)",
         }
     }
 }
@@ -66,11 +66,17 @@ impl DiagnosticPass {
         expected_count: u8,
         is_ok: bool,
     ) -> Self {
-        let crc_errors = if is_ok { 0 } else { expected_count.saturating_sub(ok_count) };
+        let crc_errors = if is_ok {
+            0
+        } else {
+            expected_count.saturating_sub(ok_count)
+        };
         let quality_pct = if is_ok {
             99
         } else if expected_count > 0 {
-            ((ok_count as f32 / expected_count as f32) * 100.0).round().clamp(0.0, 100.0) as u8
+            ((ok_count as f32 / expected_count as f32) * 100.0)
+                .round()
+                .clamp(0.0, 100.0) as u8
         } else {
             50
         };
@@ -143,6 +149,8 @@ pub enum Action {
     ToggleMotor,
     SetMotor(bool),
     PanicReset,
+    CycleDiskFormat,
+    SetDiskFormat(DiskFormat),
 }
 
 /// Application state wrapper
@@ -157,6 +165,7 @@ pub struct App {
     pub last_capture_instant: std::time::Instant,
     pub stream_spinner_idx: usize,
     pub show_help: bool,
+    pub disk_format: DiskFormat,
 }
 
 impl App {
@@ -182,6 +191,7 @@ impl App {
             last_capture_instant: std::time::Instant::now(),
             stream_spinner_idx: 0,
             show_help: false,
+            disk_format: DiskFormat::AutoDetect,
         }
     }
 
@@ -225,6 +235,7 @@ impl App {
         }
 
         self.motor_on = status.motor_on;
+        self.disk_format = status.disk_format;
         self.status = status;
         self.drive_unit = self.status.drive_unit;
         self.head_selection = self.status.head_select;
@@ -264,9 +275,25 @@ impl App {
         self.status.unit_id = self.drive_unit;
     }
 
+    pub fn cycle_disk_format(&mut self) {
+        self.disk_format = self.disk_format.cycle_next();
+        self.status.disk_format = self.disk_format;
+    }
+
+    pub fn set_disk_format(&mut self, format: DiskFormat) {
+        self.disk_format = format;
+        self.status.disk_format = format;
+    }
+
+    pub fn disk_format(&self) -> DiskFormat {
+        self.disk_format
+    }
+
     pub fn handle_action(&mut self, action: Action) {
         match action {
             Action::ToggleDriveUnit => self.toggle_drive_unit(),
+            Action::CycleDiskFormat => self.cycle_disk_format(),
+            Action::SetDiskFormat(fmt) => self.set_disk_format(fmt),
             Action::Analyze | Action::StartAnalysis => {
                 self.motor_on = true;
                 self.status.analyzing = true;
@@ -291,8 +318,11 @@ impl App {
                     self.status.index = false;
                     self.status.analyzing = false;
                     if self.status.mode != DisplayMode::None {
-                        if self.status.mode == DisplayMode::RpmMeasure && self.status.rpm_measure.sample_count > 0 {
-                            self.status.rpm_display = format!("{:.1} RPM", self.status.rpm_measure.avg_rpm);
+                        if self.status.mode == DisplayMode::RpmMeasure
+                            && self.status.rpm_measure.sample_count > 0
+                        {
+                            self.status.rpm_display =
+                                format!("{:.1} RPM", self.status.rpm_measure.avg_rpm);
                         }
                         self.status.mode = DisplayMode::None;
                     }
@@ -312,8 +342,11 @@ impl App {
                     self.status.index = false;
                     self.status.analyzing = false;
                     if self.status.mode != DisplayMode::None {
-                        if self.status.mode == DisplayMode::RpmMeasure && self.status.rpm_measure.sample_count > 0 {
-                            self.status.rpm_display = format!("{:.1} RPM", self.status.rpm_measure.avg_rpm);
+                        if self.status.mode == DisplayMode::RpmMeasure
+                            && self.status.rpm_measure.sample_count > 0
+                        {
+                            self.status.rpm_display =
+                                format!("{:.1} RPM", self.status.rpm_measure.avg_rpm);
                         }
                         self.status.mode = DisplayMode::None;
                     }

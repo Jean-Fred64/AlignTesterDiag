@@ -27,7 +27,7 @@ mod ui;
 use crossbeam_channel::unbounded;
 pub use app::*;
 pub use audio::*;
-pub use hw::{hw_thread, DisplayMode, DriveStatus, HwActivity, HwCmd};
+pub use hw::{get_status_expected_sector_ids, hw_thread, DiskFormat, DisplayMode, DriveStatus, HwActivity, HwCmd};
 pub use ui::*;
 
 /// Builds the clean CLI banner and help/version text
@@ -52,15 +52,6 @@ Options:
     )
 }
 
-/// Formats the UI status log message cleanly with standard "Log: " prefix
-pub fn format_log_line(msg: &str) -> String {
-    if msg.starts_with("Log: ") {
-        msg.to_string()
-    } else {
-        format!("Log: {}", msg)
-    }
-}
-
 /// Checks for help or version flags (-h, --help, -v, -V, --version)
 /// If present, prints the clean CLI banner to stdout and returns true (indicating early exit).
 pub fn handle_cli_help_or_version(args: &[String]) -> bool {
@@ -73,26 +64,36 @@ pub fn handle_cli_help_or_version(args: &[String]) -> bool {
     false
 }
 
+/// Formats the UI status log message cleanly with standard "Log: " prefix
+pub fn format_log_line(msg: &str) -> String {
+    if msg.starts_with("Log: ") {
+        msg.to_string()
+    } else {
+        format!("Log: {}", msg)
+    }
+}
+
 pub fn parse_cli_args(args: &[String]) -> (Option<String>, u8) {
-    let mut port = None;
+    let mut port: Option<String> = None;
     let mut drive_unit: u8 = 0;
     let mut i = 1;
+
     while i < args.len() {
         let arg = &args[i];
         if arg == "--drive" || arg == "-d" {
             if i + 1 < args.len() {
-                if let Ok(val) = args[i + 1].parse::<u8>() {
-                    drive_unit = val.min(1);
+                if let Ok(u) = args[i + 1].parse::<u8>() {
+                    drive_unit = u.min(1);
                 }
                 i += 1;
             }
         } else if let Some(stripped) = arg.strip_prefix("--drive=") {
-            if let Ok(val) = stripped.parse::<u8>() {
-                drive_unit = val.min(1);
+            if let Ok(u) = stripped.parse::<u8>() {
+                drive_unit = u.min(1);
             }
         } else if let Some(stripped) = arg.strip_prefix("-d=") {
-            if let Ok(val) = stripped.parse::<u8>() {
-                drive_unit = val.min(1);
+            if let Ok(u) = stripped.parse::<u8>() {
+                drive_unit = u.min(1);
             }
         } else if arg == "--port" || arg == "-p" {
             if i + 1 < args.len() {
@@ -108,6 +109,7 @@ pub fn parse_cli_args(args: &[String]) -> (Option<String>, u8) {
         }
         i += 1;
     }
+
     (port, drive_unit)
 }
 
@@ -116,32 +118,32 @@ fn main() -> Result<(), Box<dyn Error>> {
     if handle_cli_help_or_version(&args) {
         return Ok(());
     }
-    let (port_name, drive_unit) = parse_cli_args(&args);
+    let (port_arg, initial_drive_unit) = parse_cli_args(&args);
 
-    enable_raw_mode()?;
-    stdout().execute(EnterAlternateScreen)?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
-
-    let (tx_status, rx_status) = unbounded::<DriveStatus>();
     let (tx_cmd, rx_cmd) = unbounded::<HwCmd>();
+    let (tx_status, rx_status) = unbounded::<DriveStatus>();
 
-    let port_arg = port_name.clone();
+    let port_clone = port_arg.clone();
     thread::spawn(move || {
-        hw_thread(tx_status, rx_cmd, port_arg, drive_unit);
+        hw_thread(tx_status, rx_cmd, port_clone, initial_drive_unit);
     });
 
-    let mut app = App::with_drive_unit(drive_unit);
-    if let Some(ref p) = port_name {
-        app.status.port_name = p.clone();
-    }
+    enable_raw_mode()?;
+    let mut stdout = stdout();
+    stdout.execute(EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut app = App::with_drive_unit(initial_drive_unit);
 
     loop {
-        while let Ok(msg) = rx_status.try_recv() {
-            app.handle_hw_message(msg);
+        while let Ok(status) = rx_status.try_recv() {
+            app.handle_hw_message(status);
         }
-        let status = &app.status;
 
         terminal.draw(|f| {
+            let status = app.drive_status();
+
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -151,21 +153,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .split(f.size());
 
             let drive_letter = if status.drive_unit == 0 { "A:" } else { "B:" };
-            let max_sec = status.sector_count;
-
-            let sec_count_str = if status.sectors_known && status.sector_count > 0 {
-                format!("{:2}x512", status.sector_count)
-            } else {
-                String::from(" ?x512")
-            };
+            let expected_ids = get_status_expected_sector_ids(status);
+            let sec_count_str = format_disk_format_header(status.disk_format, status.bitrate, status.sector_count);
 
             let mut sec_line_spans = Vec::new();
-            if status.has_disk && status.sectors_known && max_sec > 0 {
+            if status.has_disk && status.sectors_known && !expected_ids.is_empty() {
                 sec_line_spans.push(Span::styled(" ", Style::default()));
-                for i in 1..=max_sec {
-                    let s_str = format!("{:2} ", i);
-                    let sec_present = status.sectors.iter().any(|s| s.sec_id == i);
-                    let has_err = status.sectors.iter().any(|s| s.sec_id == i && !s.crc_ok);
+                for &id in &expected_ids {
+                    let s_str = if id >= 0x40 {
+                        format!("{:02X} ", id)
+                    } else {
+                        format!("{:2} ", id)
+                    };
+                    let sec_present = status.sectors.iter().any(|s| s.sec_id == id);
+                    let has_err = status.sectors.iter().any(|s| s.sec_id == id && !s.crc_ok);
 
                     let style = if has_err {
                         Style::default()
@@ -192,7 +193,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 sec_line_spans.push(Span::styled(" ", Style::default()));
                 for _ in 1..=18 {
-                    sec_line_spans.push(Span::styled(" ? ", Style::default().fg(Color::Yellow)));
+                    sec_line_spans.push(Span::styled(" ? ", Style::default().fg(Color::DarkGray)));
                 }
             }
 
@@ -216,7 +217,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             top_spans.push(Span::styled("   ", Style::default()));
             top_spans.push(build_wp_span(status.write_protect));
             top_spans.push(Span::styled(
-                format!("     {}  27  84         ", sec_count_str),
+                format!("     {}         ", sec_count_str),
                 Style::default().fg(Color::White),
             ));
             top_spans.push(badge_icon);
@@ -302,6 +303,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Line::from(" diskette"),
                 Line::from(""),
                 Line::from(format!(" UNIT : Drive {} ({})", status.drive_unit, if status.drive_unit == 0 { "A:" } else { "B:" })),
+                Line::from(format!(" PROF : {}", status.disk_format.short_name())),
                 Line::from(format!(" STAT : {}", state_label)),
                 Line::from(format!(" TRK0 : {}", if status.trk0 { "ON " } else { "OFF" })),
                 Line::from(format!(
@@ -337,7 +339,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Line::from(" I = track Image"),
                 Line::from(" L = Live RPM test"),
                 Line::from(" M = Motor on/off"),
-                Line::from(" P = fmt Parms"),
+                Line::from(" P = Profile / Format"),
                 Line::from(" R = Recal/seek"),
                 Line::from(" S = Step S/D"),
                 Line::from(" U = Unit (Drive 0/1)"),
@@ -888,6 +890,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     KeyCode::Char('b') | KeyCode::Char('B') => {
                         let _ = tx_cmd.send(HwCmd::ToggleBeep);
                     }
+                    KeyCode::Char('p') | KeyCode::Char('P') => {
+                        app.handle_action(Action::CycleDiskFormat);
+                        let _ = tx_cmd.send(HwCmd::CycleDiskFormat);
+                    }
                     _ => {}
                 }
             }
@@ -895,7 +901,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
+    std::io::stdout().execute(LeaveAlternateScreen)?;
     println!("Alignment Diagnostic session ended cleanly.");
     Ok(())
 }
@@ -1971,6 +1977,80 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].height, 4);
         assert_eq!(chunks[1].height, 26);
+    }
+
+    #[test]
+    fn test_format_disk_format_header() {
+        assert_eq!(
+            format_disk_format_header(DiskFormat::AmigaDos, 250, 11),
+            "AmigaDOS DD 11x512"
+        );
+        assert_eq!(
+            format_disk_format_header(DiskFormat::AmigaDos, 500, 22),
+            "AmigaDOS HD 22x512"
+        );
+        assert_eq!(
+            format_disk_format_header(DiskFormat::AtariSt, 250, 10),
+            "Atari ST 10x512"
+        );
+        assert_eq!(
+            format_disk_format_header(DiskFormat::AtariSt, 250, 11),
+            "Atari ST 11x512"
+        );
+        assert_eq!(
+            format_disk_format_header(DiskFormat::AmstradCpcData, 250, 9),
+            "CPC Data 9x512"
+        );
+        assert_eq!(
+            format_disk_format_header(DiskFormat::AmstradCpcData, 250, 10),
+            "CPC Data 10x512"
+        );
+        assert_eq!(
+            format_disk_format_header(DiskFormat::AmstradCpcSystem, 250, 9),
+            "CPC System 9x512"
+        );
+        assert_eq!(
+            format_disk_format_header(DiskFormat::IbmPc, 500, 18),
+            "PC HD 18x512 (1.44M)"
+        );
+        assert_eq!(
+            format_disk_format_header(DiskFormat::IbmPc, 500, 15),
+            "PC HD 15x512 (1.2M)"
+        );
+        assert_eq!(
+            format_disk_format_header(DiskFormat::IbmPc, 250, 9),
+            "PC DD 9x512 (720K)"
+        );
+    }
+
+    #[test]
+    fn test_extract_sector_ids_from_error_hex_and_decimal() {
+        let dec_line = "T:40 H:0 Rate:500k MFM [ ■ ■ ■ ] (17/18 CRC-DAT: Sec 15)";
+        let dec_ids = extract_sector_ids_from_error(dec_line, "CRC-DAT: Sec ");
+        assert_eq!(dec_ids, vec![15]);
+
+        let hex_line = "T:20 H:0 Rate:250k MFM [ ■ ■ ■ ] (8/9 CRC-DAT: Sec C2)";
+        let hex_ids = extract_sector_ids_from_error(hex_line, "CRC-DAT: Sec ");
+        assert_eq!(hex_ids, vec![0xC2]);
+
+        let hex_sys_line = "T:20 H:0 Rate:250k MFM [ ■ ■ ■ ] (8/9 CRC-ID: Sec 45)";
+        let hex_sys_ids = extract_sector_ids_from_error(hex_sys_line, "CRC-ID: Sec ");
+        assert_eq!(hex_sys_ids, vec![0x45]);
+    }
+
+    #[test]
+    fn test_build_standard_line_spans_cpc_error_highlight() {
+        let line = "T:20 H:0 Rate:250k MFM [ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (8/9 CRC-DAT: Sec C2)";
+        let spans = build_standard_line_spans(line, 9);
+        // Find the bracket inner spans
+        let block_spans: Vec<&Span> = spans.iter().filter(|s| s.content == "■ ").collect();
+        assert_eq!(block_spans.len(), 9);
+        // Block index 1 (sec C1) -> Green
+        assert_eq!(block_spans[0].style.fg, Some(Color::LightGreen));
+        // Block index 2 (sec C2) -> Red
+        assert_eq!(block_spans[1].style.fg, Some(Color::LightRed));
+        // Block index 3 (sec C3) -> Green
+        assert_eq!(block_spans[2].style.fg, Some(Color::LightGreen));
     }
 }
 
