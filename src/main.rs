@@ -27,7 +27,7 @@ mod ui;
 use crossbeam_channel::unbounded;
 pub use app::*;
 pub use audio::*;
-pub use hw::{get_status_expected_sector_ids, hw_thread, BusType, DiskFormat, DisplayMode, DriveStatus, HwActivity, HwCmd};
+pub use hw::{get_status_expected_sector_ids, hw_thread, BusType, DiskFormat, DisplayMode, DriveStatus, HwActivity, HwCmd, StepMode};
 pub use ui::*;
 
 /// Builds the clean CLI banner and help/version text
@@ -43,11 +43,13 @@ Arguments:
   [PORT]                  Serial port connected to Greaseweazle (e.g. COM3, /dev/ttyACM0)
 
 Options:
-  -d, --drive <0-3>       Select physical drive unit (0..1 for PC, 0..3 for Shugart) [default: 0]
-  -b, --bus <pc|shugart>  Select floppy interface bus type (pc | shugart) [default: pc]
-  -p, --port <PORT>       Serial port connected to Greaseweazle
-  -h, --help              Print help information
-  -v, -V, --version       Print version information
+  -d, --drive <0-3>          Select physical drive unit (0..1 for PC, 0..3 for Shugart) [default: 0]
+  -b, --bus <pc|shugart>     Select floppy interface bus type (pc | shugart) [default: pc]
+  -s, --step <single|double> Select step mode (single 1:1 for 96/135 TPI | double 2:1 for 48 TPI) [default: single]
+      --double-step          Alias for --step double
+  -p, --port <PORT>          Serial port connected to Greaseweazle
+  -h, --help                 Print help information
+  -v, -V, --version          Print version information
 "#,
         env!("CARGO_PKG_VERSION")
     )
@@ -74,10 +76,11 @@ pub fn format_log_line(msg: &str) -> String {
     }
 }
 
-pub fn parse_cli_args(args: &[String]) -> (Option<String>, u8, BusType) {
+pub fn parse_cli_args(args: &[String]) -> (Option<String>, u8, BusType, StepMode) {
     let mut port: Option<String> = None;
     let mut raw_drive_unit: u8 = 0;
     let mut bus_type: BusType = BusType::IbmPc;
+    let mut step_mode: StepMode = StepMode::Single;
     let mut i = 1;
 
     while i < args.len() {
@@ -132,6 +135,41 @@ pub fn parse_cli_args(args: &[String]) -> (Option<String>, u8, BusType) {
             bus_type = BusType::Shugart;
         } else if arg == "--pc" || arg == "--ibmpc" {
             bus_type = BusType::IbmPc;
+        } else if arg == "--step" || arg == "-s" || arg == "--step-mode" {
+            if i + 1 < args.len() {
+                let val = args[i + 1].to_lowercase();
+                if val == "double" || val == "2" || val == "2:1" || val == "48" || val == "48tpi" {
+                    step_mode = StepMode::Double;
+                } else if val == "single" || val == "1" || val == "1:1" || val == "96" || val == "135" {
+                    step_mode = StepMode::Single;
+                }
+                i += 1;
+            }
+        } else if let Some(stripped) = arg.strip_prefix("--step=") {
+            let val = stripped.to_lowercase();
+            if val == "double" || val == "2" || val == "2:1" || val == "48" || val == "48tpi" {
+                step_mode = StepMode::Double;
+            } else if val == "single" || val == "1" || val == "1:1" || val == "96" || val == "135" {
+                step_mode = StepMode::Single;
+            }
+        } else if let Some(stripped) = arg.strip_prefix("-s=") {
+            let val = stripped.to_lowercase();
+            if val == "double" || val == "2" || val == "2:1" || val == "48" || val == "48tpi" {
+                step_mode = StepMode::Double;
+            } else if val == "single" || val == "1" || val == "1:1" || val == "96" || val == "135" {
+                step_mode = StepMode::Single;
+            }
+        } else if let Some(stripped) = arg.strip_prefix("--step-mode=") {
+            let val = stripped.to_lowercase();
+            if val == "double" || val == "2" || val == "2:1" || val == "48" || val == "48tpi" {
+                step_mode = StepMode::Double;
+            } else if val == "single" || val == "1" || val == "1:1" || val == "96" || val == "135" {
+                step_mode = StepMode::Single;
+            }
+        } else if arg == "--double-step" || arg == "--doublestep" {
+            step_mode = StepMode::Double;
+        } else if arg == "--single-step" || arg == "--singlestep" {
+            step_mode = StepMode::Single;
         } else if arg == "--port" || arg == "-p" {
             if i + 1 < args.len() {
                 port = Some(args[i + 1].clone());
@@ -150,7 +188,7 @@ pub fn parse_cli_args(args: &[String]) -> (Option<String>, u8, BusType) {
     let max_unit = if bus_type == BusType::IbmPc { 1 } else { 3 };
     let drive_unit = raw_drive_unit.min(max_unit);
 
-    (port, drive_unit, bus_type)
+    (port, drive_unit, bus_type, step_mode)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -158,14 +196,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     if handle_cli_help_or_version(&args) {
         return Ok(());
     }
-    let (port_arg, initial_drive_unit, initial_bus_type) = parse_cli_args(&args);
+    let (port_arg, initial_drive_unit, initial_bus_type, initial_step_mode) = parse_cli_args(&args);
 
     let (tx_cmd, rx_cmd) = unbounded::<HwCmd>();
     let (tx_status, rx_status) = unbounded::<DriveStatus>();
 
     let port_clone = port_arg.clone();
     thread::spawn(move || {
-        hw_thread(tx_status, rx_cmd, port_clone, initial_drive_unit, initial_bus_type);
+        hw_thread(tx_status, rx_cmd, port_clone, initial_drive_unit, initial_bus_type, initial_step_mode);
     });
 
     enable_raw_mode()?;
@@ -174,7 +212,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::with_config(initial_drive_unit, initial_bus_type);
+    let mut app = App::with_full_config(initial_drive_unit, initial_bus_type, initial_step_mode);
 
     loop {
         while let Ok(status) = rx_status.try_recv() {
@@ -344,6 +382,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Line::from(""),
                 Line::from(format!(" UNIT : {}", format_drive_unit_label(status.bus_type, status.drive_unit))),
                 Line::from(format!(" BUS  : {}", status.bus_type.as_str())),
+                Line::from(format!(" STEP : {}", status.step_mode.as_str())),
                 Line::from(format!(" PROF : {}", status.disk_format.short_name())),
                 Line::from(format!(" STAT : {}", state_label)),
                 Line::from(format!(" TRK0 : {}", if status.trk0 { "ON " } else { "OFF" })),
@@ -382,7 +421,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Line::from(" M = Motor on/off"),
                 Line::from(" P = Profile / Format"),
                 Line::from(" R = Recal/seek"),
-                Line::from(" S = Step S/D (48/96 TPI)"),
+                Line::from(" S = Step (1:1 / 2:1)"),
                 Line::from(" T = Shugart/PC Bus"),
                 Line::from(format_unit_menu_shortcut(status.bus_type)),
                 Line::from(" V = Verbose on/off"),
@@ -817,7 +856,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         "    R               : Recalibrate Track 0 -> Current track",
                     ));
                     right_lines.push(Line::from(
-                        "    S               : Step Rate (Single 1:1 / Double 2:1 for 48/96 TPI)",
+                        "    S = Step Rate   : Toggle Single 1:1 / Double 2:1 (48/96 TPI)",
                     ));
                     right_lines.push(Line::from(
                         "    T               : Toggle Bus Type (IBM PC <-> Shugart)",
@@ -895,13 +934,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let _ = tx_cmd.send(HwCmd::Stop);
                     }
                     KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right | KeyCode::Up => {
-                        let _ = tx_cmd.send(HwCmd::Seek(app.status.track.saturating_add(1)));
+                        let max_trk = app.step_mode.max_logical_tracks();
+                        let _ = tx_cmd.send(HwCmd::Seek(app.status.track.saturating_add(1).min(max_trk)));
                     }
                     KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Left | KeyCode::Down => {
                         let _ = tx_cmd.send(HwCmd::Seek(app.status.track.saturating_sub(1)));
                     }
                     KeyCode::Char(c) if c.is_ascii_digit() => {
-                        let track = (c.to_digit(10).unwrap() as u8) * 10;
+                        let max_trk = app.step_mode.max_logical_tracks();
+                        let track = ((c.to_digit(10).unwrap() as u8) * 10).min(max_trk);
                         let _ = tx_cmd.send(HwCmd::Seek(track));
                     }
                     KeyCode::Char('h') | KeyCode::Char('H') => {
@@ -946,7 +987,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let _ = tx_cmd.send(HwCmd::ToggleBusType);
                     }
                     KeyCode::Char('s') | KeyCode::Char('S') => {
-                        // Reserved for Step Rate / Double-Step mode (48/96 TPI)
+                        app.handle_action(Action::ToggleStepMode);
+                        let _ = tx_cmd.send(HwCmd::ToggleStepMode);
                     }
                     _ => {}
                 }
@@ -1704,62 +1746,64 @@ mod tests {
     #[test]
     fn test_cli_argument_parsing_drive_unit() {
         let args_default = vec!["aligntester".to_string()];
-        let (port, unit, bus) = parse_cli_args(&args_default);
+        let (port, unit, bus, step) = parse_cli_args(&args_default);
         assert_eq!(port, None);
         assert_eq!(unit, 0);
         assert_eq!(bus, BusType::IbmPc);
+        assert_eq!(step, StepMode::Single);
 
         let args_port_only = vec!["aligntester".to_string(), "COM3".to_string()];
-        let (port, unit, bus) = parse_cli_args(&args_port_only);
+        let (port, unit, bus, step) = parse_cli_args(&args_port_only);
         assert_eq!(port, Some("COM3".to_string()));
         assert_eq!(unit, 0);
         assert_eq!(bus, BusType::IbmPc);
+        assert_eq!(step, StepMode::Single);
 
         let args_drive1 = vec!["aligntester".to_string(), "--drive".to_string(), "1".to_string()];
-        let (port, unit, _bus) = parse_cli_args(&args_drive1);
+        let (port, unit, _bus, _step) = parse_cli_args(&args_drive1);
         assert_eq!(port, None);
         assert_eq!(unit, 1);
 
         let args_drive0 = vec!["aligntester".to_string(), "--drive".to_string(), "0".to_string()];
-        let (port, unit, _bus) = parse_cli_args(&args_drive0);
+        let (port, unit, _bus, _step) = parse_cli_args(&args_drive0);
         assert_eq!(port, None);
         assert_eq!(unit, 0);
 
         let args_short_d1 = vec!["aligntester".to_string(), "-d".to_string(), "1".to_string()];
-        let (port, unit, _bus) = parse_cli_args(&args_short_d1);
+        let (port, unit, _bus, _step) = parse_cli_args(&args_short_d1);
         assert_eq!(port, None);
         assert_eq!(unit, 1);
 
         let args_eq_syntax = vec!["aligntester".to_string(), "--drive=1".to_string(), "COM5".to_string()];
-        let (port, unit, _bus) = parse_cli_args(&args_eq_syntax);
+        let (port, unit, _bus, _step) = parse_cli_args(&args_eq_syntax);
         assert_eq!(port, Some("COM5".to_string()));
         assert_eq!(unit, 1);
 
         let args_short_eq = vec!["aligntester".to_string(), "COM5".to_string(), "-d=1".to_string()];
-        let (port, unit, _bus) = parse_cli_args(&args_short_eq);
+        let (port, unit, _bus, _step) = parse_cli_args(&args_short_eq);
         assert_eq!(port, Some("COM5".to_string()));
         assert_eq!(unit, 1);
 
         // Saturation to 1 in PC mode
         let args_out_of_bounds_pc = vec!["aligntester".to_string(), "--drive".to_string(), "4".to_string()];
-        let (_port, unit, bus) = parse_cli_args(&args_out_of_bounds_pc);
+        let (_port, unit, bus, _step) = parse_cli_args(&args_out_of_bounds_pc);
         assert_eq!(unit, 1);
         assert_eq!(bus, BusType::IbmPc);
 
         // Support for units 2 and 3 in Shugart mode
         let args_shugart_unit2 = vec!["aligntester".to_string(), "--bus".to_string(), "shugart".to_string(), "--drive".to_string(), "2".to_string()];
-        let (_port, unit, bus) = parse_cli_args(&args_shugart_unit2);
+        let (_port, unit, bus, _step) = parse_cli_args(&args_shugart_unit2);
         assert_eq!(unit, 2);
         assert_eq!(bus, BusType::Shugart);
 
         let args_shugart_unit3 = vec!["aligntester".to_string(), "--shugart".to_string(), "-d=3".to_string()];
-        let (_port, unit, bus) = parse_cli_args(&args_shugart_unit3);
+        let (_port, unit, bus, _step) = parse_cli_args(&args_shugart_unit3);
         assert_eq!(unit, 3);
         assert_eq!(bus, BusType::Shugart);
 
         // Saturation to 3 in Shugart mode
         let args_shugart_out_of_bounds = vec!["aligntester".to_string(), "--shugart".to_string(), "--drive".to_string(), "9".to_string()];
-        let (_port, unit, bus) = parse_cli_args(&args_shugart_out_of_bounds);
+        let (_port, unit, bus, _step) = parse_cli_args(&args_shugart_out_of_bounds);
         assert_eq!(unit, 3);
         assert_eq!(bus, BusType::Shugart);
     }
@@ -1767,32 +1811,63 @@ mod tests {
     #[test]
     fn test_cli_argument_parsing_bus_type() {
         let args_shugart = vec!["aligntester".to_string(), "--bus".to_string(), "shugart".to_string()];
-        let (_port, _unit, bus) = parse_cli_args(&args_shugart);
+        let (_port, _unit, bus, _step) = parse_cli_args(&args_shugart);
         assert_eq!(bus, BusType::Shugart);
 
         let args_shugart_short = vec!["aligntester".to_string(), "-b".to_string(), "shugart".to_string()];
-        let (_port, _unit, bus) = parse_cli_args(&args_shugart_short);
+        let (_port, _unit, bus, _step) = parse_cli_args(&args_shugart_short);
         assert_eq!(bus, BusType::Shugart);
 
         let args_shugart_flag = vec!["aligntester".to_string(), "--shugart".to_string()];
-        let (_port, _unit, bus) = parse_cli_args(&args_shugart_flag);
+        let (_port, _unit, bus, _step) = parse_cli_args(&args_shugart_flag);
         assert_eq!(bus, BusType::Shugart);
 
         let args_bus_eq = vec!["aligntester".to_string(), "--bus=shugart".to_string()];
-        let (_port, _unit, bus) = parse_cli_args(&args_bus_eq);
+        let (_port, _unit, bus, _step) = parse_cli_args(&args_bus_eq);
         assert_eq!(bus, BusType::Shugart);
 
         let args_b_eq = vec!["aligntester".to_string(), "-b=shugart".to_string()];
-        let (_port, _unit, bus) = parse_cli_args(&args_b_eq);
+        let (_port, _unit, bus, _step) = parse_cli_args(&args_b_eq);
         assert_eq!(bus, BusType::Shugart);
 
         let args_amiga = vec!["aligntester".to_string(), "--bus".to_string(), "amiga".to_string()];
-        let (_port, _unit, bus) = parse_cli_args(&args_amiga);
+        let (_port, _unit, bus, _step) = parse_cli_args(&args_amiga);
         assert_eq!(bus, BusType::Shugart);
 
         let args_pc = vec!["aligntester".to_string(), "--bus".to_string(), "pc".to_string()];
-        let (_port, _unit, bus) = parse_cli_args(&args_pc);
+        let (_port, _unit, bus, _step) = parse_cli_args(&args_pc);
         assert_eq!(bus, BusType::IbmPc);
+    }
+
+    #[test]
+    fn test_cli_argument_parsing_step_mode() {
+        let args_double = vec!["aligntester".to_string(), "--step".to_string(), "double".to_string()];
+        let (_port, _unit, _bus, step) = parse_cli_args(&args_double);
+        assert_eq!(step, StepMode::Double);
+
+        let args_short_double = vec!["aligntester".to_string(), "-s".to_string(), "double".to_string()];
+        let (_port, _unit, _bus, step) = parse_cli_args(&args_short_double);
+        assert_eq!(step, StepMode::Double);
+
+        let args_flag_double = vec!["aligntester".to_string(), "--double-step".to_string()];
+        let (_port, _unit, _bus, step) = parse_cli_args(&args_flag_double);
+        assert_eq!(step, StepMode::Double);
+
+        let args_eq_double = vec!["aligntester".to_string(), "--step=double".to_string()];
+        let (_port, _unit, _bus, step) = parse_cli_args(&args_eq_double);
+        assert_eq!(step, StepMode::Double);
+
+        let args_short_eq_double = vec!["aligntester".to_string(), "-s=2".to_string()];
+        let (_port, _unit, _bus, step) = parse_cli_args(&args_short_eq_double);
+        assert_eq!(step, StepMode::Double);
+
+        let args_single = vec!["aligntester".to_string(), "--step".to_string(), "single".to_string()];
+        let (_port, _unit, _bus, step) = parse_cli_args(&args_single);
+        assert_eq!(step, StepMode::Single);
+
+        let args_flag_single = vec!["aligntester".to_string(), "--single-step".to_string()];
+        let (_port, _unit, _bus, step) = parse_cli_args(&args_flag_single);
+        assert_eq!(step, StepMode::Single);
     }
 
     #[test]
@@ -1980,6 +2055,7 @@ mod tests {
         assert!(banner.contains("2026 MonSieur JeAn-FReD (GPL-3.0)"));
         assert!(banner.contains("--port"));
         assert!(banner.contains("--drive"));
+        assert!(banner.contains("--step"));
         assert!(banner.contains("--help"));
         assert!(banner.contains("--version"));
 
@@ -2005,22 +2081,22 @@ mod tests {
     #[test]
     fn test_cli_argument_parsing_port_flags() {
         let args_p_short = vec!["aligntester".to_string(), "-p".to_string(), "COM4".to_string(), "-d".to_string(), "1".to_string()];
-        let (port, unit, _bus) = parse_cli_args(&args_p_short);
+        let (port, unit, _bus, _step) = parse_cli_args(&args_p_short);
         assert_eq!(port, Some("COM4".to_string()));
         assert_eq!(unit, 1);
 
         let args_p_long = vec!["aligntester".to_string(), "--port".to_string(), "/dev/ttyACM0".to_string()];
-        let (port, unit, _bus) = parse_cli_args(&args_p_long);
+        let (port, unit, _bus, _step) = parse_cli_args(&args_p_long);
         assert_eq!(port, Some("/dev/ttyACM0".to_string()));
         assert_eq!(unit, 0);
 
         let args_p_eq = vec!["aligntester".to_string(), "--port=COM7".to_string(), "--drive=1".to_string()];
-        let (port, unit, _bus) = parse_cli_args(&args_p_eq);
+        let (port, unit, _bus, _step) = parse_cli_args(&args_p_eq);
         assert_eq!(port, Some("COM7".to_string()));
         assert_eq!(unit, 1);
 
         let args_short_p_eq = vec!["aligntester".to_string(), "-p=COM9".to_string()];
-        let (port, unit, _bus) = parse_cli_args(&args_short_p_eq);
+        let (port, unit, _bus, _step) = parse_cli_args(&args_short_p_eq);
         assert_eq!(port, Some("COM9".to_string()));
         assert_eq!(unit, 0);
     }

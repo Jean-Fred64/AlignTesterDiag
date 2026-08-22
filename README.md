@@ -22,7 +22,7 @@
 - 🔊 **Dynamic Pitch Acoustic Variometer:** Auditory feedback inspired by glider variometers. Continuously modulates multi-tier audio frequency (**1500 Hz – 2200 Hz** for nominal alignment $\ge 95\%$, **600 Hz – 1400 Hz** for marginal tracking $70\text{--}94\%$, **250 Hz – 500 Hz** continuous tone for severe misalignment $< 70\%$), with instantaneous **180 Hz pulsed warning buzz** on cross-track mismatch and **150 Hz hum** on zero decoded sectors.
 - ⏱️ **72 MHz Spindle Tachometer & Live RPM Jitter Gauge:** Sub-microsecond revolution interval timing extracted directly from hardware index pulses. Computes instant RPM, 10-revolution rolling average, peak-to-peak jitter ($\Delta\text{RPM}$, $\pm\Delta\%$), and displays a 21-character visual centering gauge.
 - 🔄 **Dual-Head ("Both" Mode) Acquisition:** Alternating Head 0 & Head 1 acquisition with automated cross-track divergence detection ($T_{\text{H0}} \ne T_{\text{H1}}$) and consolidated dual-head health scoring.
-- 🔌 **Universal Drive Support (26-Pin FFC & 34-Pin Shugart/PC):** Motor-gated seek with 15 ms electronic wake-up delay (`STEPPER_WAKEUP_DELAY_MS`) to eliminate stepper motor driver lockups on slim laptop mechanisms (e.g. TEAC FD-05HG). Dynamic drive selection (`Drive 0` / `Drive 1`).
+- 🔌 **Universal Drive Support (26-Pin FFC & 34-Pin Shugart/PC):** Motor-gated seek with 15 ms electronic wake-up delay (`STEPPER_WAKEUP_DELAY_MS`) to eliminate stepper motor driver lockups on slim laptop mechanisms (e.g. TEAC FD-05HG). Dynamic drive unit selection (`A:`/`B:` for IBM PC, `DS0`..`DS3` for Shugart).
 - 📊 **Standard & Verbose Live Stream Views:** Color-coded segmented ribbon blocks representing sector-by-sector IDAM/DAM integrity, Gap0 timing in microseconds, phosphor decay animation, and interleave ratio.
 - 🛑 **Panic Reset & Safe State Protection:** Instant motor power cut, flux buffer flush, and Greaseweazle bus re-initialization on `Backspace` or `Esc`.
 
@@ -49,8 +49,11 @@
 # Navigate to your extracted folder and run (auto-detects the Greaseweazle port):
 .\aligntester-diag.exe
 
-# Or specify the COM port and Drive unit manually:
+# Or specify the COM port and Drive unit manually (IBM PC mode, Drive A:):
 .\aligntester-diag.exe COM3 --drive 0
+
+# Or launch directly in Shugart bus mode for native Amiga / Atari / Commodore drives:
+.\aligntester-diag.exe COM3 --shugart --drive 0
 ```
 
 ### Option B: Build from Source (Developers & Linux / macOS)
@@ -73,13 +76,16 @@ Auto-detect connected Greaseweazle device on Drive 0:
 cargo run --release
 ```
 
-Specify COM port and Drive Unit explicitly:
+Specify COM port, Drive Unit, and Bus Type explicitly:
 ```bash
-# Windows
+# Windows (IBM PC mode, Drive A:)
 cargo run --release -- COM3 --drive 0
 
-# Linux / macOS
+# Linux / macOS (IBM PC mode, Drive B:)
 cargo run --release -- /dev/ttyACM0 --drive 1
+
+# Native Amiga / Shugart Drive (DS0..DS3)
+cargo run --release -- --shugart --drive 0
 ```
 
 ---
@@ -93,11 +99,11 @@ cargo run --release -- /dev/ttyACM0 --drive 1
 | <kbd>D</kbd> | **Read Data** | Read and test sector CRC integrity across the cylinder |
 | <kbd>L</kbd> | **Live RPM** | Live RPM tachometer & jitter stability test |
 | <kbd>P</kbd> | **Format Profile** | Cycle machine profile & format (Auto, PC, Amiga, Atari, CPC) |
-| <kbd>S</kbd> | **Toggle Step Rate** | Toggle Single (1:1) / Double (2:1) step mode (48/96 TPI) *(Reserved)* |
-| <kbd>T</kbd> | **Toggle Bus Type** | Switch interface bus mode: `IBM PC (0x01)` ➔ `Shugart (0x02)` |
+| <kbd>S</kbd> | **Toggle Step Rate** | Toggle Single (1:1) / Double (2:1) step mode (48/96 TPI, for reading 40-track media on 80-track drives) |
+| <kbd>T</kbd> | **Toggle Bus Type** | Switch interface bus mode: `IBM PC (0x01)` ➔ `Shugart (0x02)` (auto-resets unit to 0 when entering PC mode from DS2/DS3) |
 | <kbd>B</kbd> | **Beep (Audio Radar)** | Toggle acoustic pitch variometer on / off |
 | <kbd>H</kbd> | **Toggle Head** | Cycle head selection: `Head 0` ➔ `Head 1` ➔ `BOTH (0+1)` |
-| <kbd>U</kbd> | **Toggle Drive Unit** | Switch active drive: `Drive 0 (A:)` ➔ `Drive 1 (B:)` |
+| <kbd>U</kbd> | **Toggle Drive Unit** | Switch active drive: `Drive 0 (A:)` ➔ `Drive 1 (B:)` in IBM PC mode, or cycle `Unit 0 (DS0)` ➔ `Unit 1 (DS1)` ➔ `Unit 2 (DS2)` ➔ `Unit 3 (DS3)` in Shugart mode |
 | <kbd>M</kbd> | **Toggle Motor** | Manually assert / negate spindle motor power line |
 | <kbd>V</kbd> | **Toggle Verbose** | Switch between Standard and Detailed Verbose Stream views |
 | <kbd>R</kbd> | **Recalibrate** | Recalibrate carriage to Track 0 and return to current track |
@@ -120,14 +126,17 @@ ARGUMENTS:
   [PORT]                  Serial port name (e.g. COM3, /dev/ttyACM0). Auto-detected if omitted.
 
 OPTIONS:
-  -d, --drive <0|1>       Select target floppy drive unit (0 = Drive A:, 1 = Drive B:). Default: 0
-      --drive=<0|1>       Alternative key-value syntax for drive unit selection
-  -b, --bus <pc|shugart>  Select floppy interface bus type (pc | shugart). Default: pc
-      --bus=<pc|shugart>  Alternative key-value syntax for bus type selection
-      --shugart           Shorthand flag for Shugart bus mode (Amiga straight cable)
-  -p, --port <PORT>       Serial port connected to Greaseweazle
-  -h, --help              Print help information
-  -v, -V, --version       Print version information
+  -d, --drive <0-3>          Select target drive unit (0..1 for IBM PC, 0..3 for Shugart). Default: 0
+      --drive=<0-3>          Alternative key-value syntax for drive unit selection
+  -b, --bus <pc|shugart>     Select floppy interface bus type (pc | shugart). Default: pc
+      --bus=<pc|shugart>     Alternative key-value syntax for bus type selection
+      --shugart              Shorthand flag for Shugart bus mode (Amiga straight cable)
+  -s, --step <single|double> Select step mode (single 1:1 for 96/135 TPI | double 2:1 for 48 TPI). Default: single
+      --step=<single|double> Alternative key-value syntax for step mode selection
+      --double-step          Shorthand flag for Double Step 2:1 mode (48 TPI media)
+  -p, --port <PORT>          Serial port connected to Greaseweazle
+  -h, --help                 Print help information
+  -v, -V, --version          Print version information
 ```
 
 ---
@@ -145,6 +154,9 @@ For an exhaustive technical breakdown of the DPLL flux recovery engine, Greasewe
 ```text
 AlignTesterDiag/
 ├── Cargo.toml                 # Manifest & dependencies (ratatui, crossterm, serialport, crossbeam-channel)
+├── README.md                  # Quick start guide, keybindings reference & showcase
+├── README.txt                 # Plain-text distribution notes & cheat sheet
+├── documentation.md           # Complete unified technical specification & manual
 ├── src/
 │   ├── main.rs                # Application entrypoint, CLI argument parser, main event loop
 │   ├── app.rs                 # State management, Action dispatcher, Dual-head metrics consolidation
@@ -155,6 +167,7 @@ AlignTesterDiag/
 │       └── protocol.rs        # Greaseweazle binary protocol opcodes, ACK codes, packet builders
 └── export/
     ├── README.md              # Distribution showcase & quick reference
+    ├── README.txt             # Plain-text distribution notes & cheat sheet
     ├── documentation.md       # Complete unified technical specification & manual
     └── Medias/                # Asset & screenshot directory
 ```
@@ -166,3 +179,4 @@ AlignTesterDiag/
 - Copyright (C) 2026 Mr JeAn-FReD 🇫🇷
 - **Heritage:** Inspired by Dave Dunfield's **ImageDisk (`IMD`)** and Keir Fraser's **Greaseweazle**.
 - **License:** Distributed under the terms of the [GNU General Public License v3.0 (GPL-3.0)](LICENSE).
+

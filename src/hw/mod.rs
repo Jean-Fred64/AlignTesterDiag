@@ -302,6 +302,7 @@ pub struct DriveStatus {
     pub port_name: String,
     pub disk_format: DiskFormat,
     pub bus_type: BusType,
+    pub step_mode: StepMode,
 }
 
 impl Default for DriveStatus {
@@ -351,6 +352,7 @@ impl Default for DriveStatus {
             port_name: String::new(),
             disk_format: DiskFormat::AutoDetect,
             bus_type: BusType::IbmPc,
+            step_mode: StepMode::Single,
         }
     }
 }
@@ -388,6 +390,8 @@ pub enum HwCmd {
     CycleDiskFormat,
     SetBusType(BusType),
     ToggleBusType,
+    SetStepMode(StepMode),
+    ToggleStepMode,
     Exit,
 }
 
@@ -2930,8 +2934,10 @@ pub fn handle_command(
             let _ = tx_status.send(status.clone());
         }
         HwCmd::Seek(target_track) => {
-            let track = target_track.min(83);
+            let track = target_track.min(status.step_mode.max_logical_tracks());
             let old_track = status.track;
+            let physical_cylinder = (track * status.step_mode.multiplier()).min(83);
+            let old_physical_cylinder = (old_track * status.step_mode.multiplier()).min(83);
 
             // 1. Immediately set status.track = track and clear status.sectors
             status.target_track = track;
@@ -2944,11 +2950,11 @@ pub fn handle_command(
             status.activity = HwActivity::Seeking;
             let _ = tx_status.send(status.clone());
 
-            // 2. Issue motor-gated SEEK(target) command to Greaseweazle and wait for ACK
-            let adaptive_timeout = if track == 0 {
+            // 2. Issue motor-gated SEEK(physical_cylinder) command to Greaseweazle and wait for ACK
+            let adaptive_timeout = if physical_cylinder == 0 {
                 Duration::from_millis(SEEK_TRK0_TIMEOUT_MS)
             } else {
-                Duration::from_millis(calculate_seek_timeout_ms(old_track, track))
+                Duration::from_millis(calculate_seek_timeout_ms(old_physical_cylinder, physical_cylinder))
             };
             let _ = port.set_timeout(adaptive_timeout);
 
@@ -2956,7 +2962,7 @@ pub fn handle_command(
                 port,
                 status.bus_type,
                 status.drive_unit,
-                track,
+                physical_cylinder,
                 status.motor_on,
                 status.head,
                 adaptive_timeout,
@@ -3056,11 +3062,12 @@ pub fn handle_command(
             // 5. Immediate return to origin track
             if res0.is_ok() {
                 if origin > 0 {
-                    let t_back = Duration::from_millis(1200 + (origin as u64 * 25));
+                    let physical_origin = (origin * status.step_mode.multiplier()).min(83);
+                    let t_back = Duration::from_millis(1200 + (physical_origin as u64 * 25));
                     let _ = port.set_timeout(t_back);
                     let res_back = gw_send_timeout(
                         port,
-                        &build_seek_packet(origin),
+                        &build_seek_packet(physical_origin),
                         0,
                         status.bus_type,
                         status.drive_unit,
@@ -3733,6 +3740,20 @@ pub fn handle_command(
             status.log_msg = format!("Bus Type: {} ({})", status.bus_type.as_str(), if status.bus_type == BusType::Shugart { "Amiga / Shugart DS0 Pin 10" } else { "IBM PC Standard" });
             let _ = tx_status.send(status.clone());
         }
+        HwCmd::SetStepMode(mode) => {
+            status.step_mode = mode;
+            status.track = status.track.min(status.step_mode.max_logical_tracks());
+            status.target_track = status.target_track.min(status.step_mode.max_logical_tracks());
+            status.log_msg = format!("Step Rate: {}", status.step_mode.as_str());
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::ToggleStepMode => {
+            status.step_mode = status.step_mode.toggle();
+            status.track = status.track.min(status.step_mode.max_logical_tracks());
+            status.target_track = status.target_track.min(status.step_mode.max_logical_tracks());
+            status.log_msg = format!("Step Rate: {}", status.step_mode.as_str());
+            let _ = tx_status.send(status.clone());
+        }
     }
     should_exit
 }
@@ -3743,6 +3764,7 @@ pub fn hw_thread(
     port_arg: Option<String>,
     initial_drive_unit: u8,
     initial_bus_type: BusType,
+    initial_step_mode: StepMode,
 ) {
     let mut status = DriveStatus::default();
     if let Some(ref p) = port_arg {
@@ -3752,6 +3774,7 @@ pub fn hw_thread(
     status.drive_unit = initial_drive_unit.min(max_unit);
     status.unit_id = status.drive_unit;
     status.bus_type = initial_bus_type;
+    status.step_mode = initial_step_mode;
     let mut rpm_sampler = RpmSampler::new(4);
 
     let (tx_sound, rx_sound) = crossbeam_channel::unbounded::<AudioEvent>();
@@ -6025,6 +6048,52 @@ mod tests {
         }
         assert_eq!(status_shugart.bus_type, BusType::IbmPc);
         assert_eq!(status_shugart.drive_unit, 0);
+    }
+
+    #[test]
+    fn test_step_mode_status_and_command_dispatch() {
+        let mut status = DriveStatus::default();
+        assert_eq!(status.step_mode, StepMode::Single);
+        status.step_mode = StepMode::Double;
+        assert_eq!(status.step_mode, StepMode::Double);
+        assert_eq!(status.step_mode.multiplier(), 2);
+        assert_eq!(status.step_mode.max_logical_tracks(), 41);
+
+        let cmd_toggle = HwCmd::ToggleStepMode;
+        assert_eq!(cmd_toggle, HwCmd::ToggleStepMode);
+
+        let cmd_set = HwCmd::SetStepMode(StepMode::Double);
+        assert_eq!(cmd_set, HwCmd::SetStepMode(StepMode::Double));
+    }
+
+    #[test]
+    fn test_step_mode_physical_seek_translation() {
+        let mut status = DriveStatus::default();
+        status.step_mode = StepMode::Double;
+
+        // Logical track 20 -> physical cylinder 40
+        let logical_track = 20u8.min(status.step_mode.max_logical_tracks());
+        let physical_cylinder = (logical_track * status.step_mode.multiplier()).min(83);
+        assert_eq!(logical_track, 20);
+        assert_eq!(physical_cylinder, 40);
+
+        // Logical track 40 -> physical cylinder 80
+        let logical_track_40 = 40u8.min(status.step_mode.max_logical_tracks());
+        let physical_cylinder_80 = (logical_track_40 * status.step_mode.multiplier()).min(83);
+        assert_eq!(logical_track_40, 40);
+        assert_eq!(physical_cylinder_80, 80);
+
+        // Logical track 41 -> physical cylinder 82
+        let logical_track_41 = 41u8.min(status.step_mode.max_logical_tracks());
+        let physical_cylinder_82 = (logical_track_41 * status.step_mode.multiplier()).min(83);
+        assert_eq!(logical_track_41, 41);
+        assert_eq!(physical_cylinder_82, 82);
+
+        // Logical track 50 out of bounds -> clamped to max 41 -> physical 82
+        let logical_track_clamped = 50u8.min(status.step_mode.max_logical_tracks());
+        let physical_clamped = (logical_track_clamped * status.step_mode.multiplier()).min(83);
+        assert_eq!(logical_track_clamped, 41);
+        assert_eq!(physical_clamped, 82);
     }
 }
 

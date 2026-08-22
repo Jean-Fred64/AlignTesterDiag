@@ -123,6 +123,47 @@ impl BusType {
     }
 }
 
+/// Floppy drive head carriage step multiplier mode:
+/// - Single (1:1): Standard native stepping (96/135 TPI drives, up to physical track 83)
+/// - Double (2:1): Double stepping for 48 TPI diskettes (40-41 logical tracks mapped to physical cylinders * 2)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StepMode {
+    #[default]
+    Single = 1,
+    Double = 2,
+}
+
+impl StepMode {
+    /// Toggles between Single (1:1) and Double (2:1) step modes
+    pub fn toggle(&self) -> Self {
+        match self {
+            StepMode::Single => StepMode::Double,
+            StepMode::Double => StepMode::Single,
+        }
+    }
+
+    /// Physical track multiplier factor (1 for Single, 2 for Double)
+    pub fn multiplier(&self) -> u8 {
+        *self as u8
+    }
+
+    /// Maximum reachable logical track for the current mode (83 in Single, 41 in Double)
+    pub fn max_logical_tracks(&self) -> u8 {
+        match self {
+            StepMode::Single => 83,
+            StepMode::Double => 41,
+        }
+    }
+
+    /// Human-readable label representation
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StepMode::Single => "1:1 (Single)",
+            StepMode::Double => "2:1 (Double)",
+        }
+    }
+}
+
 // ============================================================================
 // Guard Timing & Timeout Constants
 // ============================================================================
@@ -219,6 +260,19 @@ mod tests {
         assert_eq!(BusType::from_u8(2), Some(BusType::Shugart));
         assert_eq!(BusType::from_u8(0), None);
         assert_eq!(BusType::from_u8(3), None);
+    }
+
+    #[test]
+    fn test_step_mode_enum() {
+        assert_eq!(StepMode::default(), StepMode::Single);
+        assert_eq!(StepMode::Single.multiplier(), 1);
+        assert_eq!(StepMode::Double.multiplier(), 2);
+        assert_eq!(StepMode::Single.max_logical_tracks(), 83);
+        assert_eq!(StepMode::Double.max_logical_tracks(), 41);
+        assert_eq!(StepMode::Single.as_str(), "1:1 (Single)");
+        assert_eq!(StepMode::Double.as_str(), "2:1 (Double)");
+        assert_eq!(StepMode::Single.toggle(), StepMode::Double);
+        assert_eq!(StepMode::Double.toggle(), StepMode::Single);
     }
 
     #[test]

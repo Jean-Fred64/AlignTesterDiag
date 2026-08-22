@@ -1,4 +1,4 @@
-use crate::hw::{BusType, DiskFormat, DisplayMode, DriveStatus, HwActivity};
+use crate::hw::{BusType, DiskFormat, DisplayMode, DriveStatus, HwActivity, StepMode};
 
 /// Three-state head selection mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -153,6 +153,8 @@ pub enum Action {
     SetDiskFormat(DiskFormat),
     ToggleBusType,
     SetBusType(BusType),
+    ToggleStepMode,
+    SetStepMode(StepMode),
 }
 
 /// Application state wrapper
@@ -169,6 +171,7 @@ pub struct App {
     pub show_help: bool,
     pub disk_format: DiskFormat,
     pub bus_type: BusType,
+    pub step_mode: StepMode,
 }
 
 impl App {
@@ -181,6 +184,10 @@ impl App {
     }
 
     pub fn with_config(drive_unit: u8, bus_type: BusType) -> Self {
+        Self::with_full_config(drive_unit, bus_type, StepMode::Single)
+    }
+
+    pub fn with_full_config(drive_unit: u8, bus_type: BusType, step_mode: StepMode) -> Self {
         let max_unit = match bus_type {
             BusType::IbmPc => 1,
             BusType::Shugart => 3,
@@ -190,6 +197,7 @@ impl App {
             drive_unit: unit,
             unit_id: unit,
             bus_type,
+            step_mode,
             ..Default::default()
         };
         Self {
@@ -205,6 +213,7 @@ impl App {
             show_help: false,
             disk_format: DiskFormat::AutoDetect,
             bus_type,
+            step_mode,
         }
     }
 
@@ -231,7 +240,7 @@ impl App {
             || status.mode == DisplayMode::ReadData
             || status.analyzing
             || status.in_progress_pass
-            || status.sector_log != self.status.sector_log
+            || status.sector_log.len() != self.status.sector_log.len()
             || status.io_cycle != self.status.io_cycle
             || status.last_pass_h0 != self.status.last_pass_h0
             || status.last_pass_h1 != self.status.last_pass_h1;
@@ -250,6 +259,7 @@ impl App {
         self.motor_on = status.motor_on;
         self.disk_format = status.disk_format;
         self.bus_type = status.bus_type;
+        self.step_mode = status.step_mode;
         self.status = status;
         self.drive_unit = self.status.drive_unit;
         self.head_selection = self.status.head_select;
@@ -342,6 +352,24 @@ impl App {
         self.bus_type
     }
 
+    pub fn toggle_step_mode(&mut self) {
+        self.step_mode = self.step_mode.toggle();
+        self.status.step_mode = self.step_mode;
+        self.status.track = self.status.track.min(self.step_mode.max_logical_tracks());
+        self.status.target_track = self.status.target_track.min(self.step_mode.max_logical_tracks());
+    }
+
+    pub fn set_step_mode(&mut self, mode: StepMode) {
+        self.step_mode = mode;
+        self.status.step_mode = self.step_mode;
+        self.status.track = self.status.track.min(self.step_mode.max_logical_tracks());
+        self.status.target_track = self.status.target_track.min(self.step_mode.max_logical_tracks());
+    }
+
+    pub fn step_mode(&self) -> StepMode {
+        self.step_mode
+    }
+
     pub fn handle_action(&mut self, action: Action) {
         match action {
             Action::ToggleDriveUnit => self.toggle_drive_unit(),
@@ -349,6 +377,8 @@ impl App {
             Action::SetDiskFormat(fmt) => self.set_disk_format(fmt),
             Action::ToggleBusType => self.toggle_bus_type(),
             Action::SetBusType(bus) => self.set_bus_type(bus),
+            Action::ToggleStepMode => self.toggle_step_mode(),
+            Action::SetStepMode(mode) => self.set_step_mode(mode),
             Action::Analyze | Action::StartAnalysis => {
                 self.motor_on = true;
                 self.status.analyzing = true;
@@ -1024,6 +1054,35 @@ mod tests {
 
         assert_eq!(format_unit_menu_shortcut(BusType::IbmPc), " U = Unit (A: / B:)");
         assert_eq!(format_unit_menu_shortcut(BusType::Shugart), " U = Unit (DS0..DS3)");
+    }
+
+    #[test]
+    fn test_app_step_mode_actions_and_clamping() {
+        let mut app = App::new();
+        assert_eq!(app.step_mode(), StepMode::Single);
+        assert_eq!(app.status.step_mode, StepMode::Single);
+
+        // Set track to 70 in Single mode
+        app.status.track = 70;
+        app.status.target_track = 70;
+
+        // Toggle to Double mode (max logical tracks = 41)
+        app.handle_action(Action::ToggleStepMode);
+        assert_eq!(app.step_mode(), StepMode::Double);
+        assert_eq!(app.status.step_mode, StepMode::Double);
+        assert_eq!(app.status.track, 41);
+        assert_eq!(app.status.target_track, 41);
+
+        // Toggle back to Single mode
+        app.handle_action(Action::ToggleStepMode);
+        assert_eq!(app.step_mode(), StepMode::Single);
+        assert_eq!(app.status.track, 41);
+
+        // Set explicitly to Double
+        app.status.track = 80;
+        app.handle_action(Action::SetStepMode(StepMode::Double));
+        assert_eq!(app.step_mode(), StepMode::Double);
+        assert_eq!(app.status.track, 41);
     }
 }
 

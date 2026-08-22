@@ -10,16 +10,22 @@ use crate::hw::HwActivity;
 
 /// Builds the track ruler line with visual highlight for active tracks (0 to 83)
 pub fn build_ruler_line(current_track: u8) -> Line<'static> {
-    let mut spans = Vec::new();
+    const DIGIT_CHARS: [&str; 9] = ["0", "1", "2", "3", "4", "5", "6", "7", "8"];
+    let mut spans = Vec::with_capacity(85);
     spans.push(Span::styled(" ", Style::default()));
 
     for t in 0..=83 {
         let ch = if t % 10 == 0 {
-            ((t / 10) % 10).to_string()
+            let digit = ((t / 10) % 10) as usize;
+            if digit < DIGIT_CHARS.len() {
+                DIGIT_CHARS[digit]
+            } else {
+                "0"
+            }
         } else if t % 5 == 0 {
-            "+".to_string()
+            "+"
         } else {
-            ".".to_string()
+            "."
         };
 
         let style = if t <= current_track {
@@ -196,12 +202,18 @@ pub fn build_rpm_centering_gauge(current_rpm: f64, target_rpm: f64) -> (String, 
     // Slot 0 = -2.0%, Slot 4 = -1.0% (|), Slot 9 = 0.0% Nominal (|), Slot 14 = +1.0% (|), Slot 18 = +2.0%
     let slot = (9.0 + (dev_pct / 2.0) * 9.0).round().clamp(0.0, 18.0) as usize;
 
-    let mut chars: Vec<char> = "----|----|----|----".chars().collect();
-    if slot < chars.len() {
-        chars[slot] = '▼';
+    let mut s = String::with_capacity(24);
+    s.push('[');
+    const TEMPLATE: &[u8; 19] = b"----|----|----|----";
+    for (i, &b) in TEMPLATE.iter().enumerate() {
+        if i == slot {
+            s.push('▼');
+        } else {
+            s.push(b as char);
+        }
     }
-    let inner: String = chars.into_iter().collect();
-    (format!("[{}]", inner), color)
+    s.push(']');
+    (s, color)
 }
 
 /// Builds styled spans for the visual centering gauge line
@@ -222,7 +234,14 @@ pub fn build_alignment_gauge(pct: f32) -> String {
     let filled_bars = ((pct / 100.0) * total_bars as f32).round() as usize;
     let filled_bars = filled_bars.min(total_bars);
     let empty_bars = total_bars - filled_bars;
-    format!("{}{}", "█".repeat(filled_bars), "-".repeat(empty_bars))
+    let mut s = String::with_capacity(64);
+    for _ in 0..filled_bars {
+        s.push('█');
+    }
+    for _ in 0..empty_bars {
+        s.push('-');
+    }
+    s
 }
 
 /// Helper to extract list of sector IDs from error text like "Sec 3, 15", "Sec 8", "Sec C1, C5", "Sec 41"

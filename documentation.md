@@ -96,7 +96,7 @@ All commands follow the Greaseweazle frame format: `[CMD_OPCODE, FRAME_LENGTH, A
 |:---|:---|:---|:---|:---|
 | `0x00` | `CMD_GET_INFO` | `[0x00, 0x03, 0x00]` | 32 bytes | Query firmware version, hardware model, sample clock frequency |
 | `0x0E` | `CMD_SET_BUS_TYPE` | `[0x0E, 0x03, bus_type]` | 0 bytes | Configure interface pinout (`0x01` = IBM PC standard, `0x02` = Shugart standard) |
-| `0x0C` | `CMD_SELECT` | `[0x0C, 0x03, unit]` | 0 bytes | Assert drive select line (`0` = Drive A / DS0, `1` = Drive B / DS1) |
+| `0x0C` | `CMD_SELECT` | `[0x0C, 0x03, unit]` | 0 bytes | Assert drive select line (`0` = Drive A / DS0, `1` = Drive B / DS1, `2` = DS2, `3` = DS3) |
 | `0x0D` | `CMD_DESELECT` | `[0x0D, 0x02]` | 0 bytes | Deselect all drive units / release interface bus |
 | `0x06` | `CMD_MOTOR` | `[0x06, 0x04, unit, state]` | 0 bytes | Control spindle motor (`1` = ON, `0` = OFF) |
 | `0x02` | `CMD_SEEK` | `[0x02, 0x03, cyl]` | 0 bytes | Step head carriage to logical cylinder (`0` to `83`) |
@@ -371,13 +371,13 @@ The interface is divided into three primary functional zones: Top Header, Left C
 ### 8.1 Visual Components
 1. **Top Header Banner:**
    - **Branding & Port Badge:** Clean title banner spanning top border: ` 💾 AlignTesterDiag v{VERSION} ` on the left, active Greaseweazle COM port `[ Port: {PORT_NAME} ]` (e.g. `[ Port: COM3 ]`, `[ Port: /dev/ttyACM0 ]`) on the right.
-   - **Drive & Track:** Active unit (`A:` / `B:`), Density (`500k HD` / `250k DD`), Cylinder (`T40`), Head (`H0`, `H1`, `HB(H0)`).
+   - **Drive & Track:** Active unit (`A:` / `B:` in IBM PC mode, `DS0`..`DS3` in Shugart mode), Density (`500k HD` / `250k DD`), Cylinder (`T40`), Head (`H0`, `H1`, `HB(H0)`).
    - **Access Flags:** `Flags: [-wRz-]` (`w` = Cyan bold when write enabled / WP negated; `-` = Dark gray when write protected; `R` = Recalibrate yellow bold; `z` = Zero track yellow bold).
    - **Write Protect Badge:** `WP: PROTECTED` (Yellow) vs. `WP: WRITE-ENABLED` (Cyan).
    - **Sector Map:** Numbered badges highlighting sector availability and CRC errors in red.
    - **Track Ruler (0–83):** 84-character ruler highlighting carriage travel with solid white block.
 2. **Left Navigation Panel:**
-   - Hardware signal states (`TRK0`, `INDEX`, `MOT`, `WPROT`, `RPM`, `BEEP`, `VERB`).
+   - Hardware signal states (`UNIT : Drive 0 (A:)` / `Unit 0 (DS0)`, `BUS : IBM PC / Shugart`, `TRK0`, `INDEX`, `MOT`, `WPROT`, `RPM`, `BEEP`, `VERB`).
    - Comprehensive keyboard shortcut legend.
 3. **Right Diagnostic Stream Panel:**
    - **Single-Head Live Stream:** Sliding history scroll (up to 13 passes) with rotating spinner (`▸ [/] `) on the latest capture line, and TrueColor phosphor decay interpolation transitioning smoothly from bright green-white (`Rgb(210, 255, 210)`) to standard green (`Rgb(0, 180, 0)`) over ~220 ms.
@@ -409,7 +409,7 @@ All keyboard inputs are captured in raw mode via Crossterm non-blocking polling 
 | <kbd>0</kbd> .. <kbd>8</kbd> | **Direct Decade Track Jump** | `Hardware I/O` | Dispatches `HwCmd::Seek(digit * 10)`. Immediately seeks to cylinder 00, 10, 20, 30, 40, 50, 60, 70, or 80. Dynamically scales serial seek timeout ($T = 1200\text{ ms} + \vert\Delta T\vert \times 25\text{ ms}$), dampens mechanical carriage vibration for 30 ms, clears sector history, and re-locks DPLL stream. |
 | <kbd>9</kbd> | **Overtrack Limit Jump (Track 83)** | `Hardware I/O` | Dispatches `HwCmd::Seek(90 \rightarrow \min 83)`. Steps carriage to the maximum physical overtrack boundary (Cylinder 83) to verify overtracking headroom, head carriage clearance, and upper limit mechanical stop safety. |
 | <kbd>H</kbd> / <kbd>h</kbd> | **Toggle Physical Head** | `Hardware I/O` | Dispatches `HwCmd::ToggleHead`. Cycles head selection: `Head 0` (Side 0 / Lower) $\rightarrow$ `Head 1` (Side 1 / Upper) $\rightarrow$ `Both (0+1)` (Alternating Dual-Head Mode). Transmits `CMD_HEAD` (0x03), applies 1 ms electronic preamplifier settle delay (`HEAD_SWITCH_SETTLE_MS`), clears transient sector logs, and resets per-head diagnostic passes. |
-| <kbd>U</kbd> / <kbd>u</kbd> | **Toggle Drive Unit Selection** | `UI` & `Hardware I/O` | Dispatches `HwCmd::ToggleDriveUnit` and `Action::ToggleDriveUnit`. Toggles active drive between Unit 0 (`A:`) and Unit 1 (`B:`). Safely shuts down motor on old drive, deselects bus (`CMD_DESELECT 0x0D`), selects new drive unit (`CMD_SELECT 0x0C`), performs motor-gated recalibration to Track 00 (`CMD_SEEK 0`), queries write-protect status, and resets UI metrics. |
+| <kbd>U</kbd> / <kbd>u</kbd> | **Toggle Drive Unit Selection** | `UI` & `Hardware I/O` | Dispatches `HwCmd::ToggleDriveUnit` and `Action::ToggleDriveUnit`. In **IBM PC mode**, alternates active drive between `Drive 0 (A:)` and `Drive 1 (B:)`. In **Shugart mode**, cycles through the 4 physical units `Unit 0 (DS0)` ➔ `Unit 1 (DS1)` ➔ `Unit 2 (DS2)` ➔ `Unit 3 (DS3)`. Safely shuts down motor on old drive, deselects bus (`CMD_DESELECT 0x0D`), selects new drive unit (`CMD_SELECT 0x0C`), performs motor-gated recalibration to Track 00 (`CMD_SEEK 0`), queries write-protect status, and resets UI metrics. |
 | <kbd>L</kbd> / <kbd>l</kbd> | **Live RPM & Tachometer Test** | `Hardware I/O` & `UI` | Dispatches `HwCmd::MeasureRpm`. Toggles live motor tachometer mode (`DisplayMode::RpmMeasure`, `HwActivity::MeasuringRpm`). Spins up spindle motor if stopped, continuously captures index pulse intervals over 72 MHz hardware timer, tracks instantaneous RPM, computes 10-revolution rolling average and peak-to-peak flutter/jitter, and updates the 21-slot visual centering gauge. Interruptible by any seek or mode key. |
 | <kbd>M</kbd> / <kbd>m</kbd> | **Force Motor Toggle ON / OFF** | `Hardware I/O` | Dispatches `HwCmd::ToggleMotor`. Manually toggles spindle motor power (`CMD_MOTOR = 1 / 0`) with bus and unit re-assertion, preserving current cylinder, head selection, sector map, and rolling average RPM (non-destructive state toggle). |
 | <kbd>B</kbd> / <kbd>b</kbd> | **Toggle Acoustic Variometer** | `Audio` & `UI` | Dispatches `HwCmd::ToggleBeep`. Toggles real-time acoustic alignment radar audio feedback. When enabled (`BEEP : ON (Radar)`), the sound worker thread synthesizes multi-tier pitch-modulated tones ($1500\text{ Hz} \le f \le 2200\text{ Hz}$ for nominal, $600\text{ Hz} \le f \le 1400\text{ Hz}$ for marginal, $250\text{ Hz} \le f \le 500\text{ Hz}$ continuous for severe, and $180\text{ Hz}$ pulsed buzz for cross-track mismatch). |
@@ -418,15 +418,15 @@ All keyboard inputs are captured in raw mode via Crossterm non-blocking polling 
 | <kbd>P</kbd> / <kbd>p</kbd> | **Cycle Machine Profile & Disk Format** | `UI` & `Hardware I/O` | Dispatches `HwCmd::CycleDiskFormat` and `Action::CycleDiskFormat`. Cycles active machine profile and sector decoding format: `AutoDetect` ➔ `IbmPc` ➔ `AmigaDos` ➔ `AtariSt` ➔ `AmstradCpcData` ➔ `AmstradCpcSystem`. Updates expected sector count, IDAM parsing rules, even/odd Paula bit-deinterleaving, or CPC sector ID offsets accordingly. |
 | <kbd>F</kbd> / <kbd>f</kbd> | **Low-Level Track Formatter** | `Hardware I/O` *(Reserved)* | Reserved shortcut for full-track low-level MFM formatting and bulk magnetic degaussing utility in Roadmap Phase 3. |
 | <kbd>I</kbd> / <kbd>i</kbd> | **Track Flux Imaging Utility** | `Hardware I/O` *(Reserved)* | Reserved shortcut for raw multi-revolution flux imaging and flux-level surface degradation heatmaps in Roadmap Phase 4. |
-| <kbd>S</kbd> / <kbd>s</kbd> | **Toggle Step Rate (Single 1:1 / Double 2:1 for 48/96 TPI)** | `Hardware I/O` *(Reserved)* | Reserved shortcut for 40-track / 80-track double-stepping toggle (Single Step 1:1 / Double Step 2:1 for 48 TPI diskettes on 96 TPI drives like in ImageDisk) and custom stepper pulse timing configurations. |
-| <kbd>T</kbd> / <kbd>t</kbd> | **Toggle Bus Type (IBM PC <-> Shugart)** | `UI` & `Hardware I/O` | Dispatches `HwCmd::ToggleBusType` and `Action::ToggleBusType`. Toggles floppy interface between IBM PC bus (`0x01`) and Shugart standard bus (`0x02`, e.g. Amiga / Atari / Commodore / CPC native drives). Dynamically updates pinout configuration and unit drive selection. |
+| <kbd>S</kbd> / <kbd>s</kbd> | **Toggle Step Rate (Single 1:1 / Double 2:1 for 48/96 TPI)** | `UI` & `Hardware I/O` | Dispatches `HwCmd::ToggleStepMode` and `Action::ToggleStepMode`. Alternates head carriage stepping rate between Single Step 1:1 (native 96/135 TPI drives, 0..83 cylinders) and Double Step 2:1 (48 TPI media on 96/135 TPI mechanics, multiplying physical seek cylinders by 2 to map 40-41 logical tracks T00..T40 onto physical cylinders 0..82). Automatically bounds active track to the maximum logical limit (83 in Single, 41 in Double). |
+| <kbd>T</kbd> / <kbd>t</kbd> | **Toggle Bus Type (IBM PC <-> Shugart)** | `UI` & `Hardware I/O` | Dispatches `HwCmd::ToggleBusType` and `Action::ToggleBusType`. Toggles floppy interface between IBM PC bus (`0x01`) and Shugart standard bus (`0x02`, e.g. Amiga / Atari / Commodore / CPC native drives). Dynamically updates pinout configuration and unit drive selection (automatically resetting the active unit to 0 if switching back to PC mode while on DS2 or DS3). |
 | <kbd>W</kbd> / <kbd>w</kbd> | **Write Sector Integrity Test** | `Hardware I/O` *(Reserved)* | Reserved shortcut for non-destructive sector rewrite and magnetic surface test patterns in Roadmap Phase 3. |
 
 ---
 
 ## 9. Automated Test & Verification Suite
 
-AlignTesterDiag includes an exhaustive **122-test automated unit test suite** built directly into Cargo (100% success rate).
+AlignTesterDiag includes an exhaustive **132-test automated unit test suite** built directly into Cargo (100% success rate).
 
 ### 9.1 Automated Unit Test Harness
 Run the full test suite using Cargo:
@@ -434,15 +434,18 @@ Run the full test suite using Cargo:
 cargo test
 ```
 
-The 122 unit tests provide complete coverage across all subsystems:
+The 132 unit tests provide complete coverage across all subsystems:
 - State transitions on `HwCmd` and `Action` dispatches (`src/app.rs`, `src/hw/mod.rs`).
+- Dynamic drive unit cycling across bus types (`0..1` for IBM PC, `0..3` for Shugart) and automatic unit fallback (`src/app.rs`, `src/hw/mod.rs`, `src/main.rs`).
+- Step rate / Double-step mode translation, track bounds clamping, and physical cylinder calculation (`src/hw/protocol.rs`, `src/hw/mod.rs`, `src/app.rs`, `src/main.rs`).
 - DPLL boundary clamping, RMS phase jitter, and frequency adaptation (`src/hw/mod.rs`).
 - Multi-tier variometer pitch bounds ($1500 \text{ Hz} \le f \le 2200 \text{ Hz}$, $600 \text{ Hz} \le f \le 1400 \text{ Hz}$, $250 \text{ Hz} \le f \le 500 \text{ Hz}$) and mismatch warning tone (180 Hz) (`src/audio.rs`).
 - Spindle tachometer rolling average windowing, sub-microsecond interval conversion, and jitter calculations (`src/hw/mod.rs`).
 - Multi-system retro encoding & decoding engines (Amiga Paula even/odd bit deinterleaving & 32-bit XOR checksums, Atari ST 9/10/11 sectors & overtracks, Amstrad CPC DATA/SYSTEM sector ID formats) (`src/hw/mod.rs`, `src/app.rs`, `src/ui.rs`).
 - Dual-head "Both" mode consolidation, active pointer tracking, and mismatch handling (`src/app.rs`, `src/hw/mod.rs`, `src/ui.rs`).
-- TUI ribbon span coloring, phosphor decay interpolation, spinner animation, and dynamic text generation (`src/ui.rs`).
-- Hardware protocol packet encoders and opcode definitions (`src/hw/protocol.rs`).
+- TUI ribbon span coloring, phosphor decay interpolation, spinner animation, zero-allocation ruler line, and dynamic text generation (`src/ui.rs`).
+- Hardware protocol packet encoders, bus modes, step modes, and opcode definitions (`src/hw/protocol.rs`).
+- CLI argument parsing (`--port`, `--drive`, `--bus`, `--step`, `--double-step`, `--shugart`, short & key-value syntax) and auto-detection fallback (`src/main.rs`).
 
 ---
 
