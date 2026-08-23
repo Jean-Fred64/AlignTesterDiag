@@ -1,4 +1,4 @@
-use crate::hw::{BusType, DiskFormat, DisplayMode, DriveStatus, HwActivity, StepMode};
+use crate::hw::{BusType, DiskFormat, DisplayMode, DriveStatus, HwActivity, PresetProfile, StepMode};
 
 /// Three-state head selection mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -155,6 +155,8 @@ pub enum Action {
     SetBusType(BusType),
     ToggleStepMode,
     SetStepMode(StepMode),
+    CyclePreset,
+    SetPreset(PresetProfile),
 }
 
 /// Application state wrapper
@@ -172,6 +174,7 @@ pub struct App {
     pub disk_format: DiskFormat,
     pub bus_type: BusType,
     pub step_mode: StepMode,
+    pub preset: PresetProfile,
 }
 
 impl App {
@@ -188,6 +191,15 @@ impl App {
     }
 
     pub fn with_full_config(drive_unit: u8, bus_type: BusType, step_mode: StepMode) -> Self {
+        Self::with_full_preset_config(drive_unit, bus_type, step_mode, PresetProfile::Pc35Hd)
+    }
+
+    pub fn with_full_preset_config(
+        drive_unit: u8,
+        bus_type: BusType,
+        step_mode: StepMode,
+        preset: PresetProfile,
+    ) -> Self {
         let max_unit = match bus_type {
             BusType::IbmPc => 1,
             BusType::Shugart => 3,
@@ -198,6 +210,10 @@ impl App {
             unit_id: unit,
             bus_type,
             step_mode,
+            preset,
+            disk_format: preset.format_profile(),
+            bitrate: preset.target_data_rate(),
+            density: preset.target_data_rate() == 500,
             ..Default::default()
         };
         Self {
@@ -211,9 +227,10 @@ impl App {
             last_capture_instant: std::time::Instant::now(),
             stream_spinner_idx: 0,
             show_help: false,
-            disk_format: DiskFormat::AutoDetect,
+            disk_format: preset.format_profile(),
             bus_type,
             step_mode,
+            preset,
         }
     }
 
@@ -260,6 +277,7 @@ impl App {
         self.disk_format = status.disk_format;
         self.bus_type = status.bus_type;
         self.step_mode = status.step_mode;
+        self.preset = status.preset;
         self.status = status;
         self.drive_unit = self.status.drive_unit;
         self.head_selection = self.status.head_select;
@@ -370,6 +388,28 @@ impl App {
         self.step_mode
     }
 
+    pub fn apply_preset(&mut self, preset: PresetProfile) {
+        self.preset = preset;
+        self.disk_format = preset.format_profile();
+        self.set_bus_type(preset.default_bus());
+        self.set_step_mode(preset.default_step());
+        self.status.preset = preset;
+        self.status.disk_format = self.disk_format;
+        self.status.bus_type = self.bus_type;
+        self.status.step_mode = self.step_mode;
+        self.status.bitrate = preset.target_data_rate();
+        self.status.density = self.status.bitrate == 500;
+    }
+
+    pub fn cycle_preset(&mut self) {
+        let next = self.preset.next();
+        self.apply_preset(next);
+    }
+
+    pub fn preset(&self) -> PresetProfile {
+        self.preset
+    }
+
     pub fn handle_action(&mut self, action: Action) {
         match action {
             Action::ToggleDriveUnit => self.toggle_drive_unit(),
@@ -379,6 +419,8 @@ impl App {
             Action::SetBusType(bus) => self.set_bus_type(bus),
             Action::ToggleStepMode => self.toggle_step_mode(),
             Action::SetStepMode(mode) => self.set_step_mode(mode),
+            Action::CyclePreset => self.cycle_preset(),
+            Action::SetPreset(preset) => self.apply_preset(preset),
             Action::Analyze | Action::StartAnalysis => {
                 self.motor_on = true;
                 self.status.analyzing = true;
@@ -1083,6 +1125,49 @@ mod tests {
         app.handle_action(Action::SetStepMode(StepMode::Double));
         assert_eq!(app.step_mode(), StepMode::Double);
         assert_eq!(app.status.track, 41);
+    }
+
+    #[test]
+    fn test_app_preset_lifecycle_and_actions() {
+        let mut app = App::with_full_preset_config(0, BusType::IbmPc, StepMode::Single, PresetProfile::Pc35Hd);
+        assert_eq!(app.preset(), PresetProfile::Pc35Hd);
+        assert_eq!(app.bus_type(), BusType::IbmPc);
+        assert_eq!(app.step_mode(), StepMode::Single);
+        assert_eq!(app.status.bitrate, 500);
+
+        // Apply Amiga preset
+        app.handle_action(Action::SetPreset(PresetProfile::Amiga35Dd));
+        assert_eq!(app.preset(), PresetProfile::Amiga35Dd);
+        assert_eq!(app.bus_type(), BusType::Shugart);
+        assert_eq!(app.step_mode(), StepMode::Single);
+        assert_eq!(app.status.bitrate, 250);
+        assert_eq!(app.disk_format(), DiskFormat::AmigaDos);
+
+        // Apply 360K on 1.2M HD drive (Pc525DdOnHd)
+        app.apply_preset(PresetProfile::Pc525DdOnHd);
+        assert_eq!(app.preset(), PresetProfile::Pc525DdOnHd);
+        assert_eq!(app.bus_type(), BusType::IbmPc);
+        assert_eq!(app.step_mode(), StepMode::Double);
+        assert_eq!(app.status.bitrate, 300);
+        assert_eq!(app.disk_format(), DiskFormat::IbmPc);
+
+        // Cycle through presets via Action
+        app.handle_action(Action::CyclePreset);
+        assert_eq!(app.preset(), PresetProfile::Pc525Dd);
+        assert_eq!(app.bus_type(), BusType::IbmPc);
+        assert_eq!(app.step_mode(), StepMode::Single);
+        assert_eq!(app.status.bitrate, 250);
+
+        // Verify handle_hw_message syncs preset
+        let mut new_status = DriveStatus::default();
+        new_status.preset = PresetProfile::Cpc30Data;
+        new_status.bus_type = BusType::Shugart;
+        new_status.step_mode = StepMode::Single;
+        new_status.bitrate = 250;
+        app.handle_hw_message(new_status);
+        assert_eq!(app.preset(), PresetProfile::Cpc30Data);
+        assert_eq!(app.bus_type(), BusType::Shugart);
+        assert_eq!(app.status.preset, PresetProfile::Cpc30Data);
     }
 }
 

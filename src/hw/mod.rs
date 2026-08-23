@@ -40,114 +40,6 @@ pub enum DriveReadStatus {
     Aborted,
 }
 
-/// Multi-format retro disk profile
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum DiskFormat {
-    #[default]
-    AutoDetect,
-    IbmPc,
-    AmigaDos,
-    AtariSt,
-    AmstradCpcData,
-    AmstradCpcSystem,
-}
-
-impl DiskFormat {
-    pub fn name(&self) -> &'static str {
-        match self {
-            DiskFormat::AutoDetect => "Auto-Detect",
-            DiskFormat::IbmPc => "IBM PC (FAT)",
-            DiskFormat::AmigaDos => "AmigaDOS (Paula)",
-            DiskFormat::AtariSt => "Atari ST (WD1772)",
-            DiskFormat::AmstradCpcData => "Amstrad CPC (DATA)",
-            DiskFormat::AmstradCpcSystem => "Amstrad CPC (SYSTEM)",
-        }
-    }
-
-    pub fn short_name(&self) -> &'static str {
-        match self {
-            DiskFormat::AutoDetect => "AUTO",
-            DiskFormat::IbmPc => "PC",
-            DiskFormat::AmigaDos => "AMIGA",
-            DiskFormat::AtariSt => "ATARI",
-            DiskFormat::AmstradCpcData => "CPC-DATA",
-            DiskFormat::AmstradCpcSystem => "CPC-SYS",
-        }
-    }
-
-    pub fn cycle_next(&self) -> Self {
-        match self {
-            DiskFormat::AutoDetect => DiskFormat::IbmPc,
-            DiskFormat::IbmPc => DiskFormat::AmigaDos,
-            DiskFormat::AmigaDos => DiskFormat::AtariSt,
-            DiskFormat::AtariSt => DiskFormat::AmstradCpcData,
-            DiskFormat::AmstradCpcData => DiskFormat::AmstradCpcSystem,
-            DiskFormat::AmstradCpcSystem => DiskFormat::AutoDetect,
-        }
-    }
-
-    pub fn expected_sector_count(&self, bitrate: u16, detected_count: u8) -> u8 {
-        match self {
-            DiskFormat::AmigaDos => {
-                if bitrate == 500 {
-                    22
-                } else {
-                    11
-                }
-            }
-            DiskFormat::AmstradCpcData => {
-                if detected_count >= 10 {
-                    10
-                } else {
-                    9
-                }
-            }
-            DiskFormat::AmstradCpcSystem => 9,
-            DiskFormat::AtariSt => {
-                if detected_count >= 11 {
-                    11
-                } else if detected_count == 10 {
-                    10
-                } else {
-                    9
-                }
-            }
-            DiskFormat::IbmPc => {
-                if bitrate == 500 {
-                    if detected_count == 15 {
-                        15
-                    } else {
-                        18
-                    }
-                } else {
-                    9
-                }
-            }
-            DiskFormat::AutoDetect => {
-                if bitrate == 500 {
-                    if detected_count == 15 {
-                        15
-                    } else if detected_count == 22 {
-                        22
-                    } else if detected_count > 18 {
-                        detected_count
-                    } else {
-                        18
-                    }
-                } else if detected_count == 11 {
-                    11
-                } else if detected_count == 10 {
-                    10
-                } else if detected_count > 0 {
-                    detected_count
-                } else {
-                    9
-                }
-            }
-        }
-    }
-}
-
 /// Minimal electronic head switch settle time (1 ms) for SIDE1 selection.
 pub const HEAD_SWITCH_SETTLE_MS: u64 = 1;
 /// Stepper motor driver electronic wake-up delay (15 ms) for 26-pin FFC drives (e.g. TEAC FD-05HG).
@@ -303,6 +195,7 @@ pub struct DriveStatus {
     pub disk_format: DiskFormat,
     pub bus_type: BusType,
     pub step_mode: StepMode,
+    pub preset: PresetProfile,
 }
 
 impl Default for DriveStatus {
@@ -353,6 +246,7 @@ impl Default for DriveStatus {
             disk_format: DiskFormat::AutoDetect,
             bus_type: BusType::IbmPc,
             step_mode: StepMode::Single,
+            preset: PresetProfile::Pc35Hd,
         }
     }
 }
@@ -392,6 +286,8 @@ pub enum HwCmd {
     ToggleBusType,
     SetStepMode(StepMode),
     ToggleStepMode,
+    CyclePreset,
+    SetPreset(PresetProfile),
     Exit,
 }
 
@@ -994,14 +890,30 @@ pub struct SoftwarePll {
 
 impl SoftwarePll {
     pub fn new(clock_ticks: f64) -> Self {
-        Self {
-            clock_centre: clock_ticks,
-            clock_min: clock_ticks * 0.90,
-            clock_max: clock_ticks * 1.10,
-            clock: clock_ticks,
-            phase_accumulator: 0.0,
-            phase_adj: 0.60,
-            period_adj: 0.05,
+        if clock_ticks >= 100.0 {
+            // DD modes (250 kbps = 144.0 ticks, 300 kbps = 120.0 ticks):
+            // Extended +/- 25% adaptive tolerance to absorb heavy phase flutter & spindle jitter
+            Self {
+                clock_centre: clock_ticks,
+                clock_min: clock_ticks * 0.75,
+                clock_max: clock_ticks * 1.25,
+                clock: clock_ticks,
+                phase_accumulator: 0.0,
+                phase_adj: 0.65,
+                period_adj: 0.05,
+            }
+        } else {
+            // HD mode (500 kbps = 72.0 ticks):
+            // Nominal +/- 10% tolerance for tight high-density flux transitions
+            Self {
+                clock_centre: clock_ticks,
+                clock_min: clock_ticks * 0.90,
+                clock_max: clock_ticks * 1.10,
+                clock: clock_ticks,
+                phase_accumulator: 0.0,
+                phase_adj: 0.60,
+                period_adj: 0.05,
+            }
         }
     }
 
@@ -1011,12 +923,37 @@ impl SoftwarePll {
         self.phase_accumulator = 0.0;
     }
 
-    /// Decodes raw flux intervals into MFM bitstream with clean PLL state initialization
+    /// Decodes raw flux intervals into MFM bitstream with clean PLL state initialization and noise filtering
     pub fn decode_flux(&mut self, flux: &[u32]) -> Vec<bool> {
         self.reset();
         let mut bit_array = Vec::with_capacity(flux.len() * 3);
 
-        for &x in flux {
+        // For DD modes (clock_centre >= 100.0 ticks), filter out parasitic noise pulses < 1.5 µs (108 ticks @ 72 MHz)
+        let filtered_flux: Vec<u32>;
+        let input_flux: &[u32] = if self.clock_centre >= 100.0 {
+            let mut f = Vec::with_capacity(flux.len());
+            let mut acc = 0u32;
+            for &x in flux {
+                acc += x;
+                if acc >= 108 {
+                    f.push(acc);
+                    acc = 0;
+                }
+            }
+            if acc > 0 {
+                if let Some(last) = f.last_mut() {
+                    *last += acc;
+                } else {
+                    f.push(acc);
+                }
+            }
+            filtered_flux = f;
+            &filtered_flux
+        } else {
+            flux
+        };
+
+        for &x in input_flux {
             self.phase_accumulator += x as f64;
             if self.phase_accumulator < self.clock / 2.0 {
                 continue;
@@ -1623,11 +1560,19 @@ pub fn decode_track_flux(
         | DiskFormat::AmstradCpcData
         | DiskFormat::AmstradCpcSystem
         | DiskFormat::IbmPc => {
+            // 1. Try DD 250k (144.0 ticks)
             let bits_dd = pll_flux_to_mfm_bits(flux, 144.0);
             let sectors_dd = decode_idam_sectors_from_bits(&bits_dd);
             if !sectors_dd.is_empty() {
                 return (format, 250, 144.0, sectors_dd);
             }
+            // 2. Try DD @ 360 RPM 300k (120.0 ticks, Pc525DdOnHd)
+            let bits_300 = pll_flux_to_mfm_bits(flux, 120.0);
+            let sectors_300 = decode_idam_sectors_from_bits(&bits_300);
+            if !sectors_300.is_empty() {
+                return (format, 300, 120.0, sectors_300);
+            }
+            // 3. Try HD 500k (72.0 ticks)
             let bits_hd = pll_flux_to_mfm_bits(flux, 72.0);
             let sectors_hd = decode_idam_sectors_from_bits(&bits_hd);
             if !sectors_hd.is_empty() {
@@ -1664,20 +1609,27 @@ pub fn decode_track_flux(
                 return (detected, 250, 144.0, sectors_ibm_dd);
             }
 
-            // 2. Try DD 250k Amiga Paula MFM
+            // 2. Try DD @ 360 RPM 300k IBM MFM (Pc525DdOnHd)
+            let bits_300 = pll_flux_to_mfm_bits(flux, 120.0);
+            let sectors_ibm_300 = decode_idam_sectors_from_bits(&bits_300);
+            if !sectors_ibm_300.is_empty() {
+                return (DiskFormat::IbmPc, 300, 120.0, sectors_ibm_300);
+            }
+
+            // 3. Try DD 250k Amiga Paula MFM
             let sectors_amiga_dd = decode_amiga_sectors_from_bits(&bits_dd);
             if !sectors_amiga_dd.is_empty() {
                 return (DiskFormat::AmigaDos, 250, 144.0, sectors_amiga_dd);
             }
 
-            // 3. Try HD 500k IBM MFM
+            // 4. Try HD 500k IBM MFM
             let bits_hd = pll_flux_to_mfm_bits(flux, 72.0);
             let sectors_ibm_hd = decode_idam_sectors_from_bits(&bits_hd);
             if !sectors_ibm_hd.is_empty() {
                 return (DiskFormat::IbmPc, 500, 72.0, sectors_ibm_hd);
             }
 
-            // 4. Try HD 500k Amiga Paula MFM
+            // 5. Try HD 500k Amiga Paula MFM
             let sectors_amiga_hd = decode_amiga_sectors_from_bits(&bits_hd);
             if !sectors_amiga_hd.is_empty() {
                 return (DiskFormat::AmigaDos, 500, 72.0, sectors_amiga_hd);
@@ -3754,6 +3706,75 @@ pub fn handle_command(
             status.log_msg = format!("Step Rate: {}", status.step_mode.as_str());
             let _ = tx_status.send(status.clone());
         }
+        HwCmd::CyclePreset => {
+            let next_preset = status.preset.next();
+            status.preset = next_preset;
+            status.disk_format = next_preset.format_profile();
+            let new_bus = next_preset.default_bus();
+            let bus_changed = status.bus_type != new_bus;
+            status.bus_type = new_bus;
+            if status.bus_type == BusType::IbmPc && status.drive_unit > 1 {
+                status.drive_unit = 0;
+                status.unit_id = 0;
+            }
+            if bus_changed {
+                let _ = gw_send_raw(port, &build_bus_type_packet(status.bus_type.opcode_val()), 0);
+                ensure_unit_active(
+                    port,
+                    status.bus_type,
+                    status.drive_unit,
+                    status.motor_on,
+                    status.head,
+                );
+            }
+            status.step_mode = next_preset.default_step();
+            status.bitrate = next_preset.target_data_rate();
+            status.density = status.bitrate == 500;
+            status.track = status.track.min(status.step_mode.max_logical_tracks());
+            status.target_track = status.target_track.min(status.step_mode.max_logical_tracks());
+            status.log_msg = format!(
+                "Preset: {} ({} | {} | {}k)",
+                next_preset.label(),
+                next_preset.default_bus().as_str(),
+                next_preset.default_step().as_str(),
+                next_preset.target_data_rate()
+            );
+            let _ = tx_status.send(status.clone());
+        }
+        HwCmd::SetPreset(preset) => {
+            status.preset = preset;
+            status.disk_format = preset.format_profile();
+            let new_bus = preset.default_bus();
+            let bus_changed = status.bus_type != new_bus;
+            status.bus_type = new_bus;
+            if status.bus_type == BusType::IbmPc && status.drive_unit > 1 {
+                status.drive_unit = 0;
+                status.unit_id = 0;
+            }
+            if bus_changed {
+                let _ = gw_send_raw(port, &build_bus_type_packet(status.bus_type.opcode_val()), 0);
+                ensure_unit_active(
+                    port,
+                    status.bus_type,
+                    status.drive_unit,
+                    status.motor_on,
+                    status.head,
+                );
+            }
+            status.step_mode = preset.default_step();
+            status.bitrate = preset.target_data_rate();
+            status.density = status.bitrate == 500;
+            status.track = status.track.min(status.step_mode.max_logical_tracks());
+            status.target_track = status.target_track.min(status.step_mode.max_logical_tracks());
+            status.log_msg = format!(
+                "Preset: {} ({} | {} | {}k)",
+                preset.label(),
+                preset.default_bus().as_str(),
+                preset.default_step().as_str(),
+                preset.target_data_rate()
+            );
+            let _ = tx_status.send(status.clone());
+        }
     }
     should_exit
 }
@@ -3765,6 +3786,7 @@ pub fn hw_thread(
     initial_drive_unit: u8,
     initial_bus_type: BusType,
     initial_step_mode: StepMode,
+    initial_preset: PresetProfile,
 ) {
     let mut status = DriveStatus::default();
     if let Some(ref p) = port_arg {
@@ -3775,6 +3797,10 @@ pub fn hw_thread(
     status.unit_id = status.drive_unit;
     status.bus_type = initial_bus_type;
     status.step_mode = initial_step_mode;
+    status.preset = initial_preset;
+    status.disk_format = initial_preset.format_profile();
+    status.bitrate = initial_preset.target_data_rate();
+    status.density = status.bitrate == 500;
     let mut rpm_sampler = RpmSampler::new(4);
 
     let (tx_sound, rx_sound) = crossbeam_channel::unbounded::<AudioEvent>();
@@ -6094,6 +6120,58 @@ mod tests {
         let physical_clamped = (logical_track_clamped * status.step_mode.multiplier()).min(83);
         assert_eq!(logical_track_clamped, 41);
         assert_eq!(physical_clamped, 82);
+    }
+
+    #[test]
+    fn test_software_pll_adaptive_tolerance_dd_vs_hd() {
+        // DD mode (250 kbps = 144.0 ticks): +/- 25% tolerance
+        let pll_dd = SoftwarePll::new(144.0);
+        assert_eq!(pll_dd.clock_centre, 144.0);
+        assert_eq!(pll_dd.clock_min, 144.0 * 0.75);
+        assert_eq!(pll_dd.clock_max, 144.0 * 1.25);
+        assert_eq!(pll_dd.phase_adj, 0.65);
+        assert_eq!(pll_dd.period_adj, 0.05);
+
+        // DD mode (300 kbps = 120.0 ticks): +/- 25% tolerance
+        let pll_300k = SoftwarePll::new(120.0);
+        assert_eq!(pll_300k.clock_centre, 120.0);
+        assert_eq!(pll_300k.clock_min, 120.0 * 0.75);
+        assert_eq!(pll_300k.clock_max, 120.0 * 1.25);
+        assert_eq!(pll_300k.phase_adj, 0.65);
+
+        // HD mode (500 kbps = 72.0 ticks): +/- 10% tolerance
+        let pll_hd = SoftwarePll::new(72.0);
+        assert_eq!(pll_hd.clock_centre, 72.0);
+        assert_eq!(pll_hd.clock_min, 72.0 * 0.90);
+        assert_eq!(pll_hd.clock_max, 72.0 * 1.10);
+        assert_eq!(pll_hd.phase_adj, 0.60);
+    }
+
+    #[test]
+    fn test_software_pll_noise_pulse_filtering_dd() {
+        let mut pll = SoftwarePll::new(144.0);
+        // Feed flux with short noise glitches (< 108 ticks) interspersed
+        // e.g. 50 ticks (noise) + 238 ticks (remaining) = 288 ticks total (2 * 144.0 bitcells)
+        let noisy_flux = vec![50, 238, 40, 60, 188]; // 50+238=288, 40+60+188=288
+        let bits = pll.decode_flux(&noisy_flux);
+        // Expect clean 2-bitcell pulses decoded rather than corrupted noise
+        assert!(!bits.is_empty());
+    }
+
+    #[test]
+    fn test_preset_profile_status_and_commands() {
+        let mut status = DriveStatus::default();
+        assert_eq!(status.preset, PresetProfile::Pc35Hd);
+
+        // Test next preset transition
+        status.preset = status.preset.next();
+        assert_eq!(status.preset, PresetProfile::Pc35Dd);
+
+        let cmd_cycle = HwCmd::CyclePreset;
+        assert_eq!(cmd_cycle, HwCmd::CyclePreset);
+
+        let cmd_set = HwCmd::SetPreset(PresetProfile::Pc525DdOnHd);
+        assert_eq!(cmd_set, HwCmd::SetPreset(PresetProfile::Pc525DdOnHd));
     }
 }
 

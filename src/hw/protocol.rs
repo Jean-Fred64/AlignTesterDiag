@@ -164,6 +164,253 @@ impl StepMode {
     }
 }
 
+/// Multi-format retro disk profile
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DiskFormat {
+    #[default]
+    AutoDetect,
+    IbmPc,
+    AmigaDos,
+    AtariSt,
+    AmstradCpcData,
+    AmstradCpcSystem,
+}
+
+impl DiskFormat {
+    pub fn name(&self) -> &'static str {
+        match self {
+            DiskFormat::AutoDetect => "Auto-Detect",
+            DiskFormat::IbmPc => "IBM PC (FAT)",
+            DiskFormat::AmigaDos => "AmigaDOS (Paula)",
+            DiskFormat::AtariSt => "Atari ST (WD1772)",
+            DiskFormat::AmstradCpcData => "Amstrad CPC (DATA)",
+            DiskFormat::AmstradCpcSystem => "Amstrad CPC (SYSTEM)",
+        }
+    }
+
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            DiskFormat::AutoDetect => "AUTO",
+            DiskFormat::IbmPc => "PC",
+            DiskFormat::AmigaDos => "AMIGA",
+            DiskFormat::AtariSt => "ATARI",
+            DiskFormat::AmstradCpcData => "CPC-DATA",
+            DiskFormat::AmstradCpcSystem => "CPC-SYS",
+        }
+    }
+
+    pub fn cycle_next(&self) -> Self {
+        match self {
+            DiskFormat::AutoDetect => DiskFormat::IbmPc,
+            DiskFormat::IbmPc => DiskFormat::AmigaDos,
+            DiskFormat::AmigaDos => DiskFormat::AtariSt,
+            DiskFormat::AtariSt => DiskFormat::AmstradCpcData,
+            DiskFormat::AmstradCpcData => DiskFormat::AmstradCpcSystem,
+            DiskFormat::AmstradCpcSystem => DiskFormat::AutoDetect,
+        }
+    }
+
+    pub fn expected_sector_count(&self, bitrate: u16, detected_count: u8) -> u8 {
+        match self {
+            DiskFormat::AmigaDos => {
+                if bitrate == 500 {
+                    22
+                } else {
+                    11
+                }
+            }
+            DiskFormat::AmstradCpcData => {
+                if detected_count >= 10 {
+                    10
+                } else {
+                    9
+                }
+            }
+            DiskFormat::AmstradCpcSystem => 9,
+            DiskFormat::AtariSt => {
+                if detected_count >= 11 {
+                    11
+                } else if detected_count == 10 {
+                    10
+                } else {
+                    9
+                }
+            }
+            DiskFormat::IbmPc => {
+                if bitrate == 500 {
+                    if detected_count == 15 {
+                        15
+                    } else {
+                        18
+                    }
+                } else {
+                    9
+                }
+            }
+            DiskFormat::AutoDetect => {
+                if bitrate == 500 {
+                    if detected_count == 15 {
+                        15
+                    } else if detected_count == 22 {
+                        22
+                    } else if detected_count > 18 {
+                        detected_count
+                    } else {
+                        18
+                    }
+                } else if detected_count == 11 {
+                    11
+                } else if detected_count == 10 {
+                    10
+                } else if detected_count > 0 {
+                    detected_count
+                } else {
+                    9
+                }
+            }
+        }
+    }
+}
+
+/// Hardware Drive & Hybrid Format Presets
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PresetProfile {
+    /// 3.5" HD (1.44M, PC Bus, Step 1:1, DPLL 500 kbps @ 300 RPM)
+    #[default]
+    Pc35Hd,
+    /// 3.5" DD (720K, PC Bus, Step 1:1, DPLL 250 kbps @ 300 RPM)
+    Pc35Dd,
+    /// 5.25" HD (1.2M, PC Bus, Step 1:1, DPLL 500 kbps @ 360 RPM)
+    Pc525Hd,
+    /// 5.25" DD on HD Drive (360K, PC Bus, Step 2:1, DPLL 300 kbps @ 360 RPM)
+    Pc525DdOnHd,
+    /// 5.25" DD on DD Drive (360K, PC Bus, Step 1:1, DPLL 250 kbps @ 300 RPM)
+    Pc525Dd,
+    /// Amiga 3.5" (880K, Shugart Bus, Step 1:1, DPLL 250 kbps @ 300 RPM)
+    Amiga35Dd,
+    /// Atari 3.5" (720K, PC Bus, Step 1:1, DPLL 250 kbps @ 300 RPM)
+    Atari35Dd,
+    /// Amstrad CPC 3.0" (178K, Shugart Bus, Step 1:1, DPLL 250 kbps @ 300 RPM)
+    Cpc30Data,
+}
+
+impl PresetProfile {
+    /// Cycles to the next preset in standard sequential order
+    pub fn next(&self) -> Self {
+        match self {
+            PresetProfile::Pc35Hd => PresetProfile::Pc35Dd,
+            PresetProfile::Pc35Dd => PresetProfile::Pc525Hd,
+            PresetProfile::Pc525Hd => PresetProfile::Pc525DdOnHd,
+            PresetProfile::Pc525DdOnHd => PresetProfile::Pc525Dd,
+            PresetProfile::Pc525Dd => PresetProfile::Amiga35Dd,
+            PresetProfile::Amiga35Dd => PresetProfile::Atari35Dd,
+            PresetProfile::Atari35Dd => PresetProfile::Cpc30Data,
+            PresetProfile::Cpc30Data => PresetProfile::Pc35Hd,
+        }
+    }
+
+    /// Alias for next()
+    pub fn cycle_next(&self) -> Self {
+        self.next()
+    }
+
+    /// Full human-readable descriptive label
+    pub fn label(&self) -> &'static str {
+        match self {
+            PresetProfile::Pc35Hd => "3.5\" HD (1.44M)",
+            PresetProfile::Pc35Dd => "3.5\" DD (720K)",
+            PresetProfile::Pc525Hd => "5.25\" HD (1.2M)",
+            PresetProfile::Pc525DdOnHd => "5.25\" DD on HD (360K)",
+            PresetProfile::Pc525Dd => "5.25\" DD (360K)",
+            PresetProfile::Amiga35Dd => "Amiga 3.5\" DD (880K)",
+            PresetProfile::Atari35Dd => "Atari 3.5\" DD (720K)",
+            PresetProfile::Cpc30Data => "Amstrad CPC 3.0\" (178K)",
+        }
+    }
+
+    /// Short label for compact displays
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            PresetProfile::Pc35Hd => "3.5 HD",
+            PresetProfile::Pc35Dd => "3.5 DD",
+            PresetProfile::Pc525Hd => "5.25 HD",
+            PresetProfile::Pc525DdOnHd => "5.25 DD@HD",
+            PresetProfile::Pc525Dd => "5.25 DD",
+            PresetProfile::Amiga35Dd => "Amiga 3.5",
+            PresetProfile::Atari35Dd => "Atari 3.5",
+            PresetProfile::Cpc30Data => "CPC 3.0",
+        }
+    }
+
+    /// Target DPLL bit rate in kbps (500, 300, 250)
+    pub fn target_data_rate(&self) -> u16 {
+        match self {
+            PresetProfile::Pc35Hd => 500,
+            PresetProfile::Pc35Dd => 250,
+            PresetProfile::Pc525Hd => 500,
+            PresetProfile::Pc525DdOnHd => 300,
+            PresetProfile::Pc525Dd => 250,
+            PresetProfile::Amiga35Dd => 250,
+            PresetProfile::Atari35Dd => 250,
+            PresetProfile::Cpc30Data => 250,
+        }
+    }
+
+    /// Nominal spindle speed in RPM
+    pub fn target_rpm(&self) -> f64 {
+        match self {
+            PresetProfile::Pc525Hd | PresetProfile::Pc525DdOnHd => 360.0,
+            _ => 300.0,
+        }
+    }
+
+    /// Default floppy interface bus pinout
+    pub fn default_bus(&self) -> BusType {
+        match self {
+            PresetProfile::Amiga35Dd | PresetProfile::Cpc30Data => BusType::Shugart,
+            _ => BusType::IbmPc,
+        }
+    }
+
+    /// Default head carriage step mode (Single 1:1 or Double 2:1)
+    pub fn default_step(&self) -> StepMode {
+        match self {
+            PresetProfile::Pc525DdOnHd => StepMode::Double,
+            _ => StepMode::Single,
+        }
+    }
+
+    /// Default decoding disk format profile
+    pub fn format_profile(&self) -> DiskFormat {
+        match self {
+            PresetProfile::Pc35Hd
+            | PresetProfile::Pc35Dd
+            | PresetProfile::Pc525Hd
+            | PresetProfile::Pc525DdOnHd
+            | PresetProfile::Pc525Dd => DiskFormat::IbmPc,
+            PresetProfile::Amiga35Dd => DiskFormat::AmigaDos,
+            PresetProfile::Atari35Dd => DiskFormat::AtariSt,
+            PresetProfile::Cpc30Data => DiskFormat::AmstradCpcData,
+        }
+    }
+
+    /// Case-insensitive parser supporting aliases for CLI and commands
+    pub fn from_str_loose(s: &str) -> Option<Self> {
+        let clean = s.trim().to_lowercase().replace(['-', '_', '.', ' ', '"', '\''], "");
+        match clean.as_str() {
+            "pc35hd" | "35hd" | "144m" | "144" | "hd35" | "pchd" => Some(PresetProfile::Pc35Hd),
+            "pc35dd" | "35dd" | "720k" | "720" | "dd35" | "pcdd" => Some(PresetProfile::Pc35Dd),
+            "pc525hd" | "525hd" | "12m" | "12" | "hd525" => Some(PresetProfile::Pc525Hd),
+            "pc525ddonhd" | "525ddonhd" | "525ddhd" | "360khd" | "360onhd" | "360khigh" | "360k360rpm" => Some(PresetProfile::Pc525DdOnHd),
+            "pc525dd" | "525dd" | "360k" | "360" | "dd525" => Some(PresetProfile::Pc525Dd),
+            "amiga35dd" | "amiga35" | "amigadd" | "amiga" | "880k" | "880" | "amigados" => Some(PresetProfile::Amiga35Dd),
+            "atari35dd" | "atari35" | "ataridd" | "atari" | "atarist" => Some(PresetProfile::Atari35Dd),
+            "cpc30data" | "cpc30" | "cpcdata" | "cpc" | "178k" | "178" | "amstradcpc" => Some(PresetProfile::Cpc30Data),
+            _ => None,
+        }
+    }
+}
+
 // ============================================================================
 // Guard Timing & Timeout Constants
 // ============================================================================
@@ -288,5 +535,95 @@ mod tests {
         assert_eq!(build_seek_packet(40), [0x02, 0x03, 40]);
         assert_eq!(build_read_flux_packet(3), [0x07, 0x08, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00]);
         assert_eq!(build_get_pin_packet(28), [0x14, 0x03, 28]);
+    }
+
+    #[test]
+    fn test_preset_profile_cycle_sequence() {
+        let mut p = PresetProfile::Pc35Hd;
+        assert_eq!(p, PresetProfile::default());
+
+        p = p.next();
+        assert_eq!(p, PresetProfile::Pc35Dd);
+        assert_eq!(p.target_data_rate(), 250);
+        assert_eq!(p.default_bus(), BusType::IbmPc);
+        assert_eq!(p.default_step(), StepMode::Single);
+        assert_eq!(p.format_profile(), DiskFormat::IbmPc);
+        assert_eq!(p.target_rpm(), 300.0);
+
+        p = p.next();
+        assert_eq!(p, PresetProfile::Pc525Hd);
+        assert_eq!(p.target_data_rate(), 500);
+        assert_eq!(p.default_bus(), BusType::IbmPc);
+        assert_eq!(p.default_step(), StepMode::Single);
+        assert_eq!(p.format_profile(), DiskFormat::IbmPc);
+        assert_eq!(p.target_rpm(), 360.0);
+
+        p = p.next();
+        assert_eq!(p, PresetProfile::Pc525DdOnHd);
+        assert_eq!(p.target_data_rate(), 300);
+        assert_eq!(p.default_bus(), BusType::IbmPc);
+        assert_eq!(p.default_step(), StepMode::Double);
+        assert_eq!(p.format_profile(), DiskFormat::IbmPc);
+        assert_eq!(p.target_rpm(), 360.0);
+
+        p = p.next();
+        assert_eq!(p, PresetProfile::Pc525Dd);
+        assert_eq!(p.target_data_rate(), 250);
+        assert_eq!(p.default_bus(), BusType::IbmPc);
+        assert_eq!(p.default_step(), StepMode::Single);
+        assert_eq!(p.format_profile(), DiskFormat::IbmPc);
+        assert_eq!(p.target_rpm(), 300.0);
+
+        p = p.next();
+        assert_eq!(p, PresetProfile::Amiga35Dd);
+        assert_eq!(p.target_data_rate(), 250);
+        assert_eq!(p.default_bus(), BusType::Shugart);
+        assert_eq!(p.default_step(), StepMode::Single);
+        assert_eq!(p.format_profile(), DiskFormat::AmigaDos);
+        assert_eq!(p.target_rpm(), 300.0);
+
+        p = p.next();
+        assert_eq!(p, PresetProfile::Atari35Dd);
+        assert_eq!(p.target_data_rate(), 250);
+        assert_eq!(p.default_bus(), BusType::IbmPc);
+        assert_eq!(p.default_step(), StepMode::Single);
+        assert_eq!(p.format_profile(), DiskFormat::AtariSt);
+        assert_eq!(p.target_rpm(), 300.0);
+
+        p = p.next();
+        assert_eq!(p, PresetProfile::Cpc30Data);
+        assert_eq!(p.target_data_rate(), 250);
+        assert_eq!(p.default_bus(), BusType::Shugart);
+        assert_eq!(p.default_step(), StepMode::Single);
+        assert_eq!(p.format_profile(), DiskFormat::AmstradCpcData);
+        assert_eq!(p.target_rpm(), 300.0);
+
+        p = p.next();
+        assert_eq!(p, PresetProfile::Pc35Hd);
+        assert_eq!(p.target_data_rate(), 500);
+        assert_eq!(p.default_bus(), BusType::IbmPc);
+        assert_eq!(p.default_step(), StepMode::Single);
+        assert_eq!(p.format_profile(), DiskFormat::IbmPc);
+        assert_eq!(p.target_rpm(), 300.0);
+    }
+
+    #[test]
+    fn test_preset_profile_from_str_loose() {
+        assert_eq!(PresetProfile::from_str_loose("pc35hd"), Some(PresetProfile::Pc35Hd));
+        assert_eq!(PresetProfile::from_str_loose("1.44M"), Some(PresetProfile::Pc35Hd));
+        assert_eq!(PresetProfile::from_str_loose("pc35dd"), Some(PresetProfile::Pc35Dd));
+        assert_eq!(PresetProfile::from_str_loose("720k"), Some(PresetProfile::Pc35Dd));
+        assert_eq!(PresetProfile::from_str_loose("pc525hd"), Some(PresetProfile::Pc525Hd));
+        assert_eq!(PresetProfile::from_str_loose("1.2M"), Some(PresetProfile::Pc525Hd));
+        assert_eq!(PresetProfile::from_str_loose("pc525ddonhd"), Some(PresetProfile::Pc525DdOnHd));
+        assert_eq!(PresetProfile::from_str_loose("360k-hd"), Some(PresetProfile::Pc525DdOnHd));
+        assert_eq!(PresetProfile::from_str_loose("pc525dd"), Some(PresetProfile::Pc525Dd));
+        assert_eq!(PresetProfile::from_str_loose("360K"), Some(PresetProfile::Pc525Dd));
+        assert_eq!(PresetProfile::from_str_loose("amiga"), Some(PresetProfile::Amiga35Dd));
+        assert_eq!(PresetProfile::from_str_loose("880k"), Some(PresetProfile::Amiga35Dd));
+        assert_eq!(PresetProfile::from_str_loose("atari"), Some(PresetProfile::Atari35Dd));
+        assert_eq!(PresetProfile::from_str_loose("cpc"), Some(PresetProfile::Cpc30Data));
+        assert_eq!(PresetProfile::from_str_loose("178k"), Some(PresetProfile::Cpc30Data));
+        assert_eq!(PresetProfile::from_str_loose("invalid_preset"), None);
     }
 }

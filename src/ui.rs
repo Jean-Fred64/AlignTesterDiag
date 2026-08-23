@@ -310,6 +310,8 @@ pub fn format_disk_format_header(
                 } else {
                     "PC HD 18x512 (1.44M)".to_string()
                 }
+            } else if bitrate == 300 {
+                "PC DD 9x512 (360K)".to_string()
             } else {
                 "PC DD 9x512 (720K)".to_string()
             }
@@ -323,6 +325,8 @@ pub fn format_disk_format_header(
                 } else {
                     "PC HD 18x512 (1.44M)".to_string()
                 }
+            } else if bitrate == 300 {
+                "PC DD 9x512 (360K)".to_string()
             } else if sector_count == 11 {
                 "AmigaDOS DD 11x512".to_string()
             } else if sector_count == 10 {
@@ -1050,7 +1054,7 @@ pub fn build_help_modal_lines() -> Vec<Line<'static>> {
         shortcut_row("I", "Track Image (Capture raw MFM flux stream)"),
         shortcut_row("L", "Live RPM (High-precision continuous tachometer test)"),
         shortcut_row("M", "Toggle Motor (Spindle motor ON / OFF)"),
-        shortcut_row("P", "Profile / Retro Format (Auto -> PC -> Amiga -> Atari -> CPC Data -> CPC Sys)"),
+        shortcut_row("P", "Preset Hardware & Format (3.5\" HD/DD, 5.25\" HD/DD/DD@HD, Amiga, Atari, CPC)"),
         shortcut_row("R", "Recalibrate Seek (Track 0 seek & verify)"),
         shortcut_row("S", "Toggle Step Rate (Single 1:1 / Double 2:1 for 48/96 TPI)"),
         shortcut_row("T", "Toggle Bus Type (IBM PC <-> Shugart)"),

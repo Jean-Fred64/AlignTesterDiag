@@ -98,7 +98,7 @@ cargo run --release -- --shugart --drive 0
 | <kbd>A</kbd> | **Analyze** | Start continuous real-time track alignment analysis |
 | <kbd>D</kbd> | **Read Data** | Read and test sector CRC integrity across the cylinder |
 | <kbd>L</kbd> | **Live RPM** | Live RPM tachometer & jitter stability test |
-| <kbd>P</kbd> | **Format Profile** | Cycle machine profile & format (Auto, PC, Amiga, Atari, CPC) |
+| <kbd>P</kbd> | **Preset (Hardware & Format)** | Cycle unified hardware & format presets (`Pc35Hd` ➔ `Pc35Dd` ➔ `Pc525Hd` ➔ `Pc525DdOnHd` ➔ `Pc525Dd` ➔ `Amiga35Dd` ➔ `Atari35Dd` ➔ `Cpc30Data`), atomically configuring bus, stepping rate, DPLL clock & nominal bitrate |
 | <kbd>S</kbd> | **Toggle Step Rate** | Toggle Single (1:1) / Double (2:1) step mode (48/96 TPI, for reading 40-track media on 80-track drives) |
 | <kbd>T</kbd> | **Toggle Bus Type** | Switch interface bus mode: `IBM PC (0x01)` ➔ `Shugart (0x02)` (auto-resets unit to 0 when entering PC mode from DS2/DS3) |
 | <kbd>B</kbd> | **Beep (Audio Radar)** | Toggle acoustic pitch variometer on / off |
@@ -126,6 +126,16 @@ ARGUMENTS:
   [PORT]                  Serial port name (e.g. COM3, /dev/ttyACM0). Auto-detected if omitted.
 
 OPTIONS:
+  -p, --preset <preset>      Select hardware & format preset:
+                             - pc35hd: 3.5" HD (1.44M, PC Bus, Step 1:1, DPLL 500 kbps @ 300 RPM)
+                             - pc35dd: 3.5" DD (720K, PC Bus, Step 1:1, DPLL 250 kbps @ 300 RPM)
+                             - pc525hd: 5.25" HD (1.2M, PC Bus, Step 1:1, DPLL 500 kbps @ 360 RPM)
+                             - pc525ddonhd: 5.25" DD on HD Drive (360K, PC Bus, Step 2:1, DPLL 300 kbps @ 360 RPM)
+                             - pc525dd: 5.25" DD on DD Drive (360K, PC Bus, Step 1:1, DPLL 250 kbps @ 300 RPM)
+                             - amiga: Amiga 3.5" (880K, Shugart Bus, Step 1:1, DPLL 250 kbps @ 300 RPM)
+                             - atari: Atari 3.5" (720K, PC Bus, Step 1:1, DPLL 250 kbps @ 300 RPM)
+                             - cpc: Amstrad CPC 3.0" (178K, Shugart Bus, Step 1:1, DPLL 250 kbps @ 300 RPM)
+                             Default: pc35hd
   -d, --drive <0-3>          Select target drive unit (0..1 for IBM PC, 0..3 for Shugart). Default: 0
       --drive=<0-3>          Alternative key-value syntax for drive unit selection
   -b, --bus <pc|shugart>     Select floppy interface bus type (pc | shugart). Default: pc
@@ -134,7 +144,7 @@ OPTIONS:
   -s, --step <single|double> Select step mode (single 1:1 for 96/135 TPI | double 2:1 for 48 TPI). Default: single
       --step=<single|double> Alternative key-value syntax for step mode selection
       --double-step          Shorthand flag for Double Step 2:1 mode (48 TPI media)
-  -p, --port <PORT>          Serial port connected to Greaseweazle
+      --port <PORT>          Serial port connected to Greaseweazle
   -h, --help                 Print help information
   -v, -V, --version          Print version information
 ```
