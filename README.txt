@@ -59,6 +59,16 @@ ARGUMENTS:
                           /dev/ttyACM0). Auto-detected if omitted.
 
 OPTIONS:
+  -p, --preset <preset>      Select hardware & format preset:
+                             - pc35hd: 3.5" HD (1.44M, PC Bus, Step 1:1, 500 kbps @ 300 RPM)
+                             - pc35dd: 3.5" DD (720K, PC Bus, Step 1:1, 250 kbps @ 300 RPM)
+                             - pc525hd: 5.25" HD (1.2M, PC Bus, Step 1:1, 500 kbps @ 360 RPM)
+                             - pc525ddonhd: 5.25" DD on HD Drive (360K, PC Bus, Step 2:1, 300 kbps @ 360 RPM)
+                             - pc525dd: 5.25" DD on DD Drive (360K, PC Bus, Step 1:1, 250 kbps @ 300 RPM)
+                             - amiga: Amiga 3.5" (880K, Shugart Bus, Step 1:1, 250 kbps @ 300 RPM)
+                             - atari: Atari 3.5" (720K, PC Bus, Step 1:1, 250 kbps @ 300 RPM)
+                             - cpc: Amstrad CPC 3.0" (178K, Shugart Bus, Step 1:1, 250 kbps @ 300 RPM)
+                             [default: pc35hd]
   -d, --drive <0-3>          Select target drive unit:
                              - 0..1 for IBM PC mode (0 = Drive A:, 1 = Drive B:)
                              - 0..3 for Shugart mode (DS0, DS1, DS2, DS3)
@@ -72,7 +82,7 @@ OPTIONS:
                              [default: single]
       --step=<single|double> Alternative key-value syntax for step mode
       --double-step          Shorthand flag for Double Step 2:1 mode (48 TPI media)
-  -p, --port <PORT>          Serial port connected to Greaseweazle
+      --port <PORT>          Serial port connected to Greaseweazle
   -h, --help                 Print help information
   -v, -V, --version          Print version information
 
@@ -84,8 +94,11 @@ Key / Shortcut       Action & Technical Description
 ? / F1               Help Modal       : Toggle full-screen help modal overlay
 A                    Analyze          : Continuous real-time track alignment test
 D                    Read Data        : Read and verify sector CCITT CRC-16 integrity
+F                    Format           : Low-Level Track & Entire Disk Format with dynamic
+                                        track count override (+/- or arrows), 2-rev pipeline
+                                        (~35s) & 1-rev DPLL read verification ([T]/[D]/[Esc])
 L                    Live RPM         : 72 MHz spindle tachometer & jitter stability
-P                    Format Profile   : Cycle machine format (Auto, PC, Amiga, Atari, CPC)
+P                    Preset Profile   : Cycle hardware & format presets (PC, Amiga, Atari, CPC)
 S                    Step Rate        : Toggle Single (1:1) / Double (2:1) step mode (48/96 TPI)
 T                    Toggle Bus Type  : Switch bus mode: IBM PC (0x01) <-> Shugart (0x02)
                                         (auto-resets unit to 0 when entering PC mode from DS2/DS3)
@@ -118,7 +131,7 @@ Q / X / Ctrl+C       Exit             : Clean shutdown (cuts motor & exits raw m
 --------------------------------------------------------------------------------
 6. AUTOMATED TEST SUITE
 --------------------------------------------------------------------------------
-AlignTesterDiag features an automated test suite with 132 unit tests (100% pass rate).
+AlignTesterDiag features an automated test suite with 165 unit tests (100% pass rate).
 Run with:
   cargo test
 

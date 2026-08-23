@@ -15,10 +15,12 @@
 
 - ⚡ **100% Non-Blocking Architecture (~60 Hz TUI):** Strict decoupling between the interactive Ratatui/Crossterm rendering loop, the USB hardware acquisition worker thread, and a dedicated real-time audio thread via lock-free `crossbeam-channel` queues.
 - 💾 **High-Precision Low-Level Format Engine & MFM Synthesizer (`CMD_WRITE_FLUX`):**
+  - **Ultra-Fast 2-Revolution Pipeline (~35s Full Disk):** 1 revolution index-synchronized flux emission + 1 revolution instant DPLL read-after-write verification per track.
   - **72 MHz Pulse Timing:** Translates synthesized MFM bitstreams into cycle-accurate 72 MHz interval ticks ($2T, 3T, 4T$).
   - **Write Pre-Compensation:** Applies $\pm 125\text{ ns}$ ($\approx 9$ ticks @ 72 MHz) timing shifts on inner tracks ($> 40$) to counteract magnetic peak shift.
   - **Hardware Index Cueing:** Synchronizes flux emission to the physical index pulse (`cue_at_index = 1`) with controlled splice overlap.
   - **Read-After-Write Verification:** Automatically reads back each formatted track, verifies 100% expected sector presence, 0 CRC errors, and $Q \ge 90\%$ quality with up to 2 automatic retries.
+  - **Dynamic Track Override:** Interactive track adjustment (`+`/`-` or Arrows) supporting standard 40/80 tracks up to 42/84 tracks with physical cylinder tracking.
   - **Write-Protect Guard:** Hardware Pin 28 (`WPROT`) validation before any carriage movement or flux emission.
 - 🕹️ **Multi-System Retro Platform Support (IBM PC, Amiga, Atari ST, Amstrad CPC):**
   - **Amiga (Paula MFM):** Décodage bit-level *even/odd*, checksums 32-bit XOR, 11 secteurs/piste en DD (880 Ko) et 22 secteurs en HD (1.76 Mo).
@@ -181,6 +183,7 @@ AlignTesterDiag/
 │   ├── ui.rs                  # TUI components, styled ribbon spans, centering gauges, track ruler
 │   └── hw/
 │       ├── mod.rs             # Greaseweazle USB communication, DPLL, MFM decoding, hardware timings
+│       ├── format.rs          # Low-level MFM track synthesis, CRC-16 table, pulse timing & format engine
 │       └── protocol.rs        # Greaseweazle binary protocol opcodes, ACK codes, packet builders
 └── export/
     ├── README.md              # Distribution showcase & quick reference
