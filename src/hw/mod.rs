@@ -672,12 +672,14 @@ impl DecodedSector {
 pub struct DecodedGwFlux {
     pub flux: Vec<u32>,
     pub index_timestamps: Vec<u32>,
+    pub index_flux_indices: Vec<usize>,
 }
 
 /// Decodes Greaseweazle v4 binary packets into flux intervals (ticks) and index timestamps
 pub fn decode_gw_flux_with_index(dat: &[u8]) -> DecodedGwFlux {
     let mut flux = Vec::with_capacity(dat.len());
     let mut index_timestamps = Vec::new();
+    let mut index_flux_indices = Vec::new();
     let mut ticks: u32 = 0;
     let mut idx = 0;
     let len = dat.len();
@@ -710,6 +712,7 @@ pub fn decode_gw_flux_with_index(dat: &[u8]) -> DecodedGwFlux {
                         | (((b2 & 0xFE) >> 1) << 14)
                         | (((b3 & 0xFE) >> 1) << 21);
                     index_timestamps.push(ts);
+                    index_flux_indices.push(flux.len());
                 } else {
                     break;
                 }
@@ -759,6 +762,7 @@ pub fn decode_gw_flux_with_index(dat: &[u8]) -> DecodedGwFlux {
     DecodedGwFlux {
         flux,
         index_timestamps,
+        index_flux_indices,
     }
 }
 
@@ -982,6 +986,85 @@ impl SoftwarePll {
 
         bit_array
     }
+    /// Computes physical PLL quality score (0..=100%) based on DPLL RMS Phase Jitter relative to dynamically tracked bitcells
+    pub fn calculate_quality(&mut self, flux: &[u32], has_crc_errors: bool) -> u8 {
+        if flux.is_empty() || self.clock_centre <= 0.0 {
+            return 0;
+        }
+        self.reset();
+
+        // For DD modes (clock_centre >= 100.0 ticks), filter out parasitic noise pulses < 1.5 µs (108 ticks @ 72 MHz)
+        let filtered_flux: Vec<u32>;
+        let input_flux: &[u32] = if self.clock_centre >= 100.0 {
+            let mut f = Vec::with_capacity(flux.len());
+            let mut acc = 0u32;
+            for &x in flux {
+                acc += x;
+                if acc >= 108 {
+                    f.push(acc);
+                    acc = 0;
+                }
+            }
+            if acc > 0 {
+                if let Some(last) = f.last_mut() {
+                    *last += acc;
+                } else {
+                    f.push(acc);
+                }
+            }
+            filtered_flux = f;
+            &filtered_flux
+        } else {
+            flux
+        };
+
+        let mut sum_sq_err = 0.0f64;
+        let mut count = 0usize;
+
+        for &x in input_flux {
+            self.phase_accumulator += x as f64;
+            if self.phase_accumulator < self.clock / 2.0 {
+                continue;
+            }
+
+            let mut zeros = 0;
+            loop {
+                self.phase_accumulator -= self.clock;
+                if self.phase_accumulator < self.clock / 2.0 {
+                    break;
+                }
+                zeros += 1;
+            }
+
+            let half_clock = self.clock / 2.0;
+            if half_clock > 0.0 {
+                let phase_err = (self.phase_accumulator.abs() / half_clock).min(1.5);
+                sum_sq_err += phase_err * phase_err;
+                count += 1;
+            }
+
+            let new_ticks = self.phase_accumulator * (1.0 - self.phase_adj);
+            if zeros <= 3 {
+                self.clock += self.phase_accumulator * self.period_adj;
+            } else {
+                self.clock += (self.clock_centre - self.clock) * self.period_adj;
+            }
+            self.clock = self.clock.clamp(self.clock_min, self.clock_max);
+            self.phase_accumulator = new_ticks;
+        }
+
+        if count == 0 {
+            return 0;
+        }
+
+        let rms_jitter = (sum_sq_err / (count as f64)).sqrt();
+        let q_score = ((1.0 - rms_jitter) * 100.0).clamp(0.0, 100.0).round() as u8;
+        if has_crc_errors {
+            q_score.saturating_sub(15)
+        } else {
+            q_score
+        }
+    }
 }
 
 /// Greaseweazle-compliant Phase-Locked Loop (PLL)
@@ -996,54 +1079,31 @@ pub fn calculate_pll_quality(flux: &[u32], clock_ticks: f64) -> u8 {
     calculate_pll_quality_with_crc(flux, clock_ticks, false)
 }
 
-/// Computes physical PLL quality score (0..=100%) based on RMS Phase Jitter, with penalty for residual CRC errors:
-/// - Phase error per transition: epsilon = |flux_time - bitcell_center| / (bitcell_window / 2.0)
+/// Computes physical PLL quality score (0..=100%) based on DPLL RMS Phase Jitter, with penalty for residual CRC errors:
+/// - DPLL phase error per transition: epsilon = |phase_accumulator| / (clock / 2.0)
 /// - RMS Jitter: sqrt( (1/N) * sum(epsilon^2) )
-/// - Base Q: ((1.0 - 2.0 * RMS_jitter) * 100.0).clamp(0.0, 100.0) as u8
+/// - Base Q: ((1.0 - RMS_jitter) * 100.0).clamp(0.0, 100.0) as u8
 /// - CRC penalty: if has_crc_errors, Q.saturating_sub(15)
 pub fn calculate_pll_quality_with_crc(flux: &[u32], clock_ticks: f64, has_crc_errors: bool) -> u8 {
     if flux.is_empty() || clock_ticks <= 0.0 {
         return 0;
     }
-    let mut sum_sq_err = 0.0f64;
-    let mut count = 0usize;
-    let half_clock = clock_ticks / 2.0;
-
-    for &x in flux {
-        let val = x as f64;
-        let n = (val / clock_ticks).round();
-        if (2.0..=4.0).contains(&n) {
-            let bitcell_center = n * clock_ticks;
-            let phase_err = (val - bitcell_center).abs() / half_clock;
-            sum_sq_err += phase_err * phase_err;
-            count += 1;
-        }
-    }
-
-    if count == 0 {
-        return 0;
-    }
-    let rms_jitter = (sum_sq_err / (count as f64)).sqrt();
-    let q_score = ((1.0 - 2.0 * rms_jitter) * 100.0).clamp(0.0, 100.0).round() as u8;
-    if has_crc_errors {
-        q_score.saturating_sub(15)
-    } else {
-        q_score
-    }
+    let mut pll = SoftwarePll::new(clock_ticks);
+    pll.calculate_quality(flux, has_crc_errors)
 }
 
 /// Validates and filters Gap0 time in microseconds based on bitrate-specific physical ranges:
-/// - 500 kbps (HD): [800 µs, 2200 µs] (Nominal ~1440 µs)
-/// - 250 kbps (DD): [1600 µs, 4400 µs] (Nominal ~2880 µs)
-/// - 300 kbps: [1300 µs, 3600 µs]
+/// - 500 kbps (HD): [500 µs, 3000 µs] (Nominal ~1440 µs)
+/// - 250 kbps (DD): [1000 µs, 6000 µs] (Nominal ~2880 µs)
+/// - 300 kbps: [800 µs, 5000 µs] (Nominal ~2400 µs)
 pub fn get_valid_gap0(bitrate: u16, raw_gap0_us: u32) -> Option<u32> {
     let (min_gap, max_gap) = match bitrate {
-        500 => (800, 2200),
-        250 => (1600, 4400),
-        300 => (1300, 3600),
+        500 => (500, 3000),
+        250 => (1000, 6000),
+        300 => (800, 5000),
         _ => {
             let nominal = (1440.0 * 500.0 / (bitrate as f64).max(1.0)) as u32;
-            (nominal.saturating_sub(nominal * 45 / 100), nominal + nominal * 55 / 100)
+            (nominal.saturating_sub(nominal * 55 / 100), nominal + nominal * 100 / 100)
         }
     };
     if (min_gap..=max_gap).contains(&raw_gap0_us) {
@@ -1057,7 +1117,7 @@ pub fn get_valid_gap0(bitrate: u16, raw_gap0_us: u32) -> Option<u32> {
 #[allow(dead_code)]
 pub fn format_gap0_field(gap0_us: Option<u32>) -> String {
     if let Some(gap0) = gap0_us {
-        format!("Gap0:{:4}µs", gap0)
+        format!("Gap0:{}µs", gap0)
     } else {
         String::from("Gap0:----")
     }
@@ -1965,7 +2025,14 @@ fn read_and_decode_track_diagnostic(
                 }
             }
 
-            let bits = pll_flux_to_mfm_bits(&flux, clock);
+            let first_idx_pos = decoded_gw.index_flux_indices.first().copied().unwrap_or(0);
+            let flux_from_index = if first_idx_pos < flux.len() {
+                &flux[first_idx_pos..]
+            } else {
+                &flux[..]
+            };
+
+            let bits = pll_flux_to_mfm_bits(flux_from_index, clock);
             let gap0_us = if status.disk_format == DiskFormat::AmigaDos {
                 const SYNC_32: [bool; 32] = [
                     false, true, false, false, false, true, false, false,
@@ -2282,11 +2349,7 @@ pub fn build_verbose_pass_line(
         String::from("IL:1:1")
     };
 
-    let gap0_str = if let Some(gap0) = diag.gap0_us {
-        format!("Gap0:{:4}µs", gap0)
-    } else {
-        String::from("Gap0:----")
-    };
+    let gap0_str = format_gap0_field(diag.gap0_us);
 
     let q_str = if let Some(q) = diag.pll_quality_pct {
         format!("Q:{}%", q)
@@ -4698,6 +4761,7 @@ mod tests {
         assert_eq!(decoded.index_timestamps.len(), 2);
         assert_eq!(decoded.index_timestamps[0], 1);
         assert_eq!(decoded.index_timestamps[1], 65);
+        assert_eq!(decoded.index_flux_indices, vec![0, 2]);
         assert_eq!(decoded.flux.len(), 2);
         assert_eq!(decoded.flux[0], 100);
         assert_eq!(decoded.flux[1], 100);
@@ -5326,26 +5390,26 @@ mod tests {
 
     #[test]
     fn test_adaptive_gap0_bounds() {
-        // 500 kbps (HD): [800 µs, 2200 µs]
+        // 500 kbps (HD): [500 µs, 3000 µs]
         assert_eq!(get_valid_gap0(500, 1440), Some(1440));
-        assert_eq!(get_valid_gap0(500, 800), Some(800));
-        assert_eq!(get_valid_gap0(500, 2200), Some(2200));
-        assert_eq!(get_valid_gap0(500, 799), None);
-        assert_eq!(get_valid_gap0(500, 2201), None);
+        assert_eq!(get_valid_gap0(500, 500), Some(500));
+        assert_eq!(get_valid_gap0(500, 3000), Some(3000));
+        assert_eq!(get_valid_gap0(500, 499), None);
+        assert_eq!(get_valid_gap0(500, 3001), None);
 
-        // 250 kbps (DD): [1600 µs, 4400 µs]
+        // 250 kbps (DD): [1000 µs, 6000 µs]
         assert_eq!(get_valid_gap0(250, 2880), Some(2880));
-        assert_eq!(get_valid_gap0(250, 1600), Some(1600));
-        assert_eq!(get_valid_gap0(250, 4400), Some(4400));
-        assert_eq!(get_valid_gap0(250, 1599), None);
-        assert_eq!(get_valid_gap0(250, 4401), None);
+        assert_eq!(get_valid_gap0(250, 1000), Some(1000));
+        assert_eq!(get_valid_gap0(250, 6000), Some(6000));
+        assert_eq!(get_valid_gap0(250, 999), None);
+        assert_eq!(get_valid_gap0(250, 6001), None);
 
-        // 300 kbps: [1300 µs, 3600 µs]
+        // 300 kbps: [800 µs, 5000 µs]
         assert_eq!(get_valid_gap0(300, 2400), Some(2400));
-        assert_eq!(get_valid_gap0(300, 1300), Some(1300));
-        assert_eq!(get_valid_gap0(300, 3600), Some(3600));
-        assert_eq!(get_valid_gap0(300, 1299), None);
-        assert_eq!(get_valid_gap0(300, 3601), None);
+        assert_eq!(get_valid_gap0(300, 800), Some(800));
+        assert_eq!(get_valid_gap0(300, 5000), Some(5000));
+        assert_eq!(get_valid_gap0(300, 799), None);
+        assert_eq!(get_valid_gap0(300, 5001), None);
     }
 
     #[test]
@@ -5370,6 +5434,57 @@ mod tests {
         // With CRC error penalty (-15)
         let q_noisy_crc = calculate_pll_quality_with_crc(&noisy_flux, 72.0, true);
         assert_eq!(q_noisy_crc, q_noisy.saturating_sub(15));
+    }
+
+    #[test]
+    fn test_pll_quality_dd_mode_with_noise_and_jitter() {
+        // 250 kbps DD ideal pulses (144 clock ticks = 288, 432, 576 for 2T, 3T, 4T)
+        let ideal_flux_dd = vec![288, 288, 432, 576, 288, 432];
+        let q_dd_ideal = calculate_pll_quality(&ideal_flux_dd, 144.0);
+        assert_eq!(q_dd_ideal, 100);
+
+        // 250 kbps DD with parasitic noise glitches (< 108 ticks) properly filtered
+        let noisy_glitch_dd = vec![50, 238, 288, 432, 576, 288, 432]; // 50 + 238 = 288
+        let q_dd_glitch = calculate_pll_quality(&noisy_glitch_dd, 144.0);
+        assert!(q_dd_glitch >= 90, "DD mode with noise filtering must maintain high quality, got {}", q_dd_glitch);
+
+        // 300 kbps DD mode (120 clock ticks = 240, 360, 480 for 2T, 3T, 4T)
+        let ideal_300k = vec![240, 240, 360, 480, 240, 360];
+        let q_300k = calculate_pll_quality(&ideal_300k, 120.0);
+        assert_eq!(q_300k, 100);
+
+        // 300 kbps with slight jitter
+        let jitter_300k = vec![236, 244, 356, 484, 238, 362];
+        let q_jitter_300k = calculate_pll_quality(&jitter_300k, 120.0);
+        assert!(q_jitter_300k >= 85 && q_jitter_300k <= 100);
+    }
+
+    #[test]
+    fn test_gap0_measurement_from_index_offset() {
+        // Construct raw Greaseweazle stream with 500 flux ticks BEFORE the index pulse,
+        // then an Index pulse (opcode 1), then 72 Gap0 bytes (0x4E = 288 ticks each in DD @ 250k),
+        // followed by IDAM sync (3x 0xA1 = 3x 48 bits)
+        let mut raw = Vec::new();
+        // 5 flux pulses of 100 ticks before index (total 500 ticks)
+        for _ in 0..5 {
+            raw.push(100);
+        }
+        // Opcode 1: Index mark
+        raw.extend_from_slice(&[0x00, 0x01, 0x02, 0x00, 0x00, 0x00]);
+        // 20 flux intervals of 288 ticks (encoded as 250 + byte)
+        for _ in 0..20 {
+            raw.push(250);
+            raw.push(39); // 250 + (250-250)*255 + 39 - 1 = 288
+        }
+        raw.extend_from_slice(&[0x00, 0x00]); // End
+
+        let decoded = decode_gw_flux_with_index(&raw);
+        assert_eq!(decoded.index_flux_indices, vec![5]);
+        assert_eq!(decoded.flux.len(), 25);
+
+        // Slicing from index position gives the 20 intervals after index mark
+        let flux_from_idx = &decoded.flux[decoded.index_flux_indices[0]..];
+        assert_eq!(flux_from_idx.len(), 20);
     }
 
     #[test]
