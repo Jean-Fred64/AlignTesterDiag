@@ -506,6 +506,12 @@ pub fn build_write_flux_packet(cue_at_index: bool, terminate_at_index: bool) -> 
     ]
 }
 
+/// Builds a 6-byte `CMD_ERASE_FLUX` packet: `[0x11, 0x06, b0, b1, b2, b3]`.
+pub fn build_erase_flux_packet(ticks: u32) -> [u8; 6] {
+    let b = ticks.to_le_bytes();
+    [CMD_ERASE_FLUX, 0x06, b[0], b[1], b[2], b[3]]
+}
+
 /// Builds a 3-byte `CMD_GET_PIN` packet: `[0x14, 0x03, pin_num]`.
 pub fn build_get_pin_packet(pin_num: u8) -> [u8; 3] {
     [CMD_GET_PIN, 0x03, pin_num]
@@ -518,6 +524,7 @@ pub enum FormatStep {
     Idle,
     Writing,
     Verifying,
+    Erasing,
     Retrying,
     Completed,
     Error,
@@ -529,6 +536,7 @@ impl FormatStep {
             FormatStep::Idle => "IDLE",
             FormatStep::Writing => "WRITING FLUX",
             FormatStep::Verifying => "VERIFYING CRC",
+            FormatStep::Erasing => "ERASING FLUX",
             FormatStep::Retrying => "RETRYING",
             FormatStep::Completed => "COMPLETED",
             FormatStep::Error => "ERROR",
@@ -544,8 +552,8 @@ pub struct FormatProgress {
     pub total_tracks: u8,
     pub total_heads: u8,
     pub step: FormatStep,
-    pub completed_passes: usize,
-    pub total_passes: usize,
+    pub completed_passes: u16,
+    pub total_passes: u16,
     pub verification_ok: bool,
     pub retry_count: u8,
     pub quality_pct: u8,
@@ -596,6 +604,7 @@ mod tests {
         assert_eq!(CMD_DESELECT, 0x0D);
         assert_eq!(CMD_SET_BUS_TYPE, 0x0E);
         assert_eq!(CMD_GET_PIN, 0x14);
+        assert_eq!(CMD_ERASE_FLUX, 0x11);
         assert_eq!(ACK_GUARD_TIMEOUT_MS, 500);
     }
 
@@ -642,6 +651,11 @@ mod tests {
         assert_eq!(build_get_pin_packet(28), [0x14, 0x03, 28]);
         assert_eq!(build_write_flux_packet(true, false), [0x08, 0x04, 0x01, 0x00]);
         assert_eq!(build_write_flux_packet(false, true), [0x08, 0x04, 0x00, 0x01]);
+        assert_eq!(
+            build_erase_flux_packet(15_840_000),
+            [0x11, 0x06, 0x00, 0xB3, 0xF1, 0x00]
+        );
+        assert_eq!(FormatStep::Erasing.as_str(), "ERASING FLUX");
     }
 
     #[test]

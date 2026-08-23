@@ -857,6 +857,23 @@ pub fn format_activity_badge(activity: HwActivity, io_cycle: u64) -> (Span<'stat
                 ),
             )
         }
+        HwActivity::Erasing => {
+            let spin = SPINNER[(io_cycle as usize) % SPINNER.len()];
+            (
+                Span::styled(
+                    "► ",
+                    Style::default()
+                        .fg(Color::LightRed)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("[DC ERASING FLUX {}]", spin),
+                    Style::default()
+                        .fg(Color::LightRed)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            )
+        }
         HwActivity::Idle => (
             Span::styled("► ", Style::default().fg(Color::White)),
             Span::styled("[IDLE / READY]", Style::default().fg(Color::White)),
@@ -1064,6 +1081,7 @@ pub fn build_help_modal_lines() -> Vec<Line<'static>> {
         shortcut_row("A", "Analyze (Continuous real-time alignment & flux acquisition)"),
         shortcut_row("B", "Toggle Audio Radar (Pitch-variometer feedback)"),
         shortcut_row("D", "Read Data (Sector integrity check & CRC verification)"),
+        shortcut_row("E", "Erase (Low-level DC flux wipe / erase modal)"),
         shortcut_row("Esc", "Stop / Motor off (Enter safe idle state)"),
         shortcut_row("Backspace", "PANIC RESET (Instant motor cut & hardware re-init)"),
         shortcut_row("F", "Format (Low-level track format)"),
@@ -1130,6 +1148,7 @@ pub fn build_format_modal_lines(
     unit: u8,
     target_tracks: u8,
     is_48_tpi: bool,
+    format_verify: bool,
 ) -> Vec<Line<'static>> {
     let accent_bold = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
     let red_bold = Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD);
@@ -1172,6 +1191,26 @@ pub fn build_format_modal_lines(
             Span::styled(format!("{}", target_tracks), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
             Span::styled(format!(" (Range: 00..{:02} | Standard: {}, Max: {})", last_track_idx, standard_tracks, max_tracks_allowed), cyan),
         ]),
+        Line::from(vec![
+            Span::styled("  [", gray),
+            Span::styled("V", accent_bold),
+            Span::styled("] Read-After-Write ", white),
+            Span::styled("V", accent_bold),
+            Span::styled("erify : ", white),
+            if format_verify {
+                Span::styled("ON ", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled("OFF", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD))
+            },
+            Span::styled(
+                if format_verify {
+                    " (Write + CRC verify ~70s for 80 tracks)"
+                } else {
+                    " (Direct fast write ~35s for 80 tracks)"
+                },
+                cyan,
+            ),
+        ]),
         Line::from(""),
         Line::from(vec![
             Span::styled("  [", gray),
@@ -1180,7 +1219,6 @@ pub fn build_format_modal_lines(
             Span::styled("T", accent_bold),
             Span::styled(format!("rack only (Track {:02}, Head {})", track, head), white),
         ]),
-        Line::from(""),
         Line::from(vec![
             Span::styled("  [", gray),
             Span::styled("D", accent_bold),
@@ -1204,6 +1242,7 @@ pub fn build_format_modal_lines(
 }
 
 /// Renders an interactive centered overlay format confirmation modal dialog
+#[allow(clippy::too_many_arguments)]
 pub fn render_format_modal(
     f: &mut Frame,
     area: Rect,
@@ -1216,9 +1255,10 @@ pub fn render_format_modal(
     unit: u8,
     target_tracks: u8,
     is_48_tpi: bool,
+    format_verify: bool,
 ) {
     let modal_width = (area.width.saturating_sub(2)).clamp(84, 88).min(area.width);
-    let modal_height = (area.height.saturating_sub(2)).clamp(22, 24).min(area.height);
+    let modal_height = (area.height.saturating_sub(2)).clamp(23, 25).min(area.height);
     let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(x, y, modal_width, modal_height);
@@ -1242,6 +1282,103 @@ pub fn render_format_modal(
         unit,
         target_tracks,
         is_48_tpi,
+        format_verify,
+    ))
+    .block(block)
+    .alignment(ratatui::layout::Alignment::Left);
+
+    f.render_widget(paragraph, modal_area);
+}
+
+/// Builds the formatted confirmation and selection lines for the Low-Level DC Erase modal dialog
+pub fn build_erase_modal_lines(
+    track: u8,
+    head: u8,
+    preset_label: &str,
+    target_tracks: u8,
+    is_48_tpi: bool,
+) -> Vec<Line<'static>> {
+    let accent_bold = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let red_bold = Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD);
+    let white = Style::default().fg(Color::White);
+    let cyan = Style::default().fg(Color::Cyan);
+    let gray = Style::default().fg(Color::DarkGray);
+
+    let standard_tracks = if is_48_tpi { 40 } else { 80 };
+    let max_tracks_allowed = if is_48_tpi { 42 } else { 84 };
+    let last_track_idx = target_tracks.saturating_sub(1);
+
+    vec![
+        Line::from(vec![
+            Span::styled("Target Preset : ", gray),
+            Span::styled(preset_label.to_string(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled("[", gray),
+            Span::styled("+ / -", accent_bold),
+            Span::styled("] Target Tracks : ", white),
+            Span::styled(format!("{}", target_tracks), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" (Range: 00..{:02} | Standard: {}, Max: {})", last_track_idx, standard_tracks, max_tracks_allowed), cyan),
+        ]),
+        Line::from(Span::styled("────────────────────────────────────────────────────────────────────────────", gray)),
+        Line::from(vec![
+            Span::styled("⚠️  WARNING: This will permanently wipe all magnetic flux on target!", red_bold),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("[", gray),
+            Span::styled("T", accent_bold),
+            Span::styled("] Erase Current ", white),
+            Span::styled("T", accent_bold),
+            Span::styled(format!("rack only  (Track {:02}, Head {})", track, head), white),
+        ]),
+        Line::from(vec![
+            Span::styled("[", gray),
+            Span::styled("D", accent_bold),
+            Span::styled("] Erase Entire ", white),
+            Span::styled("D", accent_bold),
+            Span::styled(format!("isk         (Tracks 00..{:02}, Dual-Head)", last_track_idx), white),
+        ]),
+        Line::from(vec![
+            Span::styled("[", gray),
+            Span::styled("Esc", red_bold),
+            Span::styled("] Cancel & Return", white),
+        ]),
+    ]
+}
+
+/// Renders an interactive centered overlay DC erase confirmation modal dialog
+#[allow(clippy::too_many_arguments)]
+pub fn render_erase_modal(
+    f: &mut Frame,
+    area: Rect,
+    track: u8,
+    head: u8,
+    preset_label: &str,
+    target_tracks: u8,
+    is_48_tpi: bool,
+) {
+    let modal_width = (area.width.saturating_sub(2)).clamp(78, 84).min(area.width);
+    let modal_height = (area.height.saturating_sub(2)).clamp(13, 15).min(area.height);
+    let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
+    let modal_area = Rect::new(x, y, modal_width, modal_height);
+
+    f.render_widget(Clear, modal_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .title(" LOW-LEVEL ERASE (DC ERASE) ")
+        .title_style(Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(Color::Rgb(25, 15, 20)));
+
+    let paragraph = Paragraph::new(build_erase_modal_lines(
+        track,
+        head,
+        preset_label,
+        target_tracks,
+        is_48_tpi,
     ))
     .block(block)
     .alignment(ratatui::layout::Alignment::Left);
@@ -1262,23 +1399,36 @@ pub fn build_progress_bar_string(pct: f32, width: usize) -> String {
     )
 }
 
-/// Builds real-time formatted lines for the right panel when low-level formatting is active
+/// Builds real-time formatted lines for the right panel when low-level formatting or erasing is active
 pub fn build_format_progress_lines(status: &crate::hw::DriveStatus) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
-    lines.push(Line::from(Span::styled(
-        "=== LOW-LEVEL FORMAT ENGINE & MFM SYNTHESIZER (CMD_WRITE_FLUX) ===",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(Span::styled(
-        "Hardware-Synchronized Index Writing (72 MHz) with Read-After-Write CRC Verification",
-        Style::default().fg(Color::LightCyan),
-    )));
+    let is_erase = status.mode == crate::hw::DisplayMode::Erase;
+
+    if is_erase {
+        lines.push(Line::from(Span::styled(
+            "=== LOW-LEVEL DC FLUX ERASE ENGINE (CMD_ERASE_FLUX) ===",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            "Continuous Neutral Magnetic Wipe (≥ 1.1 Revolutions Hardware Index Synchronized)",
+            Style::default().fg(Color::LightRed),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "=== LOW-LEVEL FORMAT ENGINE & MFM SYNTHESIZER (CMD_WRITE_FLUX) ===",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            "Hardware-Synchronized Index Writing (72 MHz) with Read-After-Write CRC Verification",
+            Style::default().fg(Color::LightCyan),
+        )));
+    }
     lines.push(Line::from(""));
 
     let preset = status.preset;
     lines.push(Line::from(vec![
-        Span::styled("Format Profile : ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Target Preset  : ", Style::default().fg(Color::DarkGray)),
         Span::styled(preset.label(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
         Span::styled(" | Bitrate: ", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("{} kbps", preset.target_data_rate()), Style::default().fg(Color::Cyan)),
@@ -1302,6 +1452,7 @@ pub fn build_format_progress_lines(status: &crate::hw::DriveStatus) -> Vec<Line<
                 match prog.step {
                     crate::hw::FormatStep::Writing => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                     crate::hw::FormatStep::Verifying => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    crate::hw::FormatStep::Erasing => Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
                     crate::hw::FormatStep::Retrying => Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
                     crate::hw::FormatStep::Completed => Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
                     crate::hw::FormatStep::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -1335,21 +1486,24 @@ pub fn build_format_progress_lines(status: &crate::hw::DriveStatus) -> Vec<Line<
             ),
         ]));
 
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("Verification   : ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("Sectors: {}/{} | CRC Errors: {} | Quality: {}%", prog.verified_sectors, prog.expected_sectors, prog.crc_errors, prog.quality_pct),
-                if prog.verification_ok {
-                    Style::default().fg(Color::LightGreen)
-                } else if prog.crc_errors > 0 {
-                    Style::default().fg(Color::LightRed)
-                } else {
-                    Style::default().fg(Color::White)
-                },
-            ),
-        ]));
+        if !is_erase {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Verification   : ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("Sectors: {}/{} | CRC Errors: {} | Quality: {}%", prog.verified_sectors, prog.expected_sectors, prog.crc_errors, prog.quality_pct),
+                    if prog.verification_ok {
+                        Style::default().fg(Color::LightGreen)
+                    } else if prog.crc_errors > 0 {
+                        Style::default().fg(Color::LightRed)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                ),
+            ]));
+        }
 
+        lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("Timing Stats   : ", Style::default().fg(Color::DarkGray)),
             Span::styled(format!("Elapsed: {:.1}s", prog.elapsed_secs), Style::default().fg(Color::White)),
@@ -1363,11 +1517,18 @@ pub fn build_format_progress_lines(status: &crate::hw::DriveStatus) -> Vec<Line<
             Span::styled(prog.message.clone(), Style::default().fg(Color::LightCyan)),
         ]));
     } else {
-        lines.push(Line::from(Span::styled("Initializing format engine...", Style::default().fg(Color::DarkGray))));
+        lines.push(Line::from(Span::styled("Initializing engine...", Style::default().fg(Color::DarkGray))));
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("Press [Esc] at any time to abort formatting safely.", Style::default().fg(Color::DarkGray))));
+    lines.push(Line::from(Span::styled(
+        if is_erase {
+            "Press [Esc] at any time to abort erase safely."
+        } else {
+            "Press [Esc] at any time to abort formatting safely."
+        },
+        Style::default().fg(Color::DarkGray),
+    )));
     lines
 }
 

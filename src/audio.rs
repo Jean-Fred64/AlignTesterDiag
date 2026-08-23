@@ -288,6 +288,6 @@ mod tests {
 
         let expected_pitch = calculate_radar_pitch(40);
         assert_eq!(event, Some(AudioEvent::AlignmentTone { pitch_hz: expected_pitch }));
-        assert!(expected_pitch >= 250 && expected_pitch <= 500);
+        assert!((250..=500).contains(&expected_pitch));
     }
 }

@@ -409,6 +409,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let spin = SPINNER[(status.io_cycle as usize) % SPINNER.len()];
                     format!("FORMATTING {}", spin)
                 }
+                HwActivity::Erasing => {
+                    const SPINNER: &[char] = &['|', '/', '-', '\\'];
+                    let spin = SPINNER[(status.io_cycle as usize) % SPINNER.len()];
+                    format!("ERASING {}", spin)
+                }
                 HwActivity::Seeking => "SEEKING...".to_string(),
                 HwActivity::Stopped => "STOPPED".to_string(),
                 HwActivity::WaitingPort => "CONNECTING".to_string(),
@@ -453,6 +458,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Line::from(" A = Analyze"),
                 Line::from(" B = Beep on/off"),
                 Line::from(" D = read Data"),
+                Line::from(" E = Erase"),
                 Line::from(" Esc = Stop / Motor off"),
                 Line::from(" Backspace = Panic Reset"),
                 Line::from(" F = Format"),
@@ -481,7 +487,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let mut right_lines = Vec::new();
 
             match status.mode {
-                DisplayMode::Format => {
+                DisplayMode::Format | DisplayMode::Erase => {
                     right_lines = build_format_progress_lines(status);
                 }
                 DisplayMode::RpmMeasure => {
@@ -944,6 +950,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                     app.drive_unit,
                     app.format_target_tracks,
                     app.is_48_tpi(),
+                    app.format_verify,
+                );
+            }
+
+            if app.show_erase_modal {
+                render_erase_modal(
+                    f,
+                    f.size(),
+                    app.status.track,
+                    app.status.head,
+                    app.preset.label(),
+                    app.erase_target_tracks,
+                    app.is_48_tpi(),
                 );
             }
         })?;
@@ -988,18 +1007,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                         | KeyCode::Char('=') => {
                             app.increment_format_tracks();
                         }
+                        KeyCode::Char('v') | KeyCode::Char('V') => {
+                            app.toggle_format_verify();
+                        }
                         KeyCode::Char('t') | KeyCode::Char('T') => {
                             app.show_format_modal = false;
                             let track = app.status.track;
                             let head = app.status.head;
-                            app.handle_action(Action::FormatTrack { track, head });
-                            let _ = tx_cmd.send(HwCmd::FormatTrack { track, head });
+                            let verify = app.format_verify;
+                            app.handle_action(Action::FormatTrack { track, head, verify });
+                            let _ = tx_cmd.send(HwCmd::FormatTrack { track, head, verify });
                         }
                         KeyCode::Char('d') | KeyCode::Char('D') => {
                             app.show_format_modal = false;
                             let tracks = app.format_target_tracks;
-                            app.handle_action(Action::FormatDisk { tracks });
-                            let _ = tx_cmd.send(HwCmd::FormatDisk { tracks });
+                            let verify = app.format_verify;
+                            app.handle_action(Action::FormatDisk { tracks, verify });
+                            let _ = tx_cmd.send(HwCmd::FormatDisk { tracks, verify });
                         }
                         KeyCode::Esc
                         | KeyCode::Char('q')
@@ -1007,6 +1031,45 @@ fn main() -> Result<(), Box<dyn Error>> {
                         | KeyCode::Char('x')
                         | KeyCode::Char('X') => {
                             app.show_format_modal = false;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                if app.show_erase_modal {
+                    match key.code {
+                        KeyCode::Left
+                        | KeyCode::Down
+                        | KeyCode::Char('-')
+                        | KeyCode::Char('_') => {
+                            app.decrement_erase_tracks();
+                        }
+                        KeyCode::Right
+                        | KeyCode::Up
+                        | KeyCode::Char('+')
+                        | KeyCode::Char('=') => {
+                            app.increment_erase_tracks();
+                        }
+                        KeyCode::Char('t') | KeyCode::Char('T') => {
+                            app.show_erase_modal = false;
+                            let track = app.status.track;
+                            let head = app.status.head;
+                            app.handle_action(Action::EraseTrack { track, head });
+                            let _ = tx_cmd.send(HwCmd::EraseTrack { track, head });
+                        }
+                        KeyCode::Char('d') | KeyCode::Char('D') => {
+                            app.show_erase_modal = false;
+                            let tracks = app.erase_target_tracks;
+                            app.handle_action(Action::EraseDisk { tracks });
+                            let _ = tx_cmd.send(HwCmd::EraseDisk { tracks });
+                        }
+                        KeyCode::Esc
+                        | KeyCode::Char('q')
+                        | KeyCode::Char('Q')
+                        | KeyCode::Char('x')
+                        | KeyCode::Char('X') => {
+                            app.show_erase_modal = false;
                         }
                         _ => {}
                     }
@@ -1072,8 +1135,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     KeyCode::Char('d') | KeyCode::Char('D') => {
                         let _ = tx_cmd.send(HwCmd::ReadData);
                     }
+                    KeyCode::Char('e') | KeyCode::Char('E') => {
+                        app.handle_action(Action::OpenEraseModal);
+                    }
                     KeyCode::Char('f') | KeyCode::Char('F') => {
-                        app.show_format_modal = true;
+                        app.handle_action(Action::OpenFormatModal);
                     }
                     KeyCode::Char('v') | KeyCode::Char('V') => {
                         let _ = tx_cmd.send(HwCmd::ToggleVerbose);
@@ -2406,6 +2472,7 @@ mod tests {
             0,
             80,
             false,
+            true,
         );
 
         let full_text: String = lines
@@ -2418,12 +2485,14 @@ mod tests {
         assert!(full_text.contains("Track 40, Head 0"));
         assert!(full_text.contains("Target Tracks : 80"));
         assert!(full_text.contains("Range: 00..79 | Standard: 80, Max: 84"));
+        assert!(full_text.contains("Read-After-Write Verify : ON"));
         assert!(full_text.contains("Tracks 00..79, Dual-Head"));
         assert!(full_text.contains("Cancel & Return"));
 
-        // Check shortcut highlight formatting for [T] and [D]
+        // Check shortcut highlight formatting for [T] and [D] and [V]
         let mut found_t_shortcut = false;
         let mut found_d_shortcut = false;
+        let mut found_v_shortcut = false;
         let mut found_esc_shortcut = false;
 
         for line in &lines {
@@ -2434,6 +2503,9 @@ mod tests {
                 if span.content == "D" && span.style.fg == Some(Color::Yellow) {
                     found_d_shortcut = true;
                 }
+                if span.content == "V" && span.style.fg == Some(Color::Yellow) {
+                    found_v_shortcut = true;
+                }
                 if span.content == "Esc" && span.style.fg == Some(Color::LightRed) {
                     found_esc_shortcut = true;
                 }
@@ -2442,7 +2514,53 @@ mod tests {
 
         assert!(found_t_shortcut, "Shortcut [T] and 'Track' must be emphasized in Yellow/Bold");
         assert!(found_d_shortcut, "Shortcut [D] and 'Disk' must be emphasized in Yellow/Bold");
+        assert!(found_v_shortcut, "Shortcut [V] and 'Verify' must be emphasized in Yellow/Bold");
         assert!(found_esc_shortcut, "Shortcut [Esc] must be highlighted in Red/Bold");
+    }
+
+    #[test]
+    fn test_erase_modal_lines_and_typography() {
+        let lines = build_erase_modal_lines(
+            40,
+            0,
+            "3.5\" HD (1.44M)",
+            80,
+            false,
+        );
+
+        let full_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+
+        assert!(full_text.contains("Target Preset : 3.5\" HD (1.44M)"));
+        assert!(full_text.contains("Target Tracks : 80"));
+        assert!(full_text.contains("WARNING: This will permanently wipe all magnetic flux"));
+        assert!(full_text.contains("Erase Current Track only"));
+        assert!(full_text.contains("Erase Entire Disk"));
+        assert!(full_text.contains("Cancel & Return"));
+
+        let mut found_t = false;
+        let mut found_d = false;
+        let mut found_esc = false;
+
+        for line in &lines {
+            for span in &line.spans {
+                if span.content == "T" && span.style.fg == Some(Color::Yellow) {
+                    found_t = true;
+                }
+                if span.content == "D" && span.style.fg == Some(Color::Yellow) {
+                    found_d = true;
+                }
+                if span.content == "Esc" && span.style.fg == Some(Color::LightRed) {
+                    found_esc = true;
+                }
+            }
+        }
+
+        assert!(found_t, "Shortcut [T] must be emphasized in Yellow/Bold");
+        assert!(found_d, "Shortcut [D] must be emphasized in Yellow/Bold");
+        assert!(found_esc, "Shortcut [Esc] must be highlighted in Red/Bold");
     }
 
     #[test]
@@ -2492,6 +2610,19 @@ mod tests {
         assert!(text.contains("Track 20/80 (Phys: 20) | Head 1/1"));
         assert!(text.contains("Sectors: 18/18"));
         assert!(text.contains("(41/160 passes)"));
+
+        // Test Erase progress rendering
+        status.mode = DisplayMode::Erase;
+        if let Some(ref mut p) = status.format_progress {
+            p.step = FormatStep::Erasing;
+        }
+        let erase_lines = build_format_progress_lines(&status);
+        let erase_text: String = erase_lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(erase_text.contains("LOW-LEVEL DC FLUX ERASE ENGINE"));
+        assert!(erase_text.contains("ERASING FLUX"));
     }
 
     #[test]
@@ -2505,12 +2636,12 @@ mod tests {
         app.handle_action(Action::CloseFormatModal);
         assert!(!app.show_format_modal);
 
-        app.handle_action(Action::FormatTrack { track: 10, head: 0 });
+        app.handle_action(Action::FormatTrack { track: 10, head: 0, verify: true });
         assert_eq!(app.status.mode, DisplayMode::Format);
         assert_eq!(app.status.activity, HwActivity::Formatting);
         assert!(app.motor_on);
 
-        app.handle_action(Action::FormatDisk { tracks: 80 });
+        app.handle_action(Action::FormatDisk { tracks: 80, verify: false });
         assert_eq!(app.status.mode, DisplayMode::Format);
         assert_eq!(app.status.activity, HwActivity::Formatting);
         assert!(app.motor_on);
@@ -2642,6 +2773,7 @@ mod tests {
             0,
             40,
             true,
+            true,
         );
         let text_48: String = lines_48
             .iter()
@@ -2662,6 +2794,7 @@ mod tests {
             0,
             42,
             true,
+            false,
         );
         let text_48_over: String = lines_48_over
             .iter()
@@ -2682,6 +2815,7 @@ mod tests {
             0,
             80,
             false,
+            true,
         );
         let text_80: String = lines_80
             .iter()
@@ -2694,8 +2828,8 @@ mod tests {
 
     #[test]
     fn test_format_timing_constants() {
-        assert_eq!(crate::hw::FORMAT_HEAD_SETTLE_MS, 15);
-        assert_eq!(crate::hw::FORMAT_HEAD_SWITCH_SETTLE_MS, 20);
+        assert_eq!(crate::hw::FORMAT_HEAD_SETTLE_MS, 100);
+        assert_eq!(crate::hw::FORMAT_HEAD_SWITCH_SETTLE_MS, 50);
     }
 }
 

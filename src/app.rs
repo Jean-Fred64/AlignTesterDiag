@@ -159,8 +159,13 @@ pub enum Action {
     SetPreset(PresetProfile),
     OpenFormatModal,
     CloseFormatModal,
-    FormatTrack { track: u8, head: u8 },
-    FormatDisk { tracks: u8 },
+    ToggleFormatVerify,
+    FormatTrack { track: u8, head: u8, verify: bool },
+    FormatDisk { tracks: u8, verify: bool },
+    OpenEraseModal,
+    CloseEraseModal,
+    EraseTrack { track: u8, head: u8 },
+    EraseDisk { tracks: u8 },
 }
 
 /// Application state wrapper
@@ -176,7 +181,10 @@ pub struct App {
     pub stream_spinner_idx: usize,
     pub show_help: bool,
     pub show_format_modal: bool,
+    pub format_verify: bool,
     pub format_target_tracks: u8,
+    pub show_erase_modal: bool,
+    pub erase_target_tracks: u8,
     pub disk_format: DiskFormat,
     pub bus_type: BusType,
     pub step_mode: StepMode,
@@ -239,7 +247,10 @@ impl App {
             stream_spinner_idx: 0,
             show_help: false,
             show_format_modal: false,
+            format_verify: true,
             format_target_tracks: default_tracks,
+            show_erase_modal: false,
+            erase_target_tracks: default_tracks,
             disk_format: preset.format_profile(),
             bus_type,
             step_mode,
@@ -257,6 +268,10 @@ impl App {
 
     pub fn is_48_tpi(&self) -> bool {
         self.step_mode == StepMode::Double || self.preset.is_48_tpi()
+    }
+
+    pub fn toggle_format_verify(&mut self) {
+        self.format_verify = !self.format_verify;
     }
 
     pub fn default_format_tracks(&self) -> u8 {
@@ -288,6 +303,27 @@ impl App {
         }
     }
 
+    pub fn default_erase_tracks(&self) -> u8 {
+        self.default_format_tracks()
+    }
+
+    pub fn max_erase_tracks(&self) -> u8 {
+        self.max_format_tracks()
+    }
+
+    pub fn increment_erase_tracks(&mut self) {
+        let max = self.max_erase_tracks();
+        if self.erase_target_tracks < max {
+            self.erase_target_tracks += 1;
+        }
+    }
+
+    pub fn decrement_erase_tracks(&mut self) {
+        if self.erase_target_tracks > 1 {
+            self.erase_target_tracks -= 1;
+        }
+    }
+
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
     }
@@ -296,6 +332,13 @@ impl App {
         self.show_format_modal = !self.show_format_modal;
         if self.show_format_modal && (self.format_target_tracks == 0 || self.format_target_tracks > self.max_format_tracks()) {
             self.format_target_tracks = self.default_format_tracks();
+        }
+    }
+
+    pub fn toggle_erase_modal(&mut self) {
+        self.show_erase_modal = !self.show_erase_modal;
+        if self.show_erase_modal && (self.erase_target_tracks == 0 || self.erase_target_tracks > self.max_erase_tracks()) {
+            self.erase_target_tracks = self.default_erase_tracks();
         }
     }
 
@@ -429,6 +472,7 @@ impl App {
         self.status.track = self.status.track.min(self.step_mode.max_logical_tracks());
         self.status.target_track = self.status.target_track.min(self.step_mode.max_logical_tracks());
         self.format_target_tracks = self.default_format_tracks();
+        self.erase_target_tracks = self.default_erase_tracks();
     }
 
     pub fn set_step_mode(&mut self, mode: StepMode) {
@@ -437,6 +481,7 @@ impl App {
         self.status.track = self.status.track.min(self.step_mode.max_logical_tracks());
         self.status.target_track = self.status.target_track.min(self.step_mode.max_logical_tracks());
         self.format_target_tracks = self.default_format_tracks();
+        self.erase_target_tracks = self.default_erase_tracks();
     }
 
     pub fn step_mode(&self) -> StepMode {
@@ -455,6 +500,7 @@ impl App {
         self.status.bitrate = preset.target_data_rate();
         self.status.density = self.status.bitrate == 500;
         self.format_target_tracks = self.default_format_tracks();
+        self.erase_target_tracks = self.default_erase_tracks();
     }
 
     pub fn cycle_preset(&mut self) {
@@ -477,6 +523,7 @@ impl App {
             Action::SetStepMode(mode) => self.set_step_mode(mode),
             Action::CyclePreset => self.cycle_preset(),
             Action::SetPreset(preset) => self.apply_preset(preset),
+            Action::ToggleFormatVerify => self.toggle_format_verify(),
             Action::OpenFormatModal => {
                 self.show_format_modal = true;
                 if self.format_target_tracks == 0 || self.format_target_tracks > self.max_format_tracks() {
@@ -490,6 +537,20 @@ impl App {
                 self.status.motor_on = true;
                 self.status.mode = DisplayMode::Format;
                 self.status.activity = HwActivity::Formatting;
+            }
+            Action::OpenEraseModal => {
+                self.show_erase_modal = true;
+                if self.erase_target_tracks == 0 || self.erase_target_tracks > self.max_erase_tracks() {
+                    self.erase_target_tracks = self.default_erase_tracks();
+                }
+            }
+            Action::CloseEraseModal => self.show_erase_modal = false,
+            Action::EraseTrack { .. } | Action::EraseDisk { .. } => {
+                self.show_erase_modal = false;
+                self.motor_on = true;
+                self.status.motor_on = true;
+                self.status.mode = DisplayMode::Erase;
+                self.status.activity = HwActivity::Erasing;
             }
             Action::Analyze | Action::StartAnalysis => {
                 self.motor_on = true;
@@ -1238,6 +1299,65 @@ mod tests {
         assert_eq!(app.preset(), PresetProfile::Cpc30Data);
         assert_eq!(app.bus_type(), BusType::Shugart);
         assert_eq!(app.status.preset, PresetProfile::Cpc30Data);
+    }
+
+    #[test]
+    fn test_app_format_verify_toggle() {
+        let mut app = App::new();
+        assert!(app.format_verify);
+        app.handle_action(Action::ToggleFormatVerify);
+        assert!(!app.format_verify);
+        app.toggle_format_verify();
+        assert!(app.format_verify);
+    }
+
+    #[test]
+    fn test_app_erase_modal_and_tracks_bounds() {
+        let mut app = App::with_full_preset_config(0, BusType::IbmPc, StepMode::Single, PresetProfile::Pc35Hd);
+        assert_eq!(app.default_erase_tracks(), 80);
+        assert_eq!(app.max_erase_tracks(), 84);
+        assert_eq!(app.erase_target_tracks, 80);
+        assert!(!app.show_erase_modal);
+
+        app.handle_action(Action::OpenEraseModal);
+        assert!(app.show_erase_modal);
+
+        // Increment up to max 84
+        for _ in 0..10 {
+            app.increment_erase_tracks();
+        }
+        assert_eq!(app.erase_target_tracks, 84);
+
+        // Decrement down to min 1
+        for _ in 0..100 {
+            app.decrement_erase_tracks();
+        }
+        assert_eq!(app.erase_target_tracks, 1);
+
+        app.handle_action(Action::CloseEraseModal);
+        assert!(!app.show_erase_modal);
+
+        // Preset 48 TPI (e.g. Pc525Dd)
+        app.apply_preset(PresetProfile::Pc525Dd);
+        assert_eq!(app.default_erase_tracks(), 40);
+        assert_eq!(app.max_erase_tracks(), 42);
+        assert_eq!(app.erase_target_tracks, 40);
+
+        for _ in 0..10 {
+            app.increment_erase_tracks();
+        }
+        assert_eq!(app.erase_target_tracks, 42);
+
+        app.handle_action(Action::EraseTrack { track: 10, head: 0 });
+        assert!(!app.show_erase_modal);
+        assert!(app.status.motor_on);
+        assert_eq!(app.status.mode, DisplayMode::Erase);
+        assert_eq!(app.status.activity, HwActivity::Erasing);
+
+        app.handle_action(Action::EraseDisk { tracks: 40 });
+        assert!(!app.show_erase_modal);
+        assert_eq!(app.status.mode, DisplayMode::Erase);
+        assert_eq!(app.status.activity, HwActivity::Erasing);
     }
 }
 
