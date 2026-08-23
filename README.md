@@ -13,15 +13,19 @@
 
 ## 🌟 Key Highlights
 
-- ⚡ **100% Non-Blocking Architecture (~60 Hz TUI):** Strict decoupling between the interactive Ratatui/Crossterm rendering loop, the USB hardware acquisition worker thread, and a dedicated real-time audio thread via lock-free `crossbeam-channel` queues.
+- ⚡ **100% Non-Blocking Architecture (~60 Hz TUI):** Strict decoupling between the interactive Ratatui/Crossterm rendering loop, the USB hardware acquisition worker thread, and a dedicated real-time audio thread via lock-free `crossbeam-channel` queues. 64 KB extended serial block buffers eliminate micro-blocking system calls and USB CDC latency.
 - 💾 **High-Precision Low-Level Format Engine & MFM Synthesizer (`CMD_WRITE_FLUX`):**
-  - **Ultra-Fast 2-Revolution Pipeline (~35s Full Disk):** 1 revolution index-synchronized flux emission + 1 revolution instant DPLL read-after-write verification per track.
+  - **Ultra-Fast Formatter Pipeline (~35s Fast / ~70s Full Verify):** Direct index-synchronized flux emission with optional 1-revolution instant DPLL read-after-write verification per track (toggled with <kbd>V</kbd> in format modal).
   - **72 MHz Pulse Timing:** Translates synthesized MFM bitstreams into cycle-accurate 72 MHz interval ticks ($2T, 3T, 4T$).
   - **Write Pre-Compensation:** Applies $\pm 125\text{ ns}$ ($\approx 9$ ticks @ 72 MHz) timing shifts on inner tracks ($> 40$) to counteract magnetic peak shift.
   - **Hardware Index Cueing:** Synchronizes flux emission to the physical index pulse (`cue_at_index = 1`) with controlled splice overlap.
-  - **Read-After-Write Verification:** Automatically reads back each formatted track, verifies 100% expected sector presence, 0 CRC errors, and $Q \ge 90\%$ quality with up to 2 automatic retries.
+  - **Read-After-Write Verification:** Automatically reads back each formatted track, verifies 100% expected sector presence, 0 CRC errors, and $Q \ge 85\%$ quality with up to 2 automatic retries.
   - **Dynamic Track Override:** Interactive track adjustment (`+`/`-` or Arrows) supporting standard 40/80 tracks up to 42/84 tracks with physical cylinder tracking.
   - **Write-Protect Guard:** Hardware Pin 28 (`WPROT`) validation before any carriage movement or flux emission.
+- 🧲 **Hardware Low-Level DC Erase Engine (`CMD_ERASE_FLUX`):**
+  - **Continuous Magnetic Neutralization:** Asserts raw continuous write gate without flux transitions for $\ge 1.1$ revolutions after index pulse to permanently wipe and degauss magnetic tracks.
+  - **Interactive Erase Modal (<kbd>E</kbd>):** Single-track (<kbd>T</kbd>) or full-disk dual-head (<kbd>D</kbd>) DC erasure with interactive track count bounds (40/42 for 48 TPI, 80/84 for 96/135 TPI).
+  - **Hardware Write-Protect Safety:** Proactively queries Pin 28 before seeking or activating write gate.
 - 🕹️ **Multi-System Retro Platform Support (IBM PC, Amiga, Atari ST, Amstrad CPC):**
   - **Amiga (Paula MFM):** Décodage bit-level *even/odd*, checksums 32-bit XOR, 11 secteurs/piste en DD (880 Ko) et 22 secteurs en HD (1.76 Mo).
   - **Atari ST (WD1772):** Support des formats étendus 9, 10 et 11 secteurs (jusqu'à 880 Ko) et pistes 80 à 82.
@@ -105,7 +109,8 @@ cargo run --release -- --shugart --drive 0
 | <kbd>?</kbd> / <kbd>F1</kbd> | **Help Modal** | Open interactive help modal overlay |
 | <kbd>A</kbd> | **Analyze** | Start continuous real-time track alignment analysis |
 | <kbd>D</kbd> | **Read Data** | Read and test sector CRC integrity across the cylinder |
-| <kbd>F</kbd> | **Format** | Low-Level Track & Full Disk Format with dynamic track count override (`+`/`-` or Arrows), Index Sync and 1-rev Read-After-Write Verification (`[T]` Track, `[D]` Disk, `[Esc]` Cancel) |
+| <kbd>E</kbd> | **Erase** | Low-Level Hardware DC Erase Modal (`[T]` Track, `[D]` Disk, `+`/`-` Tracks, `[Esc]` Cancel) |
+| <kbd>F</kbd> | **Format** | Low-Level Track & Full Disk Format with dynamic track count override (`+`/`-`), Verify toggle (<kbd>V</kbd>), Index Sync (`[T]` Track, `[D]` Disk, `[Esc]` Cancel) |
 | <kbd>L</kbd> | **Live RPM** | Live RPM tachometer & jitter stability test |
 | <kbd>P</kbd> | **Preset (Hardware & Format)** | Cycle unified hardware & format presets (`Pc35Hd` ➔ `Pc35Dd` ➔ `Pc525Hd` ➔ `Pc525DdOnHd` ➔ `Pc525Dd` ➔ `Amiga35Dd` ➔ `Atari35Dd` ➔ `Cpc30Data`), atomically configuring bus, stepping rate, DPLL clock & nominal bitrate |
 | <kbd>S</kbd> | **Toggle Step Rate** | Toggle Single (1:1) / Double (2:1) step mode (48/96 TPI, for reading 40-track media on 80-track drives) |

@@ -4075,22 +4075,28 @@ pub fn execute_format_track(
             format!("Formatting Track {:02} Head {}: Retry attempt {}/2...", target_track, target_head, attempt)
         };
 
+        let (tot_tracks, tot_heads, tot_passes, comp_passes, prev_elapsed, prev_eta) = if let Some(ref p) = status.format_progress {
+            (p.total_tracks, p.total_heads, p.total_passes, p.completed_passes, p.elapsed_secs, p.eta_secs)
+        } else {
+            (1, 1, 1, 0, 0.0, 0.0)
+        };
+
         let prog = FormatProgress {
             current_track: target_track,
             current_head: target_head,
-            total_tracks: 1,
-            total_heads: 1,
+            total_tracks: tot_tracks,
+            total_heads: tot_heads,
             step,
-            completed_passes: 0,
-            total_passes: 1,
+            completed_passes: comp_passes,
+            total_passes: tot_passes,
             verification_ok: false,
             retry_count: attempt,
             quality_pct: 100,
             crc_errors: 0,
             verified_sectors: 0,
             expected_sectors: status.preset.format_profile().expected_sector_count(status.bitrate, 0),
-            elapsed_secs: start_time.elapsed().as_secs_f64(),
-            eta_secs: 0.0,
+            elapsed_secs: if tot_passes > 1 { prev_elapsed } else { start_time.elapsed().as_secs_f64() },
+            eta_secs: prev_eta,
             message: status.log_msg.clone(),
         };
         status.format_progress = Some(prog);
@@ -4131,7 +4137,9 @@ pub fn execute_format_track(
                 p.verification_ok = true;
                 p.verified_sectors = status.preset.format_profile().expected_sector_count(status.bitrate, 0);
                 p.expected_sectors = p.verified_sectors;
-                p.elapsed_secs = start_time.elapsed().as_secs_f64();
+                if p.total_passes <= 1 {
+                    p.elapsed_secs = start_time.elapsed().as_secs_f64();
+                }
             }
             break;
         }
@@ -4158,7 +4166,9 @@ pub fn execute_format_track(
             p.crc_errors = crc_errors;
             p.quality_pct = quality_pct;
             p.verification_ok = pass_ok;
-            p.elapsed_secs = start_time.elapsed().as_secs_f64();
+            if p.total_passes <= 1 {
+                p.elapsed_secs = start_time.elapsed().as_secs_f64();
+            }
         }
 
         if pass_ok {
@@ -4177,7 +4187,10 @@ pub fn execute_format_track(
         );
         if let Some(ref mut p) = status.format_progress {
             p.step = FormatStep::Completed;
-            p.completed_passes = 1;
+            if p.total_passes <= 1 {
+                p.completed_passes = 1;
+                p.elapsed_secs = start_time.elapsed().as_secs_f64();
+            }
             p.message = if verify { "Track Format Verified OK".to_string() } else { "Track Format Written OK".to_string() };
         }
     } else {
@@ -4314,6 +4327,9 @@ pub fn execute_format_disk(
             if let Some(ref mut p) = status.format_progress {
                 p.current_track = cyl;
                 p.current_head = head;
+                p.total_tracks = total_tracks;
+                p.total_heads = total_heads;
+                p.total_passes = total_passes;
                 p.completed_passes = completed_passes;
                 p.elapsed_secs = elapsed;
                 p.eta_secs = eta;
@@ -4339,9 +4355,15 @@ pub fn execute_format_disk(
 
             completed_passes += 1;
             if let Some(ref mut p) = status.format_progress {
+                p.current_track = cyl;
+                p.current_head = head;
+                p.total_tracks = total_tracks;
+                p.total_heads = total_heads;
+                p.total_passes = total_passes;
                 p.completed_passes = completed_passes;
                 p.elapsed_secs = start_time.elapsed().as_secs_f64();
             }
+            let _ = tx_status.send(status.clone());
         }
     }
 
@@ -4352,15 +4374,18 @@ pub fn execute_format_disk(
     status.trk0 = true;
     thread::sleep(Duration::from_millis(FORMAT_HEAD_SETTLE_MS));
 
+    let elapsed = start_time.elapsed().as_secs_f64();
     status.log_msg = format!(
         "Full Disk Format COMPLETED successfully! ({} tracks, 2 heads, total {:.1}s)",
-        total_tracks, start_time.elapsed().as_secs_f64()
+        total_tracks, elapsed
     );
     if let Some(ref mut p) = status.format_progress {
         p.step = FormatStep::Completed;
         p.current_track = 0;
         p.current_head = 0;
         p.completed_passes = total_passes;
+        p.verification_ok = true;
+        p.elapsed_secs = elapsed;
         p.eta_secs = 0.0;
         p.message = "Full Disk Format Completed OK".to_string();
     }
@@ -4447,22 +4472,28 @@ pub fn execute_erase_track(
     let start_time = Instant::now();
     status.log_msg = format!("Erasing Track {:02} Head {} (DC Flux Wipe)...", target_track, target_head);
 
+    let (tot_tracks, tot_heads, tot_passes, comp_passes, prev_elapsed, prev_eta) = if let Some(ref p) = status.format_progress {
+        (p.total_tracks, p.total_heads, p.total_passes, p.completed_passes, p.elapsed_secs, p.eta_secs)
+    } else {
+        (1, 1, 1, 0, 0.0, 0.0)
+    };
+
     let prog = FormatProgress {
         current_track: target_track,
         current_head: target_head,
-        total_tracks: 1,
-        total_heads: 1,
+        total_tracks: tot_tracks,
+        total_heads: tot_heads,
         step: FormatStep::Erasing,
-        completed_passes: 0,
-        total_passes: 1,
+        completed_passes: comp_passes,
+        total_passes: tot_passes,
         verification_ok: false,
         retry_count: 0,
         quality_pct: 100,
         crc_errors: 0,
         verified_sectors: 0,
         expected_sectors: 0,
-        elapsed_secs: 0.0,
-        eta_secs: 0.0,
+        elapsed_secs: if tot_passes > 1 { prev_elapsed } else { 0.0 },
+        eta_secs: prev_eta,
         message: status.log_msg.clone(),
     };
     status.format_progress = Some(prog);
@@ -4503,9 +4534,11 @@ pub fn execute_erase_track(
         status.log_msg = format!("Track {:02} Head {} DC Flux Erase SUCCESS", target_track, target_head);
         if let Some(ref mut p) = status.format_progress {
             p.step = FormatStep::Completed;
-            p.completed_passes = 1;
+            if p.total_passes <= 1 {
+                p.completed_passes = 1;
+                p.elapsed_secs = start_time.elapsed().as_secs_f64();
+            }
             p.verification_ok = true;
-            p.elapsed_secs = start_time.elapsed().as_secs_f64();
             p.message = "Track Erase Completed OK".to_string();
         }
     }
@@ -4631,6 +4664,9 @@ pub fn execute_erase_disk(
             if let Some(ref mut p) = status.format_progress {
                 p.current_track = cyl;
                 p.current_head = head;
+                p.total_tracks = total_tracks;
+                p.total_heads = total_heads;
+                p.total_passes = total_passes;
                 p.completed_passes = completed_passes;
                 p.elapsed_secs = elapsed;
                 p.eta_secs = eta;
@@ -4653,9 +4689,15 @@ pub fn execute_erase_disk(
 
             completed_passes += 1;
             if let Some(ref mut p) = status.format_progress {
+                p.current_track = cyl;
+                p.current_head = head;
+                p.total_tracks = total_tracks;
+                p.total_heads = total_heads;
+                p.total_passes = total_passes;
                 p.completed_passes = completed_passes;
                 p.elapsed_secs = start_time.elapsed().as_secs_f64();
             }
+            let _ = tx_status.send(status.clone());
         }
     }
 
