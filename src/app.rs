@@ -157,6 +157,10 @@ pub enum Action {
     SetStepMode(StepMode),
     CyclePreset,
     SetPreset(PresetProfile),
+    OpenFormatModal,
+    CloseFormatModal,
+    FormatTrack { track: u8, head: u8 },
+    FormatDisk,
 }
 
 /// Application state wrapper
@@ -171,6 +175,7 @@ pub struct App {
     pub last_capture_instant: std::time::Instant,
     pub stream_spinner_idx: usize,
     pub show_help: bool,
+    pub show_format_modal: bool,
     pub disk_format: DiskFormat,
     pub bus_type: BusType,
     pub step_mode: StepMode,
@@ -227,6 +232,7 @@ impl App {
             last_capture_instant: std::time::Instant::now(),
             stream_spinner_idx: 0,
             show_help: false,
+            show_format_modal: false,
             disk_format: preset.format_profile(),
             bus_type,
             step_mode,
@@ -244,6 +250,10 @@ impl App {
 
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
+    }
+
+    pub fn toggle_format_modal(&mut self) {
+        self.show_format_modal = !self.show_format_modal;
     }
 
     pub fn on_sector_packet(&mut self) {
@@ -421,6 +431,15 @@ impl App {
             Action::SetStepMode(mode) => self.set_step_mode(mode),
             Action::CyclePreset => self.cycle_preset(),
             Action::SetPreset(preset) => self.apply_preset(preset),
+            Action::OpenFormatModal => self.show_format_modal = true,
+            Action::CloseFormatModal => self.show_format_modal = false,
+            Action::FormatTrack { .. } | Action::FormatDisk => {
+                self.show_format_modal = false;
+                self.motor_on = true;
+                self.status.motor_on = true;
+                self.status.mode = DisplayMode::Format;
+                self.status.activity = HwActivity::Formatting;
+            }
             Action::Analyze | Action::StartAnalysis => {
                 self.motor_on = true;
                 self.status.analyzing = true;

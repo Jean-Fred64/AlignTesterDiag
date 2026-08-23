@@ -27,7 +27,10 @@ mod ui;
 use crossbeam_channel::unbounded;
 pub use app::*;
 pub use audio::*;
-pub use hw::{get_status_expected_sector_ids, hw_thread, BusType, DiskFormat, DisplayMode, DriveStatus, HwActivity, HwCmd, PresetProfile, StepMode};
+pub use hw::{
+    get_status_expected_sector_ids, hw_thread, BusType, DiskFormat, DisplayMode, DriveStatus,
+    FormatProgress, FormatStep, HwActivity, HwCmd, PresetProfile, StepMode,
+};
 pub use ui::*;
 
 /// Builds the clean CLI banner and help/version text
@@ -401,6 +404,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let spin = SPINNER[(status.io_cycle as usize) % SPINNER.len()];
                     format!("READ/ANALYZ {}", spin)
                 }
+                HwActivity::Formatting => {
+                    const SPINNER: &[char] = &['|', '/', '-', '\\'];
+                    let spin = SPINNER[(status.io_cycle as usize) % SPINNER.len()];
+                    format!("FORMATTING {}", spin)
+                }
                 HwActivity::Seeking => "SEEKING...".to_string(),
                 HwActivity::Stopped => "STOPPED".to_string(),
                 HwActivity::WaitingPort => "CONNECTING".to_string(),
@@ -473,6 +481,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             let mut right_lines = Vec::new();
 
             match status.mode {
+                DisplayMode::Format => {
+                    right_lines = build_format_progress_lines(status);
+                }
                 DisplayMode::RpmMeasure => {
                     right_lines.push(Line::from(Span::styled(
                         "=== MOTOR TACHOMETER / LIVE RPM TEST ===",
@@ -918,6 +929,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             if app.show_help {
                 render_help_modal(f, f.size());
             }
+
+            if app.show_format_modal {
+                let max_trk = app.step_mode.max_logical_tracks();
+                render_format_modal(
+                    f,
+                    f.size(),
+                    app.status.track,
+                    app.status.head,
+                    max_trk,
+                    app.preset.label(),
+                    app.status.bitrate,
+                    app.bus_type.as_str(),
+                    app.drive_unit,
+                );
+            }
         })?;
 
         if event::poll(Duration::from_millis(15))? {
@@ -940,6 +966,32 @@ fn main() -> Result<(), Box<dyn Error>> {
                         | KeyCode::Char('q')
                         | KeyCode::Char('Q') => {
                             app.show_help = false;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                if app.show_format_modal {
+                    match key.code {
+                        KeyCode::Char('t') | KeyCode::Char('T') => {
+                            app.show_format_modal = false;
+                            let track = app.status.track;
+                            let head = app.status.head;
+                            app.handle_action(Action::FormatTrack { track, head });
+                            let _ = tx_cmd.send(HwCmd::FormatTrack { track, head });
+                        }
+                        KeyCode::Char('d') | KeyCode::Char('D') => {
+                            app.show_format_modal = false;
+                            app.handle_action(Action::FormatDisk);
+                            let _ = tx_cmd.send(HwCmd::FormatDisk);
+                        }
+                        KeyCode::Esc
+                        | KeyCode::Char('q')
+                        | KeyCode::Char('Q')
+                        | KeyCode::Char('x')
+                        | KeyCode::Char('X') => {
+                            app.show_format_modal = false;
                         }
                         _ => {}
                     }
@@ -1004,6 +1056,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     KeyCode::Char('d') | KeyCode::Char('D') => {
                         let _ = tx_cmd.send(HwCmd::ReadData);
+                    }
+                    KeyCode::Char('f') | KeyCode::Char('F') => {
+                        app.show_format_modal = true;
                     }
                     KeyCode::Char('v') | KeyCode::Char('V') => {
                         let _ = tx_cmd.send(HwCmd::ToggleVerbose);
@@ -2322,6 +2377,122 @@ mod tests {
         assert_eq!(block_spans[1].style.fg, Some(Color::LightRed));
         // Block index 3 (sec C3) -> Green
         assert_eq!(block_spans[2].style.fg, Some(Color::LightGreen));
+    }
+
+    #[test]
+    fn test_format_modal_lines_and_typography() {
+        let lines = build_format_modal_lines(
+            40,
+            0,
+            79,
+            "3.5\" HD (1.44M)",
+            500,
+            "IBM PC",
+            0,
+        );
+
+        let full_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+
+        // Must contain key English instructions
+        assert!(full_text.contains("LOW-LEVEL MFM FORMATTING"));
+        assert!(full_text.contains("Track 40, Head 0"));
+        assert!(full_text.contains("Tracks 00..79, Dual-Head"));
+        assert!(full_text.contains("Cancel & Return"));
+
+        // Check shortcut highlight formatting for [T] and [D]
+        let mut found_t_shortcut = false;
+        let mut found_d_shortcut = false;
+        let mut found_esc_shortcut = false;
+
+        for line in &lines {
+            for span in &line.spans {
+                if span.content == "T" && span.style.fg == Some(Color::Yellow) {
+                    found_t_shortcut = true;
+                }
+                if span.content == "D" && span.style.fg == Some(Color::Yellow) {
+                    found_d_shortcut = true;
+                }
+                if span.content == "Esc" && span.style.fg == Some(Color::LightRed) {
+                    found_esc_shortcut = true;
+                }
+            }
+        }
+
+        assert!(found_t_shortcut, "Shortcut [T] and 'Track' must be emphasized in Yellow/Bold");
+        assert!(found_d_shortcut, "Shortcut [D] and 'Disk' must be emphasized in Yellow/Bold");
+        assert!(found_esc_shortcut, "Shortcut [Esc] must be highlighted in Red/Bold");
+    }
+
+    #[test]
+    fn test_build_progress_bar_string() {
+        let bar_0 = build_progress_bar_string(0.0, 20);
+        assert_eq!(bar_0, "[░░░░░░░░░░░░░░░░░░░░]   0.0%");
+
+        let bar_50 = build_progress_bar_string(50.0, 20);
+        assert_eq!(bar_50, "[██████████░░░░░░░░░░]  50.0%");
+
+        let bar_100 = build_progress_bar_string(100.0, 20);
+        assert_eq!(bar_100, "[████████████████████] 100.0%");
+    }
+
+    #[test]
+    fn test_build_format_progress_lines() {
+        let mut status = DriveStatus::default();
+        status.preset = PresetProfile::Pc35Hd;
+        status.mode = DisplayMode::Format;
+        status.format_progress = Some(FormatProgress {
+            current_track: 20,
+            current_head: 1,
+            total_tracks: 80,
+            total_heads: 2,
+            step: FormatStep::Writing,
+            completed_passes: 41,
+            total_passes: 160,
+            verification_ok: true,
+            retry_count: 0,
+            quality_pct: 98,
+            crc_errors: 0,
+            verified_sectors: 18,
+            expected_sectors: 18,
+            elapsed_secs: 12.5,
+            eta_secs: 36.2,
+            message: "Writing flux...".to_string(),
+        });
+
+        let lines = build_format_progress_lines(&status);
+        assert!(!lines.is_empty());
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text.contains("LOW-LEVEL FORMAT ENGINE"));
+        assert!(text.contains("WRITING FLUX"));
+        assert!(text.contains("Track 20/79, Head 1/1"));
+        assert!(text.contains("Sectors: 18/18"));
+    }
+
+    #[test]
+    fn test_app_format_modal_actions() {
+        let mut app = App::new();
+        assert!(!app.show_format_modal);
+
+        app.handle_action(Action::OpenFormatModal);
+        assert!(app.show_format_modal);
+
+        app.handle_action(Action::CloseFormatModal);
+        assert!(!app.show_format_modal);
+
+        app.handle_action(Action::FormatTrack { track: 10, head: 0 });
+        assert_eq!(app.status.mode, DisplayMode::Format);
+        assert_eq!(app.status.activity, HwActivity::Formatting);
+        assert!(app.motor_on);
+
+        app.handle_action(Action::Stop);
+        assert_eq!(app.status.mode, DisplayMode::None);
+        assert_eq!(app.status.activity, HwActivity::Stopped);
     }
 }
 

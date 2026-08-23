@@ -14,6 +14,12 @@
 ## 🌟 Key Highlights
 
 - ⚡ **100% Non-Blocking Architecture (~60 Hz TUI):** Strict decoupling between the interactive Ratatui/Crossterm rendering loop, the USB hardware acquisition worker thread, and a dedicated real-time audio thread via lock-free `crossbeam-channel` queues.
+- 💾 **High-Precision Low-Level Format Engine & MFM Synthesizer (`CMD_WRITE_FLUX`):**
+  - **72 MHz Pulse Timing:** Translates synthesized MFM bitstreams into cycle-accurate 72 MHz interval ticks ($2T, 3T, 4T$).
+  - **Write Pre-Compensation:** Applies $\pm 125\text{ ns}$ ($\approx 9$ ticks @ 72 MHz) timing shifts on inner tracks ($> 40$) to counteract magnetic peak shift.
+  - **Hardware Index Cueing:** Synchronizes flux emission to the physical index pulse (`cue_at_index = 1`) with controlled splice overlap.
+  - **Read-After-Write Verification:** Automatically reads back each formatted track, verifies 100% expected sector presence, 0 CRC errors, and $Q \ge 90\%$ quality with up to 2 automatic retries.
+  - **Write-Protect Guard:** Hardware Pin 28 (`WPROT`) validation before any carriage movement or flux emission.
 - 🕹️ **Multi-System Retro Platform Support (IBM PC, Amiga, Atari ST, Amstrad CPC):**
   - **Amiga (Paula MFM):** Décodage bit-level *even/odd*, checksums 32-bit XOR, 11 secteurs/piste en DD (880 Ko) et 22 secteurs en HD (1.76 Mo).
   - **Atari ST (WD1772):** Support des formats étendus 9, 10 et 11 secteurs (jusqu'à 880 Ko) et pistes 80 à 82.
@@ -97,6 +103,7 @@ cargo run --release -- --shugart --drive 0
 | <kbd>?</kbd> / <kbd>F1</kbd> | **Help Modal** | Open interactive help modal overlay |
 | <kbd>A</kbd> | **Analyze** | Start continuous real-time track alignment analysis |
 | <kbd>D</kbd> | **Read Data** | Read and test sector CRC integrity across the cylinder |
+| <kbd>F</kbd> | **Format** | Low-Level Track & Full Disk Format with Index Sync and Read-After-Write Verification (`[T]` Track, `[D]` Disk, `[Esc]` Cancel) |
 | <kbd>L</kbd> | **Live RPM** | Live RPM tachometer & jitter stability test |
 | <kbd>P</kbd> | **Preset (Hardware & Format)** | Cycle unified hardware & format presets (`Pc35Hd` ➔ `Pc35Dd` ➔ `Pc525Hd` ➔ `Pc525DdOnHd` ➔ `Pc525Dd` ➔ `Amiga35Dd` ➔ `Atari35Dd` ➔ `Cpc30Data`), atomically configuring bus, stepping rate, DPLL clock & nominal bitrate |
 | <kbd>S</kbd> | **Toggle Step Rate** | Toggle Single (1:1) / Double (2:1) step mode (48/96 TPI, for reading 40-track media on 80-track drives) |

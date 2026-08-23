@@ -13,9 +13,10 @@ Welcome to the definitive technical documentation for **AlignTesterDiag**, an ul
 5. [Real-Time Alignment Diagnostic Engine](#5-real-time-alignment-diagnostic-engine)
 6. [Acoustic Variometer & Alignment Radar](#6-acoustic-variometer--alignment-radar)
 7. [High-Precision Spindle Tachometer & Live RPM Jitter Engine](#7-high-precision-spindle-tachometer--live-rpm-jitter-engine)
-8. [User Interface, Visual Indicators & Controls](#8-user-interface-visual-indicators--controls)
-9. [Automated Test & Verification Suite](#9-automated-test--verification-suite)
-10. [Technical Roadmap & Multi-System Future Support](#10-technical-roadmap--multi-system-future-support)
+8. [High-Precision Low-Level Format Engine & MFM Synthesizer](#8-high-precision-low-level-format-engine--mfm-synthesizer)
+9. [User Interface, Visual Indicators & Controls](#9-user-interface-visual-indicators--controls)
+10. [Automated Test & Verification Suite](#10-automated-test--verification-suite)
+11. [Technical Roadmap & Multi-System Future Support](#11-technical-roadmap--multi-system-future-support)
 
 ---
 
@@ -351,7 +352,52 @@ The UI renders an intuitive centering gauge depicting deviation from the nominal
 
 ---
 
-## 8. User Interface, Visual Indicators & Controls
+## 8. High-Precision Low-Level Format Engine & MFM Synthesizer
+
+Accessed via the <kbd>F</kbd> key, the Low-Level Format Engine enables bit-accurate track and whole-disk magnetic formatting directly through Greaseweazle's `CMD_WRITE_FLUX` (0x08) protocol command.
+
+### 8.1 Zero-Allocation MFM Synthesizer Architecture (`src/hw/format.rs`)
+
+1. **Static Conversion Tables:**
+   - **MFM Clock/Data Encoding:** Static $2 \times 256$ entry lookup table (`MFM_ENCODE_TABLE`) encoding data bit $1 \to 01$, bit $0$ (after $0$) $\to 10$, bit $0$ (after $1$) $\to 00$.
+   - **Altered Sync Drops:** Generates missing clock sync words `0xA1*` (clock transition drop $0x0A$ instead of $0x0E$, producing MFM word `0x4489`) for IDAM (`0xFE`) and DAM (`0xFB`).
+   - **CRC16-CCITT Accelerator:** Precomputed 256-word lookup table (`const CRC16_TABLE`) using polynomial `0x1021` and initial seed `0xFFFF`.
+
+2. **Supported Format Preset Layouts:**
+   - **IBM PC 1.44M HD:** 18 sectors/track (512B, Gap1=80, Gap2=22, Gap3=84, fill=0xE5, 500 kbps @ 300 RPM).
+   - **IBM PC 720K DD:** 9 sectors/track (512B, Gap1=32, Gap2=22, Gap3=54, fill=0xE5, 250 kbps @ 300 RPM).
+   - **IBM PC 1.2M 5.25" HD:** 15 sectors/track (512B, Gap1=80, Gap2=22, Gap3=84, fill=0xE5, 500 kbps @ 360 RPM).
+   - **IBM PC 360K (HD Drive):** 9 sectors/track (512B, Gap1=32, Gap2=22, Gap3=54, fill=0xE5, 300 kbps @ 360 RPM, Step 2:1).
+   - **IBM PC 360K (DD Drive):** 9 sectors/track (512B, Gap1=32, Gap2=22, Gap3=54, fill=0xE5, 250 kbps @ 300 RPM, Step 1:1).
+   - **AmigaDOS DD (880K):** 11 sectors/track (512B, split even/odd Paula, 0x4489 sync, 32-bit XOR checksum, 250 kbps).
+   - **Atari ST & Amstrad CPC Data:** 9 sectors/track (512B, 250 kbps).
+
+### 8.2 72 MHz Flux Translation & Write Pre-Compensation
+
+1. **Cycle-Accurate Timings:**
+   - $500\text{ kbps} \implies 1T = 72\text{ ticks}, 2T = 144\text{ ticks}, 3T = 216\text{ ticks}, 4T = 288\text{ ticks}$.
+   - $300\text{ kbps} \implies 1T = 120\text{ ticks}, 2T = 240\text{ ticks}, 3T = 360\text{ ticks}, 4T = 480\text{ ticks}$.
+   - $250\text{ kbps} \implies 1T = 144\text{ ticks}, 2T = 288\text{ ticks}, 3T = 432\text{ ticks}, 4T = 576\text{ ticks}$.
+
+2. **Write Pre-Compensation on Inner Cylinders ($> 40$):**
+   - Applies $\pm 125\text{ ns}$ ($\approx 9\text{ ticks}$ @ 72 MHz) shifts to counteract magnetic peak shift:
+     * $2T$ followed by $\ge 3T \implies$ shifted **EARLY** ($-9\text{ ticks}$ on $2T$, $+9\text{ ticks}$ on $\ge 3T$).
+     * $\ge 3T$ followed by $2T \implies$ shifted **LATE** ($+9\text{ ticks}$ on $\ge 3T$, $-9\text{ ticks}$ on $2T$).
+     * Symmetrical intervals ($2T-2T$ or $\ge 3T - \ge 3T$) have zero pre-compensation shift.
+
+### 8.3 Hardware Safeguards & Read-After-Write Verification
+
+1. **Hardware Write-Protect Query:** Queries floppy Pin 28 (`WPROT`) before seeking or emitting flux. If asserted, the operation is immediately rejected and logged.
+2. **Index-Synchronized Writing:** Emits `CMD_WRITE_FLUX` with `cue_at_index = 1` and streams RLE flux packets.
+3. **Automated Verification Pass:** Immediately reads back the written track via `CMD_READ_FLUX` to verify:
+   - $100\%$ presence of expected sectors.
+   - $0$ CRC errors on headers and data fields.
+   - Quality score $Q \ge 90\%$.
+4. **Auto-Retry:** Re-attempts format up to 2 times upon verification failure before flagging a track error.
+
+---
+
+## 9. User Interface, Visual Indicators & Controls
 
 The interface is divided into three primary functional zones: Top Header, Left Control Menu, and Right Diagnostic Panel.
 
@@ -424,7 +470,7 @@ All keyboard inputs are captured in raw mode via Crossterm non-blocking polling 
 | <kbd>V</kbd> / <kbd>v</kbd> | **Toggle Verbose Stream Mode** | `UI` & `Hardware I/O` | Dispatches `HwCmd::ToggleVerbose`. Switches stream display between Standard mode (compact graphical sector blocks `[ ■ ■ ■ ]`) and Verbose History mode (detailed microsecond cell timings, DPLL phase drift, instantaneous RPM per revolution, and individual error causes). |
 | <kbd>Q</kbd> / <kbd>q</kbd> / <kbd>X</kbd> / <kbd>x</kbd> / <kbd>Ctrl</kbd>+<kbd>C</kbd> | **Clean Application Exit** | `UI` & `Hardware I/O` | Dispatches `HwCmd::Exit`. Gracefully terminates background worker threads, shuts down spindle motor, deselects drive unit (`CMD_DESELECT`), tri-states interface bus (`CMD_SET_BUS_TYPE 0`), lowers DTR/RTS lines, restores terminal raw mode, and exits the application cleanly. |
 | <kbd>P</kbd> / <kbd>p</kbd> | **Cycle Hardware & Format Preset** | `UI` & `Hardware I/O` | Dispatches `HwCmd::CyclePreset` and `Action::CyclePreset`. Atomically cycles through standard hardware & format presets: `Pc35Hd` (3.5" HD, 1.44M, PC Bus, Step 1:1, 500 kbps @ 300 RPM) ➔ `Pc35Dd` (3.5" DD, 720K, PC Bus, Step 1:1, 250 kbps @ 300 RPM) ➔ `Pc525Hd` (5.25" HD, 1.2M, PC Bus, Step 1:1, 500 kbps @ 360 RPM) ➔ `Pc525DdOnHd` (5.25" DD on HD Drive, 360K, PC Bus, Step 2:1, DPLL 300 kbps @ 360 RPM) ➔ `Pc525Dd` (5.25" DD on DD Drive, 360K, PC Bus, Step 1:1, 250 kbps @ 300 RPM) ➔ `Amiga35Dd` (Amiga 3.5", 880K, Shugart Bus, Step 1:1, 250 kbps @ 300 RPM) ➔ `Atari35Dd` (Atari 3.5", 720K, PC Bus, Step 1:1, 250 kbps @ 300 RPM) ➔ `Cpc30Data` (Amstrad CPC 3.0", 178K, Shugart Bus, Step 1:1, 250 kbps @ 300 RPM). Automatically syncs DPLL nominal window, bus mode, and step rate. |
-| <kbd>F</kbd> / <kbd>f</kbd> | **Low-Level Track Formatter** | `Hardware I/O` *(Reserved)* | Reserved shortcut for full-track low-level MFM formatting and bulk magnetic degaussing utility in Roadmap Phase 3. |
+| <kbd>F</kbd> / <kbd>f</kbd> | **Low-Level Track & Disk Formatter** | `UI` & `Hardware I/O` | Opens the Low-Level Format Confirmation Modal. Dispatches `HwCmd::FormatTrack` on <kbd>T</kbd> (formats current track only) or `HwCmd::FormatDisk` on <kbd>D</kbd> (formats entire disk cylinder-by-cylinder across both heads) using cycle-accurate 72 MHz pulse synthesis, write pre-compensation, physical index cueing, and read-after-write CRC verification. |
 | <kbd>I</kbd> / <kbd>i</kbd> | **Track Flux Imaging Utility** | `Hardware I/O` *(Reserved)* | Reserved shortcut for raw multi-revolution flux imaging and flux-level surface degradation heatmaps in Roadmap Phase 4. |
 | <kbd>S</kbd> / <kbd>s</kbd> | **Toggle Step Rate (Single 1:1 / Double 2:1 for 48/96 TPI)** | `UI` & `Hardware I/O` | Dispatches `HwCmd::ToggleStepMode` and `Action::ToggleStepMode`. Alternates head carriage stepping rate between Single Step 1:1 (native 96/135 TPI drives, 0..83 cylinders) and Double Step 2:1 (48 TPI media on 96/135 TPI mechanics, multiplying physical seek cylinders by 2 to map 40-41 logical tracks T00..T40 onto physical cylinders 0..82). Automatically bounds active track to the maximum logical limit (83 in Single, 41 in Double). |
 | <kbd>T</kbd> / <kbd>t</kbd> | **Toggle Bus Type (IBM PC <-> Shugart)** | `UI` & `Hardware I/O` | Dispatches `HwCmd::ToggleBusType` and `Action::ToggleBusType`. Toggles floppy interface between IBM PC bus (`0x01`) and Shugart standard bus (`0x02`, e.g. Amiga / Atari / Commodore / CPC native drives). Dynamically updates pinout configuration and unit drive selection (automatically resetting the active unit to 0 if switching back to PC mode while on DS2 or DS3). |
@@ -432,17 +478,18 @@ All keyboard inputs are captured in raw mode via Crossterm non-blocking polling 
 
 ---
 
-## 9. Automated Test & Verification Suite
+## 10. Automated Test & Verification Suite
 
-AlignTesterDiag includes an exhaustive **139-test automated unit test suite** built directly into Cargo (100% success rate).
+AlignTesterDiag includes an exhaustive **157-test automated unit test suite** built directly into Cargo (100% success rate).
 
-### 9.1 Automated Unit Test Harness
+### 10.1 Automated Unit Test Harness
 Run the full test suite using Cargo:
 ```bash
 cargo test
 ```
 
-The 139 unit tests provide complete coverage across all subsystems:
+The 157 unit tests provide complete coverage across all subsystems:
+- Low-Level MFM track synthesizer, altered sync drops `0xA1*` -> `0x4489`, CRC16-CCITT static table validation, 72 MHz pulse timing translation for 250k/300k/500k, write pre-compensation ($\pm 125\text{ ns}$ on tracks $> 40$), Greaseweazle RLE flux decoding roundtrip, and Amiga Paula even/odd encoding & decoding roundtrips (`src/hw/format.rs`).
 - State transitions on `HwCmd` and `Action` dispatches (`src/app.rs`, `src/hw/mod.rs`).
 - Hardware & format presets lifecycle, cycling, and CLI argument parsing (`src/hw/protocol.rs`, `src/app.rs`, `src/main.rs`).
 - Dynamic drive unit cycling across bus types (`0..1` for IBM PC, `0..3` for Shugart) and automatic unit fallback (`src/app.rs`, `src/hw/mod.rs`, `src/main.rs`).
@@ -452,19 +499,20 @@ The 139 unit tests provide complete coverage across all subsystems:
 - Spindle tachometer rolling average windowing, sub-microsecond interval conversion, and jitter calculations (`src/hw/mod.rs`).
 - Multi-system retro encoding & decoding engines (Amiga Paula even/odd bit deinterleaving & 32-bit XOR checksums, Atari ST 9/10/11 sectors & overtracks, Amstrad CPC DATA/SYSTEM sector ID formats) (`src/hw/mod.rs`, `src/app.rs`, `src/ui.rs`).
 - Dual-head "Both" mode consolidation, active pointer tracking, and mismatch handling (`src/app.rs`, `src/hw/mod.rs`, `src/ui.rs`).
+- Format confirmation modal formatting, shortcut styling (`[T]` / `[D]` / `[Esc]`), progress bar calculation, and right panel format diagnostics (`src/ui.rs`, `src/main.rs`).
 - TUI ribbon span coloring, phosphor decay interpolation, spinner animation, zero-allocation ruler line, and dynamic text generation (`src/ui.rs`).
 - Hardware protocol packet encoders, bus modes, step modes, and opcode definitions (`src/hw/protocol.rs`).
 - CLI argument parsing (`--preset`, `-p`, `--port`, `--drive`, `--bus`, `--step`, `--double-step`, `--shugart`, short & key-value syntax) and auto-detection fallback (`src/main.rs`).
 
 ---
 
-## 10. Technical Roadmap & Multi-System Future Support
+## 11. Technical Roadmap & Multi-System Future Support
 
 ```text
 AlignTesterDiag Roadmap
 ├── ✅ Phase 1: Core TUI, Greaseweazle Driver, DPLL Engine & Audio Variometer
 ├── 🔄 Phase 2: Mechanical Diagnostics (Endurance Seek, Random Seek, Head Cleaning)
-├── 📅 Phase 3: Interactive Low-Level MFM Formatter (Interleave & Cylinder Skew)
+├── ✅ Phase 3: High-Precision Low-Level MFM Formatter & Synthesizer (CMD_WRITE_FLUX)
 └── ✅ Phase 4: Retro Multi-System Encodings (Atari ST, Amiga Paula, Amstrad CPC)
 ```
 

@@ -470,9 +470,88 @@ pub fn build_read_flux_packet(revs: u16) -> [u8; 8] {
     [CMD_READ_FLUX, 0x08, 0x00, 0x00, 0x00, 0x00, b_revs[0], b_revs[1]]
 }
 
+/// Builds a 4-byte `CMD_WRITE_FLUX` packet: `[0x08, 0x04, cue_at_index, terminate_at_index]`.
+pub fn build_write_flux_packet(cue_at_index: bool, terminate_at_index: bool) -> [u8; 4] {
+    [
+        CMD_WRITE_FLUX,
+        0x04,
+        if cue_at_index { 0x01 } else { 0x00 },
+        if terminate_at_index { 0x01 } else { 0x00 },
+    ]
+}
+
 /// Builds a 3-byte `CMD_GET_PIN` packet: `[0x14, 0x03, pin_num]`.
 pub fn build_get_pin_packet(pin_num: u8) -> [u8; 3] {
     [CMD_GET_PIN, 0x03, pin_num]
+}
+
+/// Status of the low-level format engine state machine
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FormatStep {
+    #[default]
+    Idle,
+    Writing,
+    Verifying,
+    Retrying,
+    Completed,
+    Error,
+}
+
+impl FormatStep {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FormatStep::Idle => "IDLE",
+            FormatStep::Writing => "WRITING FLUX",
+            FormatStep::Verifying => "VERIFYING CRC",
+            FormatStep::Retrying => "RETRYING",
+            FormatStep::Completed => "COMPLETED",
+            FormatStep::Error => "ERROR",
+        }
+    }
+}
+
+/// Real-time progress metrics for low-level formatting
+#[derive(Clone, Debug, PartialEq)]
+pub struct FormatProgress {
+    pub current_track: u8,
+    pub current_head: u8,
+    pub total_tracks: u8,
+    pub total_heads: u8,
+    pub step: FormatStep,
+    pub completed_passes: u16,
+    pub total_passes: u16,
+    pub verification_ok: bool,
+    pub retry_count: u8,
+    pub quality_pct: u8,
+    pub crc_errors: u8,
+    pub verified_sectors: u8,
+    pub expected_sectors: u8,
+    pub elapsed_secs: f64,
+    pub eta_secs: f64,
+    pub message: String,
+}
+
+impl Default for FormatProgress {
+    fn default() -> Self {
+        Self {
+            current_track: 0,
+            current_head: 0,
+            total_tracks: 80,
+            total_heads: 2,
+            step: FormatStep::Idle,
+            completed_passes: 0,
+            total_passes: 160,
+            verification_ok: false,
+            retry_count: 0,
+            quality_pct: 100,
+            crc_errors: 0,
+            verified_sectors: 0,
+            expected_sectors: 18,
+            elapsed_secs: 0.0,
+            eta_secs: 0.0,
+            message: String::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -535,6 +614,8 @@ mod tests {
         assert_eq!(build_seek_packet(40), [0x02, 0x03, 40]);
         assert_eq!(build_read_flux_packet(3), [0x07, 0x08, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00]);
         assert_eq!(build_get_pin_packet(28), [0x14, 0x03, 28]);
+        assert_eq!(build_write_flux_packet(true, false), [0x08, 0x04, 0x01, 0x00]);
+        assert_eq!(build_write_flux_packet(false, true), [0x08, 0x04, 0x00, 0x01]);
     }
 
     #[test]

@@ -840,6 +840,23 @@ pub fn format_activity_badge(activity: HwActivity, io_cycle: u64) -> (Span<'stat
                     .add_modifier(Modifier::BOLD),
             ),
         ),
+        HwActivity::Formatting => {
+            let spin = SPINNER[(io_cycle as usize) % SPINNER.len()];
+            (
+                Span::styled(
+                    "► ",
+                    Style::default()
+                        .fg(Color::LightYellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("[LOW-LEVEL FORMATTING {}]", spin),
+                    Style::default()
+                        .fg(Color::LightYellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            )
+        }
         HwActivity::Idle => (
             Span::styled("► ", Style::default().fg(Color::White)),
             Span::styled("[IDLE / READY]", Style::default().fg(Color::White)),
@@ -1100,6 +1117,232 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
         .alignment(ratatui::layout::Alignment::Left);
 
     f.render_widget(paragraph, modal_area);
+}
+
+/// Builds the formatted confirmation and selection lines for the Low-Level Format modal dialog
+pub fn build_format_modal_lines(
+    track: u8,
+    head: u8,
+    max_track: u8,
+    preset_label: &str,
+    bitrate: u16,
+    bus_name: &str,
+    unit: u8,
+) -> Vec<Line<'static>> {
+    let accent_bold = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let red_bold = Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD);
+    let white = Style::default().fg(Color::White);
+    let cyan = Style::default().fg(Color::Cyan);
+    let gray = Style::default().fg(Color::DarkGray);
+
+    vec![
+        Line::from(vec![
+            Span::styled("  ⚠️  LOW-LEVEL MFM FORMATTING & TRACK SYNTHESIZER", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", gray)),
+        Line::from(vec![
+            Span::styled("  Low-level formatting will ", white),
+            Span::styled("REWRITE RAW MAGNETIC FLUX", red_bold),
+            Span::styled(" on the floppy diskette.", white),
+        ]),
+        Line::from(Span::styled("  All existing data in the targeted track/disk area will be overwritten.", white)),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Target Drive  : ", gray),
+            Span::styled(format!("Unit {} ({})", unit, bus_name), cyan),
+            Span::styled(" | Preset: ", gray),
+            Span::styled(preset_label.to_string(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Current Target: ", gray),
+            Span::styled(format!("Track {:02}, Head {} (Bitrate: {} kbps)", track, head, bitrate), cyan),
+        ]),
+        Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", gray)),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  [", gray),
+            Span::styled("T", accent_bold),
+            Span::styled("] Format Current ", white),
+            Span::styled("T", accent_bold),
+            Span::styled(format!("rack only (Track {:02}, Head {})", track, head), white),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  [", gray),
+            Span::styled("D", accent_bold),
+            Span::styled("] Format Entire ", white),
+            Span::styled("D", accent_bold),
+            Span::styled(format!("isk (Tracks 00..{:02}, Dual-Head)", max_track), white),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  [", gray),
+            Span::styled("Esc", red_bold),
+            Span::styled("] Cancel & Return", white),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", gray)),
+        Line::from(vec![
+            Span::styled("  Hardware Protection: ", gray),
+            Span::styled("Write-Protect pin 28 is checked before writing. Read-after-write auto-verifies CRC.", Style::default().fg(Color::LightCyan)),
+        ]),
+    ]
+}
+
+/// Renders an interactive centered overlay format confirmation modal dialog
+pub fn render_format_modal(
+    f: &mut Frame,
+    area: Rect,
+    track: u8,
+    head: u8,
+    max_track: u8,
+    preset_label: &str,
+    bitrate: u16,
+    bus_name: &str,
+    unit: u8,
+) {
+    let modal_width = (area.width.saturating_sub(2)).clamp(84, 88).min(area.width);
+    let modal_height = (area.height.saturating_sub(2)).clamp(22, 24).min(area.height);
+    let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
+    let modal_area = Rect::new(x, y, modal_width, modal_height);
+
+    f.render_widget(Clear, modal_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD))
+        .title(" 💾 Low-Level Track / Disk Format (CMD_WRITE_FLUX) ")
+        .title_style(Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(Color::Rgb(20, 15, 30)));
+
+    let paragraph = Paragraph::new(build_format_modal_lines(
+        track,
+        head,
+        max_track,
+        preset_label,
+        bitrate,
+        bus_name,
+        unit,
+    ))
+    .block(block)
+    .alignment(ratatui::layout::Alignment::Left);
+
+    f.render_widget(paragraph, modal_area);
+}
+
+/// Helper function to build a text-based segmented progress bar: `[████████████░░░░░░░░] 60.0%`
+pub fn build_progress_bar_string(pct: f32, width: usize) -> String {
+    let clamped_pct = pct.clamp(0.0, 100.0);
+    let filled = ((clamped_pct / 100.0) * width as f32).round() as usize;
+    let empty = width.saturating_sub(filled);
+    format!(
+        "[{}{}] {:>5.1}%",
+        "█".repeat(filled),
+        "░".repeat(empty),
+        clamped_pct
+    )
+}
+
+/// Builds real-time formatted lines for the right panel when low-level formatting is active
+pub fn build_format_progress_lines(status: &crate::hw::DriveStatus) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    lines.push(Line::from(Span::styled(
+        "=== LOW-LEVEL FORMAT ENGINE & MFM SYNTHESIZER (CMD_WRITE_FLUX) ===",
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        "Hardware-Synchronized Index Writing (72 MHz) with Read-After-Write CRC Verification",
+        Style::default().fg(Color::LightCyan),
+    )));
+    lines.push(Line::from(""));
+
+    let preset = status.preset;
+    lines.push(Line::from(vec![
+        Span::styled("Format Profile : ", Style::default().fg(Color::DarkGray)),
+        Span::styled(preset.label(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+        Span::styled(" | Bitrate: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{} kbps", preset.target_data_rate()), Style::default().fg(Color::Cyan)),
+        Span::styled(" | Bus: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(status.bus_type.as_str(), Style::default().fg(Color::Cyan)),
+    ]));
+    lines.push(Line::from(""));
+
+    if let Some(ref prog) = status.format_progress {
+        let pct = if prog.total_passes > 0 {
+            (prog.completed_passes as f32 / prog.total_passes as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled("Status Phase   : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                prog.step.as_str(),
+                match prog.step {
+                    crate::hw::FormatStep::Writing => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    crate::hw::FormatStep::Verifying => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    crate::hw::FormatStep::Retrying => Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+                    crate::hw::FormatStep::Completed => Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+                    crate::hw::FormatStep::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    crate::hw::FormatStep::Idle => Style::default().fg(Color::White),
+                },
+            ),
+            Span::styled(" | Active Target: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("Track {:02}/{}, Head {}/{}", prog.current_track, prog.total_tracks.saturating_sub(1), prog.current_head, prog.total_heads.saturating_sub(1)),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("Progress       : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                build_progress_bar_string(pct, 36),
+                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" ({}/{} passes)", prog.completed_passes, prog.total_passes),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("Verification   : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("Sectors: {}/{} | CRC Errors: {} | Quality: {}%", prog.verified_sectors, prog.expected_sectors, prog.crc_errors, prog.quality_pct),
+                if prog.verification_ok {
+                    Style::default().fg(Color::LightGreen)
+                } else if prog.crc_errors > 0 {
+                    Style::default().fg(Color::LightRed)
+                } else {
+                    Style::default().fg(Color::White)
+                },
+            ),
+        ]));
+
+        lines.push(Line::from(vec![
+            Span::styled("Timing Stats   : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("Elapsed: {:.1}s", prog.elapsed_secs), Style::default().fg(Color::White)),
+            Span::styled(" | Estimated Remaining: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:.1}s", prog.eta_secs), Style::default().fg(Color::Yellow)),
+        ]));
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("Message        : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(prog.message.clone(), Style::default().fg(Color::LightCyan)),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled("Initializing format engine...", Style::default().fg(Color::DarkGray))));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("Press [Esc] at any time to abort formatting safely.", Style::default().fg(Color::DarkGray))));
+    lines
 }
 
 
