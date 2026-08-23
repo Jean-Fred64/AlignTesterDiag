@@ -1123,17 +1123,23 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
 pub fn build_format_modal_lines(
     track: u8,
     head: u8,
-    max_track: u8,
+    _max_track: u8,
     preset_label: &str,
     bitrate: u16,
     bus_name: &str,
     unit: u8,
+    target_tracks: u8,
+    is_48_tpi: bool,
 ) -> Vec<Line<'static>> {
     let accent_bold = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
     let red_bold = Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD);
     let white = Style::default().fg(Color::White);
     let cyan = Style::default().fg(Color::Cyan);
     let gray = Style::default().fg(Color::DarkGray);
+
+    let standard_tracks = if is_48_tpi { 40 } else { 80 };
+    let max_tracks_allowed = if is_48_tpi { 42 } else { 84 };
+    let last_track_idx = target_tracks.saturating_sub(1);
 
     vec![
         Line::from(vec![
@@ -1161,6 +1167,14 @@ pub fn build_format_modal_lines(
         Line::from(""),
         Line::from(vec![
             Span::styled("  [", gray),
+            Span::styled("+ / -", accent_bold),
+            Span::styled("] Target Tracks : ", white),
+            Span::styled(format!("{}", target_tracks), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" (Range: 00..{:02} | Standard: {}, Max: {})", last_track_idx, standard_tracks, max_tracks_allowed), cyan),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  [", gray),
             Span::styled("T", accent_bold),
             Span::styled("] Format Current ", white),
             Span::styled("T", accent_bold),
@@ -1172,7 +1186,7 @@ pub fn build_format_modal_lines(
             Span::styled("D", accent_bold),
             Span::styled("] Format Entire ", white),
             Span::styled("D", accent_bold),
-            Span::styled(format!("isk (Tracks 00..{:02}, Dual-Head)", max_track), white),
+            Span::styled(format!("isk (Tracks 00..{:02}, Dual-Head)", last_track_idx), white),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -1200,6 +1214,8 @@ pub fn render_format_modal(
     bitrate: u16,
     bus_name: &str,
     unit: u8,
+    target_tracks: u8,
+    is_48_tpi: bool,
 ) {
     let modal_width = (area.width.saturating_sub(2)).clamp(84, 88).min(area.width);
     let modal_height = (area.height.saturating_sub(2)).clamp(22, 24).min(area.height);
@@ -1224,6 +1240,8 @@ pub fn render_format_modal(
         bitrate,
         bus_name,
         unit,
+        target_tracks,
+        is_48_tpi,
     ))
     .block(block)
     .alignment(ratatui::layout::Alignment::Left);
@@ -1275,6 +1293,7 @@ pub fn build_format_progress_lines(status: &crate::hw::DriveStatus) -> Vec<Line<
         } else {
             0.0
         };
+        let phys_cyl = prog.current_track * status.step_mode.multiplier();
 
         lines.push(Line::from(vec![
             Span::styled("Status Phase   : ", Style::default().fg(Color::DarkGray)),
@@ -1289,9 +1308,16 @@ pub fn build_format_progress_lines(status: &crate::hw::DriveStatus) -> Vec<Line<
                     crate::hw::FormatStep::Idle => Style::default().fg(Color::White),
                 },
             ),
-            Span::styled(" | Active Target: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" | Target: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                format!("Track {:02}/{}, Head {}/{}", prog.current_track, prog.total_tracks.saturating_sub(1), prog.current_head, prog.total_heads.saturating_sub(1)),
+                format!(
+                    "Track {:02}/{} (Phys: {:02}) | Head {}/{}",
+                    prog.current_track,
+                    prog.total_tracks,
+                    phys_cyl,
+                    prog.current_head,
+                    prog.total_heads.saturating_sub(1)
+                ),
                 Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
             ),
         ]));

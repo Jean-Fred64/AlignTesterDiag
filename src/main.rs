@@ -942,6 +942,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     app.status.bitrate,
                     app.bus_type.as_str(),
                     app.drive_unit,
+                    app.format_target_tracks,
+                    app.is_48_tpi(),
                 );
             }
         })?;
@@ -974,6 +976,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 if app.show_format_modal {
                     match key.code {
+                        KeyCode::Left
+                        | KeyCode::Down
+                        | KeyCode::Char('-')
+                        | KeyCode::Char('_') => {
+                            app.decrement_format_tracks();
+                        }
+                        KeyCode::Right
+                        | KeyCode::Up
+                        | KeyCode::Char('+')
+                        | KeyCode::Char('=') => {
+                            app.increment_format_tracks();
+                        }
                         KeyCode::Char('t') | KeyCode::Char('T') => {
                             app.show_format_modal = false;
                             let track = app.status.track;
@@ -983,8 +997,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         KeyCode::Char('d') | KeyCode::Char('D') => {
                             app.show_format_modal = false;
-                            app.handle_action(Action::FormatDisk);
-                            let _ = tx_cmd.send(HwCmd::FormatDisk);
+                            let tracks = app.format_target_tracks;
+                            app.handle_action(Action::FormatDisk { tracks });
+                            let _ = tx_cmd.send(HwCmd::FormatDisk { tracks });
                         }
                         KeyCode::Esc
                         | KeyCode::Char('q')
@@ -2389,6 +2404,8 @@ mod tests {
             500,
             "IBM PC",
             0,
+            80,
+            false,
         );
 
         let full_text: String = lines
@@ -2399,6 +2416,8 @@ mod tests {
         // Must contain key English instructions
         assert!(full_text.contains("LOW-LEVEL MFM FORMATTING"));
         assert!(full_text.contains("Track 40, Head 0"));
+        assert!(full_text.contains("Target Tracks : 80"));
+        assert!(full_text.contains("Range: 00..79 | Standard: 80, Max: 84"));
         assert!(full_text.contains("Tracks 00..79, Dual-Head"));
         assert!(full_text.contains("Cancel & Return"));
 
@@ -2470,8 +2489,9 @@ mod tests {
             .collect();
         assert!(text.contains("LOW-LEVEL FORMAT ENGINE"));
         assert!(text.contains("WRITING FLUX"));
-        assert!(text.contains("Track 20/79, Head 1/1"));
+        assert!(text.contains("Track 20/80 (Phys: 20) | Head 1/1"));
         assert!(text.contains("Sectors: 18/18"));
+        assert!(text.contains("(41/160 passes)"));
     }
 
     #[test]
@@ -2490,9 +2510,192 @@ mod tests {
         assert_eq!(app.status.activity, HwActivity::Formatting);
         assert!(app.motor_on);
 
+        app.handle_action(Action::FormatDisk { tracks: 80 });
+        assert_eq!(app.status.mode, DisplayMode::Format);
+        assert_eq!(app.status.activity, HwActivity::Formatting);
+        assert!(app.motor_on);
+
         app.handle_action(Action::Stop);
         assert_eq!(app.status.mode, DisplayMode::None);
         assert_eq!(app.status.activity, HwActivity::Stopped);
+    }
+
+    #[test]
+    fn test_format_target_tracks_defaults_and_limits_48tpi_vs_80tpi() {
+        // 1. 80 TPI standard presets default to 80 tracks, min 1, max 84
+        let app_hd = App::with_full_preset_config(0, BusType::IbmPc, StepMode::Single, PresetProfile::Pc35Hd);
+        assert!(!app_hd.is_48_tpi());
+        assert_eq!(app_hd.default_format_tracks(), 80);
+        assert_eq!(app_hd.max_format_tracks(), 84);
+        assert_eq!(app_hd.format_target_tracks, 80);
+
+        let app_dd = App::with_full_preset_config(0, BusType::IbmPc, StepMode::Single, PresetProfile::Pc35Dd);
+        assert_eq!(app_dd.default_format_tracks(), 80);
+        assert_eq!(app_dd.max_format_tracks(), 84);
+
+        let app_amiga = App::with_full_preset_config(0, BusType::Shugart, StepMode::Single, PresetProfile::Amiga35Dd);
+        assert_eq!(app_amiga.default_format_tracks(), 80);
+        assert_eq!(app_amiga.max_format_tracks(), 84);
+
+        let app_atari = App::with_full_preset_config(0, BusType::IbmPc, StepMode::Single, PresetProfile::Atari35Dd);
+        assert_eq!(app_atari.default_format_tracks(), 80);
+        assert_eq!(app_atari.max_format_tracks(), 84);
+
+        // 2. 48 TPI presets default to 40 tracks, min 1, max 42
+        let app_525dd = App::with_full_preset_config(0, BusType::IbmPc, StepMode::Single, PresetProfile::Pc525Dd);
+        assert!(app_525dd.is_48_tpi());
+        assert_eq!(app_525dd.default_format_tracks(), 40);
+        assert_eq!(app_525dd.max_format_tracks(), 42);
+        assert_eq!(app_525dd.format_target_tracks, 40);
+
+        let app_525dd_on_hd = App::with_full_preset_config(0, BusType::IbmPc, StepMode::Double, PresetProfile::Pc525DdOnHd);
+        assert!(app_525dd_on_hd.is_48_tpi());
+        assert_eq!(app_525dd_on_hd.default_format_tracks(), 40);
+        assert_eq!(app_525dd_on_hd.max_format_tracks(), 42);
+        assert_eq!(app_525dd_on_hd.format_target_tracks, 40);
+
+        let app_cpc = App::with_full_preset_config(0, BusType::Shugart, StepMode::Single, PresetProfile::Cpc30Data);
+        assert!(app_cpc.is_48_tpi());
+        assert_eq!(app_cpc.default_format_tracks(), 40);
+        assert_eq!(app_cpc.max_format_tracks(), 42);
+        assert_eq!(app_cpc.format_target_tracks, 40);
+
+        // 3. StepMode::Double forces 48 TPI track bounds
+        let mut app_step = App::with_full_preset_config(0, BusType::IbmPc, StepMode::Single, PresetProfile::Pc35Hd);
+        assert_eq!(app_step.format_target_tracks, 80);
+        app_step.handle_action(Action::SetStepMode(StepMode::Double));
+        assert!(app_step.is_48_tpi());
+        assert_eq!(app_step.format_target_tracks, 40);
+        assert_eq!(app_step.max_format_tracks(), 42);
+    }
+
+    #[test]
+    fn test_format_target_tracks_interactive_adjustment() {
+        let mut app = App::with_full_preset_config(0, BusType::IbmPc, StepMode::Single, PresetProfile::Pc35Hd);
+        assert_eq!(app.format_target_tracks, 80);
+
+        // Increment up to max 84
+        for _ in 0..10 {
+            app.increment_format_tracks();
+        }
+        assert_eq!(app.format_target_tracks, 84, "Should be clamped at 84");
+
+        // Decrement down to min 1
+        for _ in 0..100 {
+            app.decrement_format_tracks();
+        }
+        assert_eq!(app.format_target_tracks, 1, "Should be clamped at min 1");
+
+        // 48 TPI overtracking clamping to 42
+        let mut app_48 = App::with_full_preset_config(0, BusType::IbmPc, StepMode::Single, PresetProfile::Pc525Dd);
+        assert_eq!(app_48.format_target_tracks, 40);
+        for _ in 0..10 {
+            app_48.increment_format_tracks();
+        }
+        assert_eq!(app_48.format_target_tracks, 42, "Should be clamped at 42 in 48 TPI");
+    }
+
+    #[test]
+    fn test_format_total_passes_calculation() {
+        // Standard 80 tracks x 2 heads = 160 passes
+        let target_80 = 80u8;
+        let heads = 2u8;
+        let passes_80 = (target_80 as usize) * (heads as usize);
+        assert_eq!(passes_80, 160);
+
+        // Standard 40 tracks x 2 heads = 80 passes
+        let target_40 = 40u8;
+        let passes_40 = (target_40 as usize) * (heads as usize);
+        assert_eq!(passes_40, 80);
+
+        // Overtracked 84 tracks x 2 heads = 168 passes
+        let target_84 = 84u8;
+        let passes_84 = (target_84 as usize) * (heads as usize);
+        assert_eq!(passes_84, 168);
+
+        // Overtracked 42 tracks x 2 heads = 84 passes
+        let target_42 = 42u8;
+        let passes_42 = (target_42 as usize) * (heads as usize);
+        assert_eq!(passes_42, 84);
+
+        // Progression percentage calculation
+        let pct_0 = (0 as f32 / passes_80 as f32) * 100.0;
+        assert_eq!(pct_0, 0.0);
+
+        let pct_half = (40 as f32 / passes_40 as f32) * 100.0;
+        assert_eq!(pct_half, 50.0);
+
+        let pct_100 = (passes_80 as f32 / passes_80 as f32) * 100.0;
+        assert_eq!(pct_100, 100.0);
+    }
+
+    #[test]
+    fn test_format_modal_rendering_with_dynamic_tracks() {
+        // 48 TPI modal line test
+        let lines_48 = build_format_modal_lines(
+            20,
+            0,
+            39,
+            "5.25\" DD (360K)",
+            250,
+            "IBM PC",
+            0,
+            40,
+            true,
+        );
+        let text_48: String = lines_48
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text_48.contains("[+ / -] Target Tracks : 40"));
+        assert!(text_48.contains("Range: 00..39 | Standard: 40, Max: 42"));
+        assert!(text_48.contains("Tracks 00..39, Dual-Head"));
+
+        // Overtracked 48 TPI (42 tracks)
+        let lines_48_over = build_format_modal_lines(
+            20,
+            0,
+            41,
+            "5.25\" DD (360K)",
+            250,
+            "IBM PC",
+            0,
+            42,
+            true,
+        );
+        let text_48_over: String = lines_48_over
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text_48_over.contains("[+ / -] Target Tracks : 42"));
+        assert!(text_48_over.contains("Range: 00..41 | Standard: 40, Max: 42"));
+        assert!(text_48_over.contains("Tracks 00..41, Dual-Head"));
+
+        // 80 TPI modal line test
+        let lines_80 = build_format_modal_lines(
+            0,
+            0,
+            79,
+            "3.5\" HD (1.44M)",
+            500,
+            "IBM PC",
+            0,
+            80,
+            false,
+        );
+        let text_80: String = lines_80
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text_80.contains("[+ / -] Target Tracks : 80"));
+        assert!(text_80.contains("Range: 00..79 | Standard: 80, Max: 84"));
+        assert!(text_80.contains("Tracks 00..79, Dual-Head"));
+    }
+
+    #[test]
+    fn test_format_timing_constants() {
+        assert_eq!(crate::hw::FORMAT_HEAD_SETTLE_MS, 15);
+        assert_eq!(crate::hw::FORMAT_HEAD_SWITCH_SETTLE_MS, 20);
     }
 }
 

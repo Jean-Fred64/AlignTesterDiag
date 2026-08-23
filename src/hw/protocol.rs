@@ -394,6 +394,32 @@ impl PresetProfile {
         }
     }
 
+    /// Is this a 48 TPI diskette profile (40 tracks standard)?
+    pub fn is_48_tpi(&self) -> bool {
+        matches!(
+            self,
+            PresetProfile::Pc525Dd | PresetProfile::Pc525DdOnHd | PresetProfile::Cpc30Data
+        )
+    }
+
+    /// Standard default track count for this preset (40 or 80)
+    pub fn default_track_count(&self) -> u8 {
+        if self.is_48_tpi() {
+            40
+        } else {
+            80
+        }
+    }
+
+    /// Maximum allowed track count including overtracking (42 or 84)
+    pub fn max_track_count(&self) -> u8 {
+        if self.is_48_tpi() {
+            42
+        } else {
+            84
+        }
+    }
+
     /// Case-insensitive parser supporting aliases for CLI and commands
     pub fn from_str_loose(s: &str) -> Option<Self> {
         let clean = s.trim().to_lowercase().replace(['-', '_', '.', ' ', '"', '\''], "");
@@ -518,8 +544,8 @@ pub struct FormatProgress {
     pub total_tracks: u8,
     pub total_heads: u8,
     pub step: FormatStep,
-    pub completed_passes: u16,
-    pub total_passes: u16,
+    pub completed_passes: usize,
+    pub total_passes: usize,
     pub verification_ok: bool,
     pub retry_count: u8,
     pub quality_pct: u8,
@@ -706,5 +732,47 @@ mod tests {
         assert_eq!(PresetProfile::from_str_loose("cpc"), Some(PresetProfile::Cpc30Data));
         assert_eq!(PresetProfile::from_str_loose("178k"), Some(PresetProfile::Cpc30Data));
         assert_eq!(PresetProfile::from_str_loose("invalid_preset"), None);
+    }
+
+    #[test]
+    fn test_preset_profile_track_helpers_and_format_progress() {
+        // Track count defaults and limits
+        assert_eq!(PresetProfile::Pc35Hd.default_track_count(), 80);
+        assert_eq!(PresetProfile::Pc35Hd.max_track_count(), 84);
+        assert!(!PresetProfile::Pc35Hd.is_48_tpi());
+
+        assert_eq!(PresetProfile::Pc35Dd.default_track_count(), 80);
+        assert_eq!(PresetProfile::Pc35Dd.max_track_count(), 84);
+        assert!(!PresetProfile::Pc35Dd.is_48_tpi());
+
+        assert_eq!(PresetProfile::Pc525Hd.default_track_count(), 80);
+        assert_eq!(PresetProfile::Pc525Hd.max_track_count(), 84);
+        assert!(!PresetProfile::Pc525Hd.is_48_tpi());
+
+        assert_eq!(PresetProfile::Pc525DdOnHd.default_track_count(), 40);
+        assert_eq!(PresetProfile::Pc525DdOnHd.max_track_count(), 42);
+        assert!(PresetProfile::Pc525DdOnHd.is_48_tpi());
+
+        assert_eq!(PresetProfile::Pc525Dd.default_track_count(), 40);
+        assert_eq!(PresetProfile::Pc525Dd.max_track_count(), 42);
+        assert!(PresetProfile::Pc525Dd.is_48_tpi());
+
+        assert_eq!(PresetProfile::Amiga35Dd.default_track_count(), 80);
+        assert_eq!(PresetProfile::Amiga35Dd.max_track_count(), 84);
+        assert!(!PresetProfile::Amiga35Dd.is_48_tpi());
+
+        assert_eq!(PresetProfile::Atari35Dd.default_track_count(), 80);
+        assert_eq!(PresetProfile::Atari35Dd.max_track_count(), 84);
+        assert!(!PresetProfile::Atari35Dd.is_48_tpi());
+
+        assert_eq!(PresetProfile::Cpc30Data.default_track_count(), 40);
+        assert_eq!(PresetProfile::Cpc30Data.max_track_count(), 42);
+        assert!(PresetProfile::Cpc30Data.is_48_tpi());
+
+        // FormatProgress Default values
+        let prog = FormatProgress::default();
+        assert_eq!(prog.completed_passes, 0);
+        assert_eq!(prog.total_passes, 160);
+        assert_eq!(prog.step, FormatStep::Idle);
     }
 }

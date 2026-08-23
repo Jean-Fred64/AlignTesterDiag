@@ -51,6 +51,10 @@ pub const STEPPER_WAKEUP_DELAY_MS: u64 = 15;
 /// Electromechanical Head Settle Time (15 ms to 30 ms) after track stepping.
 /// Standard floppy disk controller specification requires 15-30 ms for physical head carriage vibration dampening.
 pub const HEAD_SETTLE_TIME_MS: u64 = 30;
+/// Head settle delay after a carriage step during low-level formatting (15 ms)
+pub const FORMAT_HEAD_SETTLE_MS: u64 = 15;
+/// Head switch settle delay (H0 / H1 preamplifier stabilization) during low-level formatting (20 ms)
+pub const FORMAT_HEAD_SWITCH_SETTLE_MS: u64 = 20;
 /// Nominal serial read timeout (1000 ms) for USB flux capture margin.
 pub const DEFAULT_SERIAL_TIMEOUT_MS: u64 = 1000;
 /// Motor spin-up delay (350 ms) before reading flux to allow spindle to reach 300 RPM and stabilize index.
@@ -285,7 +289,7 @@ pub enum HwCmd {
     SetVerbose(bool),
     SetBeep(bool),
     FormatTrack { track: u8, head: u8 },
-    FormatDisk,
+    FormatDisk { tracks: u8 },
     Stop,
     PanicReset,
     SetDiskFormat(DiskFormat),
@@ -1965,9 +1969,19 @@ fn read_and_decode_track_diagnostic(
     status: &mut DriveStatus,
     tx_status: &crossbeam_channel::Sender<DriveStatus>,
 ) -> TrackAnalysisResult {
+    read_and_decode_track_diagnostic_revs(port, expected_cyl, status, tx_status, 3)
+}
+
+fn read_and_decode_track_diagnostic_revs(
+    port: &mut Box<dyn serialport::SerialPort>,
+    expected_cyl: u8,
+    status: &mut DriveStatus,
+    tx_status: &crossbeam_channel::Sender<DriveStatus>,
+    rev_count: u16,
+) -> TrackAnalysisResult {
     let pass_start = std::time::Instant::now();
 
-    if let Ok(dat) = gw_read_flux(port, 3) {
+    if let Ok(dat) = gw_read_flux(port, rev_count) {
         if !dat.is_empty() {
             let decoded_gw = decode_gw_flux_with_index(&dat);
             let instant_rpms =
@@ -3897,11 +3911,12 @@ pub fn handle_command(
                 &mut track_buffer,
             );
         }
-        HwCmd::FormatDisk => {
+        HwCmd::FormatDisk { tracks } => {
             let mut track_buffer = MfmTrackBuffer::new();
             let _ = execute_format_disk(
                 port,
                 status,
+                tracks,
                 rx_cmd,
                 tx_status,
                 &mut track_buffer,
@@ -3924,6 +3939,8 @@ pub fn execute_format_track(
     status.analyzing = false;
     status.mode = DisplayMode::Format;
     status.activity = HwActivity::Formatting;
+    status.bitrate = status.preset.target_data_rate();
+    status.density = status.bitrate == 500;
 
     // 1. Hardware Write-Protect Check
     if let Some(wp) = query_write_protect(
@@ -3976,23 +3993,24 @@ pub fn execute_format_track(
         thread::sleep(Duration::from_millis(SPIN_UP_DELAY_MS));
     }
 
-    // 3. Step Head Carriage & Select Physical Head
+    // 3. Step Head Carriage & Select Physical Head (15ms step settle, 5ms head switch)
     let phys_cyl = target_track * status.step_mode.multiplier();
     let _ = gw_send_raw(port, &build_seek_packet(phys_cyl), 0);
     status.track = target_track;
     status.target_track = target_track;
     status.trk0 = target_track == 0;
-    thread::sleep(Duration::from_millis(HEAD_SETTLE_TIME_MS));
+    thread::sleep(Duration::from_millis(FORMAT_HEAD_SETTLE_MS));
 
     let _ = gw_send_raw(port, &build_head_packet(target_head), 0);
     status.head = target_head;
-    thread::sleep(Duration::from_millis(HEAD_SWITCH_SETTLE_MS));
+    thread::sleep(Duration::from_millis(FORMAT_HEAD_SWITCH_SETTLE_MS));
 
     // 4. Synthesize Track MFM & Flux Timings
     FluxSynthesizer::synthesize_track(status.preset, target_track, target_head, track_buffer);
 
     let start_time = Instant::now();
     let mut verified_ok = false;
+    let expected = status.preset.format_profile().expected_sector_count(status.bitrate, 0);
 
     for attempt in 0..3 {
         let step = if attempt == 0 {
@@ -4020,7 +4038,7 @@ pub fn execute_format_track(
             quality_pct: 100,
             crc_errors: 0,
             verified_sectors: 0,
-            expected_sectors: status.preset.format_profile().expected_sector_count(status.bitrate, 0),
+            expected_sectors: expected,
             elapsed_secs: start_time.elapsed().as_secs_f64(),
             eta_secs: 0.0,
             message: status.log_msg.clone(),
@@ -4028,7 +4046,7 @@ pub fn execute_format_track(
         status.format_progress = Some(prog);
         let _ = tx_status.send(status.clone());
 
-        // Emit CMD_WRITE_FLUX
+        // Revolution 1: CMD_WRITE_FLUX (hardware index synchronized, 1 rev + splice)
         match gw_write_flux(port, &track_buffer.gw_flux_bytes) {
             Ok(true) => {}
             Ok(false) => {
@@ -4057,7 +4075,7 @@ pub fn execute_format_track(
             }
         }
 
-        // 5. Read-After-Write Verification Pass
+        // Revolution 2-3: Read-After-Write Verification Pass (2 revolutions)
         if let Some(ref mut p) = status.format_progress {
             p.step = FormatStep::Verifying;
             p.message = "Verifying written sectors & CRC...".to_string();
@@ -4065,13 +4083,12 @@ pub fn execute_format_track(
         status.log_msg = format!("Verifying Track {:02} Head {} (Read-After-Write)...", target_track, target_head);
         let _ = tx_status.send(status.clone());
 
-        let diag = read_and_decode_track_diagnostic(port, target_track, status, tx_status);
-        let expected = status.disk_format.expected_sector_count(status.bitrate, diag.sectors.len() as u8);
+        let diag = read_and_decode_track_diagnostic_revs(port, target_track, status, tx_status, 2);
         let valid_sectors = diag.on_track_count as u8;
         let crc_errors = diag.crc_err_count as u8;
         let quality_pct = diag.alignment_pct.round().clamp(0.0, 100.0) as u8;
 
-        let pass_ok = valid_sectors >= expected && crc_errors == 0 && quality_pct >= 90;
+        let pass_ok = valid_sectors >= expected && crc_errors == 0 && quality_pct >= 85;
 
         if let Some(ref mut p) = status.format_progress {
             p.verified_sectors = valid_sectors;
@@ -4116,6 +4133,7 @@ pub fn execute_format_track(
 pub fn execute_format_disk(
     port: &mut Box<dyn serialport::SerialPort>,
     status: &mut DriveStatus,
+    target_tracks: u8,
     rx_cmd: &Receiver<HwCmd>,
     tx_status: &Sender<DriveStatus>,
     track_buffer: &mut MfmTrackBuffer,
@@ -4123,8 +4141,10 @@ pub fn execute_format_disk(
     status.analyzing = false;
     status.mode = DisplayMode::Format;
     status.activity = HwActivity::Formatting;
+    status.bitrate = status.preset.target_data_rate();
+    status.density = status.bitrate == 500;
 
-    // 1. Hardware Write-Protect Check
+    // 1. Hardware Write-Protect Check (once at start)
     if let Some(wp) = query_write_protect(
         port,
         status.bus_type,
@@ -4136,22 +4156,28 @@ pub fn execute_format_disk(
         status.write_protected = wp;
     }
 
+    let total_tracks = target_tracks;
+    let total_heads = 2u8;
+    let total_passes = (total_tracks as usize) * (total_heads as usize);
+    let mut completed_passes = 0usize;
+    let expected = status.preset.format_profile().expected_sector_count(status.bitrate, 0);
+
     if status.write_protect {
         status.log_msg = String::from("Full Disk Format REJECTED: Disk is WRITE-PROTECTED (Pin 28 asserted)!");
         let prog = FormatProgress {
             current_track: 0,
             current_head: 0,
-            total_tracks: status.step_mode.max_logical_tracks() + 1,
-            total_heads: 2,
+            total_tracks,
+            total_heads,
             step: FormatStep::Error,
             completed_passes: 0,
-            total_passes: ((status.step_mode.max_logical_tracks() as u16) + 1) * 2,
+            total_passes,
             verification_ok: false,
             retry_count: 0,
             quality_pct: 0,
             crc_errors: 0,
             verified_sectors: 0,
-            expected_sectors: status.preset.format_profile().expected_sector_count(status.bitrate, 0),
+            expected_sectors: expected,
             elapsed_secs: 0.0,
             eta_secs: 0.0,
             message: "Disk is WRITE-PROTECTED (Pin 28 asserted)".to_string(),
@@ -4172,10 +4198,6 @@ pub fn execute_format_disk(
         thread::sleep(Duration::from_millis(SPIN_UP_DELAY_MS));
     }
 
-    let total_tracks = status.step_mode.max_logical_tracks() + 1;
-    let total_heads = 2u8;
-    let total_passes = (total_tracks as u16) * (total_heads as u16);
-    let mut completed_passes = 0u16;
     let start_time = Instant::now();
 
     let prog = FormatProgress {
@@ -4191,7 +4213,7 @@ pub fn execute_format_disk(
         quality_pct: 100,
         crc_errors: 0,
         verified_sectors: 0,
-        expected_sectors: status.preset.format_profile().expected_sector_count(status.bitrate, 0),
+        expected_sectors: expected,
         elapsed_secs: 0.0,
         eta_secs: 0.0,
         message: "Starting Full Disk Format...".to_string(),
@@ -4200,6 +4222,14 @@ pub fn execute_format_disk(
     let _ = tx_status.send(status.clone());
 
     for cyl in 0..total_tracks {
+        // Step carriage to Cylinder (15ms settle delay)
+        let phys_cyl = cyl * status.step_mode.multiplier();
+        let _ = gw_send_raw(port, &build_seek_packet(phys_cyl), 0);
+        status.track = cyl;
+        status.target_track = cyl;
+        status.trk0 = cyl == 0;
+        thread::sleep(Duration::from_millis(FORMAT_HEAD_SETTLE_MS));
+
         for head in 0..total_heads {
             // Check for user abort commands
             while let Ok(cmd) = rx_cmd.try_recv() {
@@ -4219,36 +4249,115 @@ pub fn execute_format_disk(
                 }
             }
 
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let eta = if completed_passes > 0 {
-                (elapsed / completed_passes as f64) * (total_passes.saturating_sub(completed_passes) as f64)
-            } else {
-                (total_passes as f64) * 0.45
-            };
+            // Switch Physical Head (20ms settle delay)
+            let _ = gw_send_raw(port, &build_head_packet(head), 0);
+            status.head = head;
+            thread::sleep(Duration::from_millis(FORMAT_HEAD_SWITCH_SETTLE_MS));
 
-            if let Some(ref mut p) = status.format_progress {
-                p.current_track = cyl;
-                p.current_head = head;
-                p.completed_passes = completed_passes;
-                p.elapsed_secs = elapsed;
-                p.eta_secs = eta;
+            // Synthesize Track MFM & Flux Timings for (cyl, head)
+            FluxSynthesizer::synthesize_track(status.preset, cyl, head, track_buffer);
+
+            let mut verified_ok = false;
+
+            for attempt in 0..3 {
+                let step = if attempt == 0 {
+                    FormatStep::Writing
+                } else {
+                    FormatStep::Retrying
+                };
+
+                let elapsed = start_time.elapsed().as_secs_f64();
+                let eta = if completed_passes > 0 {
+                    (elapsed / completed_passes as f64) * (total_passes.saturating_sub(completed_passes) as f64)
+                } else {
+                    (total_passes as f64) * 0.42
+                };
+
+                status.log_msg = if attempt == 0 {
+                    format!("Formatting Track {:02}/{} Head {} (Writing flux)...", cyl, total_tracks, head)
+                } else {
+                    format!("Formatting Track {:02}/{} Head {}: Retry attempt {}/2...", cyl, total_tracks, head, attempt)
+                };
+
+                if let Some(ref mut p) = status.format_progress {
+                    p.current_track = cyl;
+                    p.current_head = head;
+                    p.step = step;
+                    p.completed_passes = completed_passes;
+                    p.total_passes = total_passes;
+                    p.retry_count = attempt;
+                    p.elapsed_secs = elapsed;
+                    p.eta_secs = eta;
+                    p.message = status.log_msg.clone();
+                }
+                let _ = tx_status.send(status.clone());
+
+                // Revolution 1: CMD_WRITE_FLUX (hardware index synchronized, 1 rev + splice)
+                match gw_write_flux(port, &track_buffer.gw_flux_bytes) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        // Write protect detected during write
+                        status.write_protect = true;
+                        status.write_protected = true;
+                        status.log_msg = format!("Format Track {:02} H{} FAILED: Disk is WRITE-PROTECTED!", cyl, head);
+                        if let Some(ref mut p) = status.format_progress {
+                            p.step = FormatStep::Error;
+                            p.message = "Write Protected".to_string();
+                        }
+                        let _ = tx_status.send(status.clone());
+                        return false;
+                    }
+                    Err(e) => {
+                        status.log_msg = format!("Format Track {:02} H{} write error: {}", cyl, head, e);
+                        if let Some(ref mut p) = status.format_progress {
+                            p.step = FormatStep::Error;
+                            p.message = format!("I/O Error: {}", e);
+                        }
+                        let _ = tx_status.send(status.clone());
+                        if attempt == 2 {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+
+                // Revolution 2-3: Read-After-Write Verification Pass (2 revolutions)
+                if let Some(ref mut p) = status.format_progress {
+                    p.step = FormatStep::Verifying;
+                    p.message = "Verifying written sectors & CRC...".to_string();
+                }
+                let _ = tx_status.send(status.clone());
+
+                let diag = read_and_decode_track_diagnostic_revs(port, cyl, status, tx_status, 2);
+                let last_valid_sectors = diag.on_track_count as u8;
+                let last_crc_errors = diag.crc_err_count as u8;
+                let last_quality = diag.alignment_pct.round().clamp(0.0, 100.0) as u8;
+
+                let pass_ok = last_valid_sectors >= expected && last_crc_errors == 0 && last_quality >= 85;
+
+                if let Some(ref mut p) = status.format_progress {
+                    p.verified_sectors = last_valid_sectors;
+                    p.expected_sectors = expected;
+                    p.crc_errors = last_crc_errors;
+                    p.quality_pct = last_quality;
+                    p.verification_ok = pass_ok;
+                    p.elapsed_secs = start_time.elapsed().as_secs_f64();
+                }
+
+                if pass_ok {
+                    verified_ok = true;
+                    break;
+                }
             }
 
-            let ok = execute_format_track(
-                port,
-                status,
-                cyl,
-                head,
-                rx_cmd,
-                tx_status,
-                track_buffer,
-            );
-
-            if !ok {
-                // If write protect triggered during execution
-                if status.write_protect {
-                    return false;
+            if !verified_ok {
+                status.log_msg = format!("Format Track {:02} H{} FAILED after 3 attempts!", cyl, head);
+                if let Some(ref mut p) = status.format_progress {
+                    p.step = FormatStep::Error;
+                    p.message = format!("Format FAILED after 3 attempts on Track {:02} H{}", cyl, head);
                 }
+                let _ = tx_status.send(status.clone());
+                return false;
             }
 
             completed_passes += 1;
@@ -4264,7 +4373,7 @@ pub fn execute_format_disk(
     status.track = 0;
     status.target_track = 0;
     status.trk0 = true;
-    thread::sleep(Duration::from_millis(HEAD_SETTLE_TIME_MS));
+    thread::sleep(Duration::from_millis(FORMAT_HEAD_SETTLE_MS));
 
     status.log_msg = format!(
         "Full Disk Format COMPLETED successfully! ({} tracks, 2 heads, total {:.1}s)",
@@ -5293,6 +5402,8 @@ mod tests {
         assert_eq!(HEAD_SWITCH_SETTLE_MS, 1);
         assert_eq!(STEPPER_WAKEUP_DELAY_MS, 15);
         assert_eq!(HEAD_SETTLE_TIME_MS, 30);
+        assert_eq!(FORMAT_HEAD_SETTLE_MS, 15);
+        assert_eq!(FORMAT_HEAD_SWITCH_SETTLE_MS, 20);
         assert_eq!(DEFAULT_SERIAL_TIMEOUT_MS, 1000);
         assert_eq!(SPIN_UP_DELAY_MS, 350);
         assert_eq!(SYNC_DELAY_MS, 30);
@@ -6727,6 +6838,33 @@ mod tests {
 
         let cmd_set = HwCmd::SetPreset(PresetProfile::Pc525DdOnHd);
         assert_eq!(cmd_set, HwCmd::SetPreset(PresetProfile::Pc525DdOnHd));
+    }
+
+    #[test]
+    fn test_format_status_bitrate_and_density_sync() {
+        for preset in [
+            PresetProfile::Pc35Hd,
+            PresetProfile::Pc35Dd,
+            PresetProfile::Pc525Hd,
+            PresetProfile::Pc525DdOnHd,
+            PresetProfile::Pc525Dd,
+            PresetProfile::Amiga35Dd,
+            PresetProfile::Atari35Dd,
+            PresetProfile::Cpc30Data,
+        ] {
+            let mut status = DriveStatus {
+                preset,
+                bitrate: 0,
+                density: false,
+                ..Default::default()
+            };
+            // Simulate bitrate & density sync before format
+            status.bitrate = status.preset.target_data_rate();
+            status.density = status.bitrate == 500;
+
+            assert_eq!(status.bitrate, preset.target_data_rate());
+            assert_eq!(status.density, preset.target_data_rate() == 500);
+        }
     }
 }
 

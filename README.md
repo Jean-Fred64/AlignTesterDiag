@@ -103,7 +103,7 @@ cargo run --release -- --shugart --drive 0
 | <kbd>?</kbd> / <kbd>F1</kbd> | **Help Modal** | Open interactive help modal overlay |
 | <kbd>A</kbd> | **Analyze** | Start continuous real-time track alignment analysis |
 | <kbd>D</kbd> | **Read Data** | Read and test sector CRC integrity across the cylinder |
-| <kbd>F</kbd> | **Format** | Low-Level Track & Full Disk Format with Index Sync and Read-After-Write Verification (`[T]` Track, `[D]` Disk, `[Esc]` Cancel) |
+| <kbd>F</kbd> | **Format** | Low-Level Track & Full Disk Format with dynamic track count override (`+`/`-` or Arrows), Index Sync and 1-rev Read-After-Write Verification (`[T]` Track, `[D]` Disk, `[Esc]` Cancel) |
 | <kbd>L</kbd> | **Live RPM** | Live RPM tachometer & jitter stability test |
 | <kbd>P</kbd> | **Preset (Hardware & Format)** | Cycle unified hardware & format presets (`Pc35Hd` ➔ `Pc35Dd` ➔ `Pc525Hd` ➔ `Pc525DdOnHd` ➔ `Pc525Dd` ➔ `Amiga35Dd` ➔ `Atari35Dd` ➔ `Cpc30Data`), atomically configuring bus, stepping rate, DPLL clock & nominal bitrate |
 | <kbd>S</kbd> | **Toggle Step Rate** | Toggle Single (1:1) / Double (2:1) step mode (48/96 TPI, for reading 40-track media on 80-track drives) |
