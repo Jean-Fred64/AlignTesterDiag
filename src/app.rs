@@ -1,31 +1,6 @@
 use crate::hw::{BusType, DiskFormat, DisplayMode, DriveStatus, HwActivity, PresetProfile, StepMode, TrackRange};
 
-/// Three-state head selection mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum HeadSelection {
-    #[default]
-    Head0,
-    Head1,
-    Both,
-}
-
-impl HeadSelection {
-    pub fn toggle_next(&self) -> Self {
-        match self {
-            HeadSelection::Head0 => HeadSelection::Head1,
-            HeadSelection::Head1 => HeadSelection::Both,
-            HeadSelection::Both => HeadSelection::Head0,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            HeadSelection::Head0 => "0",
-            HeadSelection::Head1 => "1",
-            HeadSelection::Both => "BOTH (0+1)",
-        }
-    }
-}
+pub use crate::hw::HeadSelection;
 
 /// Active field in custom track range editor
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -45,45 +20,45 @@ pub enum RangeModalKind {
 /// Explicit user confirmation state before running destructive format/erase operations
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingConfirmation {
-    FormatTrack { track: u8, head: u8, verify: bool },
-    FormatDisk { range: TrackRange, verify: bool },
-    FormatRange { range: TrackRange, verify: bool },
-    EraseTrack { track: u8, head: u8 },
-    EraseDisk { range: TrackRange },
-    EraseRange { range: TrackRange },
+    FormatTrack { track: u8, head_sel: HeadSelection, verify: bool },
+    FormatDisk { range: TrackRange, head_sel: HeadSelection, verify: bool },
+    FormatRange { range: TrackRange, head_sel: HeadSelection, verify: bool },
+    EraseTrack { track: u8, head_sel: HeadSelection },
+    EraseDisk { range: TrackRange, head_sel: HeadSelection },
+    EraseRange { range: TrackRange, head_sel: HeadSelection },
 }
 
 impl PendingConfirmation {
     pub fn prompt_string(&self) -> String {
         match self {
-            PendingConfirmation::FormatTrack { track, head, .. } => {
-                format!("Confirm Format Track {:02} (Head {})? [y/N]", track, head)
+            PendingConfirmation::FormatTrack { track, head_sel, .. } => {
+                format!("Confirm Format Track {:02} ({})? [y/N]", track, head_sel.conf_label())
             }
-            PendingConfirmation::FormatDisk { range, .. } => {
+            PendingConfirmation::FormatDisk { range, head_sel, .. } => {
                 format!(
-                    "Confirm FULL DISK Format (00..{:02}, Dual-Head)? [y/N]",
-                    range.end
+                    "Confirm FULL DISK Format (00..{:02}, {})? [y/N]",
+                    range.end, head_sel.conf_label()
                 )
             }
-            PendingConfirmation::FormatRange { range, .. } => {
+            PendingConfirmation::FormatRange { range, head_sel, .. } => {
                 format!(
-                    "Confirm Format Range {:02}..{:02} (Dual-Head)? [y/N]",
-                    range.start, range.end
+                    "Confirm Format Range {:02}..{:02} ({})? [y/N]",
+                    range.start, range.end, head_sel.conf_label()
                 )
             }
-            PendingConfirmation::EraseTrack { track, head } => {
-                format!("Confirm Erase Track {:02} (Head {})? [y/N]", track, head)
+            PendingConfirmation::EraseTrack { track, head_sel } => {
+                format!("Confirm Erase Track {:02} ({})? [y/N]", track, head_sel.conf_label())
             }
-            PendingConfirmation::EraseDisk { range } => {
+            PendingConfirmation::EraseDisk { range, head_sel } => {
                 format!(
-                    "Confirm FULL DISK Erase (00..{:02}, Dual-Head)? [y/N]",
-                    range.end
+                    "Confirm FULL DISK Erase (00..{:02}, {})? [y/N]",
+                    range.end, head_sel.conf_label()
                 )
             }
-            PendingConfirmation::EraseRange { range } => {
+            PendingConfirmation::EraseRange { range, head_sel } => {
                 format!(
-                    "Confirm Erase Range {:02}..{:02} (Dual-Head)? [y/N]",
-                    range.start, range.end
+                    "Confirm Erase Range {:02}..{:02} ({})? [y/N]",
+                    range.start, range.end, head_sel.conf_label()
                 )
             }
         }
@@ -223,12 +198,12 @@ pub enum Action {
     OpenFormatModal,
     CloseFormatModal,
     ToggleFormatVerify,
-    FormatTrack { track: u8, head: u8, verify: bool },
-    FormatDisk { range: TrackRange, verify: bool },
+    FormatTrack { track: u8, head_sel: HeadSelection, verify: bool },
+    FormatDisk { range: TrackRange, head_sel: HeadSelection, verify: bool },
     OpenEraseModal,
     CloseEraseModal,
-    EraseTrack { track: u8, head: u8 },
-    EraseDisk { range: TrackRange },
+    EraseTrack { track: u8, head_sel: HeadSelection },
+    EraseDisk { range: TrackRange, head_sel: HeadSelection },
 }
 
 /// Application state wrapper
@@ -1631,13 +1606,13 @@ mod tests {
         }
         assert_eq!(app.erase_target_tracks, 42);
 
-        app.handle_action(Action::EraseTrack { track: 10, head: 0 });
+        app.handle_action(Action::EraseTrack { track: 10, head_sel: HeadSelection::Head0 });
         assert!(!app.show_erase_modal);
         assert!(app.status.motor_on);
         assert_eq!(app.status.mode, DisplayMode::Erase);
         assert_eq!(app.status.activity, HwActivity::Erasing);
 
-        app.handle_action(Action::EraseDisk { range: TrackRange::new(0, 39) });
+        app.handle_action(Action::EraseDisk { range: TrackRange::new(0, 39), head_sel: HeadSelection::Both });
         assert!(!app.show_erase_modal);
         assert_eq!(app.status.mode, DisplayMode::Erase);
         assert_eq!(app.status.activity, HwActivity::Erasing);

@@ -164,6 +164,67 @@ impl StepMode {
     }
 }
 
+/// Floppy head selection mode for analysis, formatting and erasing
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HeadSelection {
+    #[default]
+    Head0,
+    Head1,
+    Both,
+}
+
+impl HeadSelection {
+    /// Returns slice of physical head indices for this selection mode
+    pub fn heads(&self) -> &'static [u8] {
+        match self {
+            HeadSelection::Head0 => &[0],
+            HeadSelection::Head1 => &[1],
+            HeadSelection::Both => &[0, 1],
+        }
+    }
+
+    /// Human-readable label for head selection
+    pub fn label(&self) -> &'static str {
+        match self {
+            HeadSelection::Head0 => "Head 0",
+            HeadSelection::Head1 => "Head 1",
+            HeadSelection::Both => "Both",
+        }
+    }
+
+    /// Formatted label for confirmation prompts and option lines
+    pub fn conf_label(&self) -> &'static str {
+        match self {
+            HeadSelection::Head0 => "Head 0 only",
+            HeadSelection::Head1 => "Head 1 only",
+            HeadSelection::Both => "Dual-Head",
+        }
+    }
+
+    /// Cycles to next selection: Both -> Head 0 -> Head 1 -> Both
+    pub fn toggle_next(&self) -> Self {
+        match self {
+            HeadSelection::Head0 => HeadSelection::Head1,
+            HeadSelection::Head1 => HeadSelection::Both,
+            HeadSelection::Both => HeadSelection::Head0,
+        }
+    }
+
+    /// Alias for toggle_next
+    pub fn cycle_next(&self) -> Self {
+        self.toggle_next()
+    }
+
+    /// Short string representation
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HeadSelection::Head0 => "0",
+            HeadSelection::Head1 => "1",
+            HeadSelection::Both => "BOTH (0+1)",
+        }
+    }
+}
+
 /// Multi-format retro disk profile
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum DiskFormat {
@@ -888,5 +949,45 @@ mod tests {
         assert_eq!(prog.completed_passes, 0);
         assert_eq!(prog.total_passes, 160);
         assert_eq!(prog.step, FormatStep::Idle);
+    }
+
+    #[test]
+    fn test_head_selection_methods_and_cycling() {
+        let h0 = HeadSelection::Head0;
+        let h1 = HeadSelection::Head1;
+        let both = HeadSelection::Both;
+
+        // Default
+        assert_eq!(HeadSelection::default(), HeadSelection::Head0);
+
+        // Heads slice
+        assert_eq!(h0.heads(), &[0]);
+        assert_eq!(h1.heads(), &[1]);
+        assert_eq!(both.heads(), &[0, 1]);
+
+        // Labels
+        assert_eq!(h0.label(), "Head 0");
+        assert_eq!(h1.label(), "Head 1");
+        assert_eq!(both.label(), "Both");
+
+        // Confirmation labels
+        assert_eq!(h0.conf_label(), "Head 0 only");
+        assert_eq!(h1.conf_label(), "Head 1 only");
+        assert_eq!(both.conf_label(), "Dual-Head");
+
+        // as_str
+        assert_eq!(h0.as_str(), "0");
+        assert_eq!(h1.as_str(), "1");
+        assert_eq!(both.as_str(), "BOTH (0+1)");
+
+        // Cycling: Both -> Head 0 -> Head 1 -> Both
+        assert_eq!(both.toggle_next(), HeadSelection::Head0);
+        assert_eq!(h0.toggle_next(), HeadSelection::Head1);
+        assert_eq!(h1.toggle_next(), HeadSelection::Both);
+
+        // cycle_next alias
+        assert_eq!(both.cycle_next(), HeadSelection::Head0);
+        assert_eq!(h0.cycle_next(), HeadSelection::Head1);
+        assert_eq!(h1.cycle_next(), HeadSelection::Both);
     }
 }

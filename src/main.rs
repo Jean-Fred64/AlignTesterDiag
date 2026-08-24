@@ -32,7 +32,7 @@ pub use app::*;
 pub use audio::*;
 pub use hw::{
     get_status_expected_sector_ids, hw_thread, BusType, DiskFormat, DisplayMode, DriveStatus,
-    FormatProgress, FormatStep, HwActivity, HwCmd, PresetProfile, StepMode, TrackRange,
+    FormatProgress, FormatStep, HeadSelection, HwActivity, HwCmd, PresetProfile, StepMode, TrackRange,
 };
 pub use ui::*;
 
@@ -946,7 +946,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     f,
                     f.size(),
                     app.status.track,
-                    app.status.head,
+                    app.head_selection,
                     max_trk,
                     app.preset.label(),
                     app.preset.target_rpm(),
@@ -966,7 +966,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     f,
                     f.size(),
                     app.status.track,
-                    app.status.head,
+                    app.head_selection,
                     app.preset.label(),
                     app.preset.target_rpm(),
                     app.status.bitrate,
@@ -1047,12 +1047,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     Ok((range, kind)) => match kind {
                                         RangeModalKind::Format => {
                                             let verify = app.format_verify;
+                                            let head_sel = app.head_selection;
                                             app.show_format_modal = true;
-                                            app.pending_confirmation = Some(PendingConfirmation::FormatRange { range, verify });
+                                            app.pending_confirmation = Some(PendingConfirmation::FormatRange { range, head_sel, verify });
                                         }
                                         RangeModalKind::Erase => {
+                                            let head_sel = app.head_selection;
                                             app.show_erase_modal = true;
-                                            app.pending_confirmation = Some(PendingConfirmation::EraseRange { range });
+                                            app.pending_confirmation = Some(PendingConfirmation::EraseRange { range, head_sel });
                                         }
                                     },
                                     Err(err) => {
@@ -1075,14 +1077,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     app.show_format_modal = false;
                                     app.pending_confirmation = None;
                                     match confirm {
-                                        PendingConfirmation::FormatTrack { track, head, verify } => {
-                                            app.handle_action(Action::FormatTrack { track, head, verify });
-                                            let _ = tx_cmd.send(HwCmd::FormatTrack { track, head, verify });
+                                        PendingConfirmation::FormatTrack { track, head_sel, verify } => {
+                                            app.handle_action(Action::FormatTrack { track, head_sel, verify });
+                                            let _ = tx_cmd.send(HwCmd::FormatTrack { track, head_sel, verify });
                                         }
-                                        PendingConfirmation::FormatDisk { range, verify }
-                                        | PendingConfirmation::FormatRange { range, verify } => {
-                                            app.handle_action(Action::FormatDisk { range, verify });
-                                            let _ = tx_cmd.send(HwCmd::FormatDisk { range, verify });
+                                        PendingConfirmation::FormatDisk { range, head_sel, verify }
+                                        | PendingConfirmation::FormatRange { range, head_sel, verify } => {
+                                            app.handle_action(Action::FormatDisk { range, head_sel, verify });
+                                            let _ = tx_cmd.send(HwCmd::FormatDisk { range, head_sel, verify });
                                         }
                                         _ => {}
                                     }
@@ -1121,7 +1123,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                             KeyCode::Char('h') | KeyCode::Char('H') => {
                                 app.toggle_head();
-                                let _ = tx_cmd.send(HwCmd::ToggleHead);
+                                let _ = tx_cmd.send(HwCmd::SetHeadSelection(app.head_selection));
                             }
                             KeyCode::Char('v') | KeyCode::Char('V') => {
                                 app.toggle_format_verify();
@@ -1132,17 +1134,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                             KeyCode::Char('t') | KeyCode::Char('T') => {
                                 let track = app.status.track;
-                                let head = app.status.head;
+                                let head_sel = app.head_selection;
                                 let verify = app.format_verify;
-                                app.pending_confirmation = Some(PendingConfirmation::FormatTrack { track, head, verify });
+                                app.pending_confirmation = Some(PendingConfirmation::FormatTrack { track, head_sel, verify });
                             }
                             KeyCode::Char('r') | KeyCode::Char('R') => {
                                 app.open_range_modal(RangeModalKind::Format);
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
                                 let range = TrackRange::full_disk(app.format_target_tracks);
+                                let head_sel = app.head_selection;
                                 let verify = app.format_verify;
-                                app.pending_confirmation = Some(PendingConfirmation::FormatDisk { range, verify });
+                                app.pending_confirmation = Some(PendingConfirmation::FormatDisk { range, head_sel, verify });
                             }
                             KeyCode::Esc
                             | KeyCode::Char('q')
@@ -1164,14 +1167,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     app.show_erase_modal = false;
                                     app.pending_confirmation = None;
                                     match confirm {
-                                        PendingConfirmation::EraseTrack { track, head } => {
-                                            app.handle_action(Action::EraseTrack { track, head });
-                                            let _ = tx_cmd.send(HwCmd::EraseTrack { track, head });
+                                        PendingConfirmation::EraseTrack { track, head_sel } => {
+                                            app.handle_action(Action::EraseTrack { track, head_sel });
+                                            let _ = tx_cmd.send(HwCmd::EraseTrack { track, head_sel });
                                         }
-                                        PendingConfirmation::EraseDisk { range }
-                                        | PendingConfirmation::EraseRange { range } => {
-                                            app.handle_action(Action::EraseDisk { range });
-                                            let _ = tx_cmd.send(HwCmd::EraseDisk { range });
+                                        PendingConfirmation::EraseDisk { range, head_sel }
+                                        | PendingConfirmation::EraseRange { range, head_sel } => {
+                                            app.handle_action(Action::EraseDisk { range, head_sel });
+                                            let _ = tx_cmd.send(HwCmd::EraseDisk { range, head_sel });
                                         }
                                         _ => {}
                                     }
@@ -1210,7 +1213,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                             KeyCode::Char('h') | KeyCode::Char('H') => {
                                 app.toggle_head();
-                                let _ = tx_cmd.send(HwCmd::ToggleHead);
+                                let _ = tx_cmd.send(HwCmd::SetHeadSelection(app.head_selection));
                             }
                             KeyCode::Char('p') | KeyCode::Char('P') => {
                                 app.handle_action(Action::CyclePreset);
@@ -1218,15 +1221,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                             KeyCode::Char('t') | KeyCode::Char('T') => {
                                 let track = app.status.track;
-                                let head = app.status.head;
-                                app.pending_confirmation = Some(PendingConfirmation::EraseTrack { track, head });
+                                let head_sel = app.head_selection;
+                                app.pending_confirmation = Some(PendingConfirmation::EraseTrack { track, head_sel });
                             }
                             KeyCode::Char('r') | KeyCode::Char('R') => {
                                 app.open_range_modal(RangeModalKind::Erase);
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
                                 let range = TrackRange::full_disk(app.erase_target_tracks);
-                                app.pending_confirmation = Some(PendingConfirmation::EraseDisk { range });
+                                let head_sel = app.head_selection;
+                                app.pending_confirmation = Some(PendingConfirmation::EraseDisk { range, head_sel });
                             }
                             KeyCode::Esc
                             | KeyCode::Char('q')
@@ -2660,7 +2664,7 @@ mod tests {
     fn test_format_modal_lines_and_typography() {
         let lines = build_format_modal_lines(
             40,
-            0,
+            HeadSelection::Head0,
             79,
             "3.5\" HD (1.44M)",
             300.0,
@@ -2682,13 +2686,13 @@ mod tests {
         // Must contain key English instructions
         assert!(full_text.contains("LOW-LEVEL MFM FORMATTING"));
         assert!(full_text.contains("Preset: [3.5\" HD (1.44M) (RPM Cible: 300 RPM | 500 kbps)]"));
-        assert!(full_text.contains("Track 40, Head 0"));
+        assert!(full_text.contains("Head : Head 0"));
         assert!(full_text.contains("Target Tracks : 80"));
         assert!(full_text.contains("Range: 00..79 | Standard: 80, Max: 84"));
         assert!(full_text.contains("Read-After-Write Verify : ON"));
         assert!(full_text.contains("Cycle Preset Profile"));
-        assert!(full_text.contains("Format Track Range     (Tracks 00..79, Dual-Head)"));
-        assert!(full_text.contains("Tracks 00..79, Dual-Head"));
+        assert!(full_text.contains("Format Track Range     (Tracks 00..79, Head 0 only)"));
+        assert!(full_text.contains("Tracks 00..79, Head 0 only"));
         assert!(full_text.contains("Cancel & Return"));
 
         // Check shortcut highlight formatting for [P], [T], [R], [D], [V]
@@ -2734,7 +2738,7 @@ mod tests {
     fn test_erase_modal_lines_and_typography() {
         let lines = build_erase_modal_lines(
             40,
-            0,
+            HeadSelection::Head0,
             "3.5\" HD (1.44M)",
             300.0,
             500,
@@ -2750,12 +2754,13 @@ mod tests {
             .collect();
 
         assert!(full_text.contains("Target Preset : [3.5\" HD (1.44M) (RPM Cible: 300 RPM | 500 kbps)]"));
+        assert!(full_text.contains("Head : Head 0"));
         assert!(full_text.contains("Target Tracks : 80"));
         assert!(full_text.contains("WARNING: This will permanently wipe all magnetic flux"));
         assert!(full_text.contains("Cycle Preset Profile"));
-        assert!(full_text.contains("Erase Current Track only"));
-        assert!(full_text.contains("Erase Track Range     (Tracks 00..79, Dual-Head)"));
-        assert!(full_text.contains("Erase Entire Disk"));
+        assert!(full_text.contains("Erase Current Track only  (Track 40, Head 0 only)"));
+        assert!(full_text.contains("Erase Track Range     (Tracks 00..79, Head 0 only)"));
+        assert!(full_text.contains("Erase Entire Disk         (Tracks 00..79, Head 0 only)"));
         assert!(full_text.contains("Cancel & Return"));
 
         let mut found_p = false;
@@ -2970,12 +2975,12 @@ mod tests {
         app.handle_action(Action::CloseFormatModal);
         assert!(!app.show_format_modal);
 
-        app.handle_action(Action::FormatTrack { track: 10, head: 0, verify: true });
+        app.handle_action(Action::FormatTrack { track: 10, head_sel: HeadSelection::Head0, verify: true });
         assert_eq!(app.status.mode, DisplayMode::Format);
         assert_eq!(app.status.activity, HwActivity::Formatting);
         assert!(app.motor_on);
 
-        app.handle_action(Action::FormatDisk { range: TrackRange::new(0, 79), verify: false });
+        app.handle_action(Action::FormatDisk { range: TrackRange::new(0, 79), head_sel: HeadSelection::Both, verify: false });
         assert_eq!(app.status.mode, DisplayMode::Format);
         assert_eq!(app.status.activity, HwActivity::Formatting);
         assert!(app.motor_on);
@@ -3099,7 +3104,7 @@ mod tests {
         // 48 TPI modal line test
         let lines_48 = build_format_modal_lines(
             20,
-            0,
+            HeadSelection::Head0,
             39,
             "5.25\" DD (360K)",
             300.0,
@@ -3118,14 +3123,14 @@ mod tests {
             .collect();
         assert!(text_48.contains("Target Tracks : 40"));
         assert!(text_48.contains("Range: 00..39 | Standard: 40, Max: 42"));
-        assert!(text_48.contains("Tracks 00..39, Dual-Head"));
+        assert!(text_48.contains("Tracks 00..39, Head 0 only"));
         assert!(text_48.contains("Target Track  : Track 20"));
         assert!(text_48.contains("Head : Head 0"));
 
         // Overtracked 48 TPI (42 tracks)
         let lines_48_over = build_format_modal_lines(
             20,
-            1,
+            HeadSelection::Head1,
             41,
             "5.25\" DD (360K)",
             300.0,
@@ -3144,14 +3149,14 @@ mod tests {
             .collect();
         assert!(text_48_over.contains("Target Tracks : 42"));
         assert!(text_48_over.contains("Range: 00..41 | Standard: 40, Max: 42"));
-        assert!(text_48_over.contains("Tracks 00..41, Dual-Head"));
+        assert!(text_48_over.contains("Tracks 00..41, Head 1 only"));
         assert!(text_48_over.contains("Target Track  : Track 20"));
         assert!(text_48_over.contains("Head : Head 1"));
 
         // 80 TPI modal line test
         let lines_80 = build_format_modal_lines(
             0,
-            0,
+            HeadSelection::Both,
             79,
             "3.5\" HD (1.44M)",
             300.0,
@@ -3172,14 +3177,14 @@ mod tests {
         assert!(text_80.contains("Range: 00..79 | Standard: 80, Max: 84"));
         assert!(text_80.contains("Tracks 00..79, Dual-Head"));
         assert!(text_80.contains("Target Track  : Track 00"));
-        assert!(text_80.contains("Head : Head 0"));
+        assert!(text_80.contains("Head : Both"));
     }
 
     #[test]
     fn test_erase_modal_rendering_with_dynamic_tracks_and_head() {
         let lines = build_erase_modal_lines(
             35,
-            1,
+            HeadSelection::Head1,
             "3.5\" HD (1.44M)",
             300.0,
             500,
@@ -3195,9 +3200,9 @@ mod tests {
         assert!(text.contains("Target Track  : Track 35"));
         assert!(text.contains("Head : Head 1"));
         assert!(text.contains("Target Tracks : 80"));
-        assert!(text.contains("Erase Current Track only  (Track 35, Head 1)"));
-        assert!(text.contains("Erase Track Range     (Tracks 10..20, Dual-Head)"));
-        assert!(text.contains("Erase Entire Disk         (Tracks 00..79, Dual-Head)"));
+        assert!(text.contains("Erase Current Track only  (Track 35, Head 1 only)"));
+        assert!(text.contains("Erase Track Range     (Tracks 10..20, Head 1 only)"));
+        assert!(text.contains("Erase Entire Disk         (Tracks 00..79, Head 1 only)"));
     }
 
     #[test]
@@ -3314,29 +3319,32 @@ mod tests {
 
     #[test]
     fn test_pending_confirmation_prompts_and_rendering() {
-        // Test all 6 prompt string variations
-        let c_fmt_trk = PendingConfirmation::FormatTrack { track: 0, head: 0, verify: true };
-        assert_eq!(c_fmt_trk.prompt_string(), "Confirm Format Track 00 (Head 0)? [y/N]");
+        // Test prompt string variations with HeadSelection
+        let c_fmt_trk_h0 = PendingConfirmation::FormatTrack { track: 0, head_sel: HeadSelection::Head0, verify: true };
+        assert_eq!(c_fmt_trk_h0.prompt_string(), "Confirm Format Track 00 (Head 0 only)? [y/N]");
 
-        let c_fmt_disk = PendingConfirmation::FormatDisk { range: TrackRange::new(0, 79), verify: true };
+        let c_fmt_trk_both = PendingConfirmation::FormatTrack { track: 40, head_sel: HeadSelection::Both, verify: true };
+        assert_eq!(c_fmt_trk_both.prompt_string(), "Confirm Format Track 40 (Dual-Head)? [y/N]");
+
+        let c_fmt_disk = PendingConfirmation::FormatDisk { range: TrackRange::new(0, 79), head_sel: HeadSelection::Both, verify: true };
         assert_eq!(c_fmt_disk.prompt_string(), "Confirm FULL DISK Format (00..79, Dual-Head)? [y/N]");
 
-        let c_fmt_range = PendingConfirmation::FormatRange { range: TrackRange::new(10, 20), verify: false };
-        assert_eq!(c_fmt_range.prompt_string(), "Confirm Format Range 10..20 (Dual-Head)? [y/N]");
+        let c_fmt_range = PendingConfirmation::FormatRange { range: TrackRange::new(10, 20), head_sel: HeadSelection::Head1, verify: false };
+        assert_eq!(c_fmt_range.prompt_string(), "Confirm Format Range 10..20 (Head 1 only)? [y/N]");
 
-        let c_erase_trk = PendingConfirmation::EraseTrack { track: 40, head: 1 };
-        assert_eq!(c_erase_trk.prompt_string(), "Confirm Erase Track 40 (Head 1)? [y/N]");
+        let c_erase_trk = PendingConfirmation::EraseTrack { track: 40, head_sel: HeadSelection::Head1 };
+        assert_eq!(c_erase_trk.prompt_string(), "Confirm Erase Track 40 (Head 1 only)? [y/N]");
 
-        let c_erase_disk = PendingConfirmation::EraseDisk { range: TrackRange::new(0, 79) };
+        let c_erase_disk = PendingConfirmation::EraseDisk { range: TrackRange::new(0, 79), head_sel: HeadSelection::Both };
         assert_eq!(c_erase_disk.prompt_string(), "Confirm FULL DISK Erase (00..79, Dual-Head)? [y/N]");
 
-        let c_erase_range = PendingConfirmation::EraseRange { range: TrackRange::new(5, 15) };
-        assert_eq!(c_erase_range.prompt_string(), "Confirm Erase Range 05..15 (Dual-Head)? [y/N]");
+        let c_erase_range = PendingConfirmation::EraseRange { range: TrackRange::new(5, 15), head_sel: HeadSelection::Head0 };
+        assert_eq!(c_erase_range.prompt_string(), "Confirm Erase Range 05..15 (Head 0 only)? [y/N]");
 
         // Test Format modal with confirmation active
         let lines_fmt = build_format_modal_lines(
             0,
-            0,
+            HeadSelection::Head0,
             79,
             "3.5\" HD (1.44M)",
             300.0,
@@ -3347,19 +3355,19 @@ mod tests {
             false,
             true,
             TrackRange::new(0, 79),
-            Some(&c_fmt_trk),
+            Some(&c_fmt_trk_h0),
         );
         let text_fmt: String = lines_fmt
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(text_fmt.contains("Confirm Format Track 00 (Head 0)? [y/N]"));
+        assert!(text_fmt.contains("Confirm Format Track 00 (Head 0 only)? [y/N]"));
         assert!(text_fmt.contains("Press Y to confirm & execute, or N / Enter / Esc to cancel"));
 
         // Test Erase modal with confirmation active
         let lines_erase = build_erase_modal_lines(
             40,
-            1,
+            HeadSelection::Head1,
             "3.5\" HD (1.44M)",
             300.0,
             500,
@@ -3372,8 +3380,32 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(text_erase.contains("Confirm Erase Track 40 (Head 1)? [y/N]"));
+        assert!(text_erase.contains("Confirm Erase Track 40 (Head 1 only)? [y/N]"));
         assert!(text_erase.contains("Press Y to confirm & execute, or N / Enter / Esc to cancel"));
+
+        // Test modal options rendering with dynamic head selection labels
+        let lines_fmt_idle = build_format_modal_lines(
+            20,
+            HeadSelection::Both,
+            79,
+            "3.5\" HD (1.44M)",
+            300.0,
+            500,
+            "IBM PC",
+            0,
+            80,
+            false,
+            true,
+            TrackRange::new(10, 30),
+            None,
+        );
+        let text_fmt_idle: String = lines_fmt_idle
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text_fmt_idle.contains("rack only (Track 20, Dual-Head)"));
+        assert!(text_fmt_idle.contains("ange     (Tracks 10..30, Dual-Head)"));
+        assert!(text_fmt_idle.contains("isk     (Tracks 00..79, Dual-Head)"));
     }
 
     #[test]

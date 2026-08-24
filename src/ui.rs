@@ -1136,10 +1136,11 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
 
     f.render_widget(paragraph, modal_area);
 }
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_format_modal_lines(
     track: u8,
-    head: u8,
+    head_sel: HeadSelection,
     _max_track: u8,
     preset_label: &str,
     target_rpm: f64,
@@ -1191,7 +1192,7 @@ pub fn build_format_modal_lines(
             Span::styled("  |  [", gray),
             Span::styled("H", accent_bold),
             Span::styled("] Head : ", white),
-            Span::styled(format!("Head {}", head), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(head_sel.label(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
             Span::styled(format!("  (Bitrate: {} kbps)", bitrate), cyan),
         ]),
         Line::from(vec![
@@ -1253,21 +1254,21 @@ pub fn build_format_modal_lines(
             Span::styled("T", accent_bold),
             Span::styled("] Format Current ", white),
             Span::styled("T", accent_bold),
-            Span::styled(format!("rack only (Track {:02}, Head {})", track, head), white),
+            Span::styled(format!("rack only (Track {:02}, {})", track, head_sel.conf_label()), white),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  [", gray),
             Span::styled("R", accent_bold),
             Span::styled("] Format Track ", white),
             Span::styled("R", accent_bold),
-            Span::styled(format!("ange     (Tracks {:02}..{:02}, Dual-Head)", range.start, range.end), white),
+            Span::styled(format!("ange     (Tracks {:02}..{:02}, {})", range.start, range.end, head_sel.conf_label()), white),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  [", gray),
             Span::styled("D", accent_bold),
             Span::styled("] Format Entire ", white),
             Span::styled("D", accent_bold),
-            Span::styled(format!("isk     (Tracks 00..{:02}, Dual-Head)", last_track_idx), white),
+            Span::styled(format!("isk     (Tracks 00..{:02}, {})", last_track_idx, head_sel.conf_label()), white),
         ]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
@@ -1293,7 +1294,7 @@ pub fn render_format_modal(
     f: &mut Frame,
     area: Rect,
     track: u8,
-    head: u8,
+    head_sel: HeadSelection,
     max_track: u8,
     preset_label: &str,
     target_rpm: f64,
@@ -1323,7 +1324,7 @@ pub fn render_format_modal(
 
     let paragraph = Paragraph::new(build_format_modal_lines(
         track,
-        head,
+        head_sel,
         max_track,
         preset_label,
         target_rpm,
@@ -1346,7 +1347,7 @@ pub fn render_format_modal(
 #[allow(clippy::too_many_arguments)]
 pub fn build_erase_modal_lines(
     track: u8,
-    head: u8,
+    head_sel: HeadSelection,
     preset_label: &str,
     target_rpm: f64,
     bitrate: u16,
@@ -1381,7 +1382,7 @@ pub fn build_erase_modal_lines(
             Span::styled("  |  [", gray),
             Span::styled("H", accent_bold),
             Span::styled("] Head : ", white),
-            Span::styled(format!("Head {}", head), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(head_sel.label(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
             Span::styled("[", gray),
@@ -1425,21 +1426,21 @@ pub fn build_erase_modal_lines(
             Span::styled("T", accent_bold),
             Span::styled("] Erase Current ", white),
             Span::styled("T", accent_bold),
-            Span::styled(format!("rack only  (Track {:02}, Head {})", track, head), white),
+            Span::styled(format!("rack only  (Track {:02}, {})", track, head_sel.conf_label()), white),
         ]));
         lines.push(Line::from(vec![
             Span::styled("[", gray),
             Span::styled("R", accent_bold),
             Span::styled("] Erase Track ", white),
             Span::styled("R", accent_bold),
-            Span::styled(format!("ange     (Tracks {:02}..{:02}, Dual-Head)", range.start, range.end), white),
+            Span::styled(format!("ange     (Tracks {:02}..{:02}, {})", range.start, range.end, head_sel.conf_label()), white),
         ]));
         lines.push(Line::from(vec![
             Span::styled("[", gray),
             Span::styled("D", accent_bold),
             Span::styled("] Erase Entire ", white),
             Span::styled("D", accent_bold),
-            Span::styled(format!("isk         (Tracks 00..{:02}, Dual-Head)", last_track_idx), white),
+            Span::styled(format!("isk         (Tracks 00..{:02}, {})", last_track_idx, head_sel.conf_label()), white),
         ]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
@@ -1458,7 +1459,7 @@ pub fn render_erase_modal(
     f: &mut Frame,
     area: Rect,
     track: u8,
-    head: u8,
+    head_sel: HeadSelection,
     preset_label: &str,
     target_rpm: f64,
     bitrate: u16,
@@ -1484,7 +1485,7 @@ pub fn render_erase_modal(
 
     let paragraph = Paragraph::new(build_erase_modal_lines(
         track,
-        head,
+        head_sel,
         preset_label,
         target_rpm,
         bitrate,
