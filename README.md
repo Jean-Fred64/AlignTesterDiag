@@ -13,18 +13,24 @@
 
 ## 🌟 Key Highlights
 
-- ⚡ **100% Non-Blocking Architecture (~60 Hz TUI):** Strict decoupling between the interactive Ratatui/Crossterm rendering loop, the USB hardware acquisition worker thread, and a dedicated real-time audio thread via lock-free `crossbeam-channel` queues. 64 KB extended serial block buffers eliminate micro-blocking system calls and USB CDC latency.
+- ⚡ **100% Non-Blocking Architecture (~60 Hz TUI):** Strict decoupling between the interactive Ratatui/Crossterm rendering loop, the USB hardware acquisition worker thread, and a dedicated real-time audio thread via lock-free `crossbeam-channel` queues. 64 KB extended serial block buffers eliminate micro-blocking system calls and USB CDC latency. 171 automated unit tests with strict Clippy compliance (`cargo clippy -- -D warnings`).
 - 💾 **High-Precision Low-Level Format Engine & MFM Synthesizer (`CMD_WRITE_FLUX`):**
   - **Ultra-Fast Formatter Pipeline (~35s Fast / ~70s Full Verify):** Direct index-synchronized flux emission with optional 1-revolution instant DPLL read-after-write verification per track (toggled with <kbd>V</kbd> in format modal).
+  - **Custom Track Range (`TrackRange`) & Full Disk:** Flexible format targeting via Single Track (<kbd>T</kbd>), Custom Range (<kbd>R</kbd>), or Full Disk (<kbd>D</kbd>).
+  - **Integrated Modal Navigation:** Live track stepping (<kbd>+</kbd>/<kbd>-</kbd>, <kbd>[</kbd>/<kbd>]</kbd>, <kbd>←</kbd>/<kbd>→</kbd>, or Mouse Wheel `ScrollUp`/`ScrollDown`), head toggle (<kbd>H</kbd>), and total cylinder count adjustment (<kbd>PgUp</kbd>/<kbd>PgDn</kbd> or <kbd>↑</kbd>/<kbd>↓</kbd>).
+  - **Interactive Range Editor (`RangeEditModal`):** Dual-bound modal editor with exclusive <kbd>Tab</kbd> field switching (`Start` / `End`), numeric typing (<kbd>0</kbd>–<kbd>9</kbd>), incremental adjustment (<kbd>+</kbd>/<kbd>-</kbd>, <kbd>↑</kbd>/<kbd>↓</kbd>, Mouse Wheel), and strict validation (`start <= end < max_tracks`).
+  - **Explicit Confirmation Safety Lock (`[y/N]`):** All destructive operations require explicit user confirmation (<kbd>Y</kbd> to confirm, <kbd>N</kbd> / <kbd>Enter</kbd> / <kbd>Esc</kbd> to cancel, with `N` as default).
   - **72 MHz Pulse Timing:** Translates synthesized MFM bitstreams into cycle-accurate 72 MHz interval ticks ($2T, 3T, 4T$).
   - **Write Pre-Compensation:** Applies $\pm 125\text{ ns}$ ($\approx 9$ ticks @ 72 MHz) timing shifts on inner tracks ($> 40$) to counteract magnetic peak shift.
   - **Hardware Index Cueing:** Synchronizes flux emission to the physical index pulse (`cue_at_index = 1`) with controlled splice overlap.
   - **Read-After-Write Verification:** Automatically reads back each formatted track, verifies 100% expected sector presence, 0 CRC errors, and $Q \ge 85\%$ quality with up to 2 automatic retries.
-  - **Dynamic Track Override:** Interactive track adjustment (`+`/`-` or Arrows) supporting standard 40/80 tracks up to 42/84 tracks with physical cylinder tracking.
+  - **Dynamic Track Override:** Interactive track adjustment supporting standard 40/80 tracks up to 42/84 tracks with physical cylinder tracking.
   - **Write-Protect Guard:** Hardware Pin 28 (`WPROT`) validation before any carriage movement or flux emission.
 - 🧲 **Hardware Low-Level DC Erase Engine (`CMD_ERASE_FLUX`):**
   - **Continuous Magnetic Neutralization:** Asserts raw continuous write gate without flux transitions for $\ge 1.1$ revolutions after index pulse to permanently wipe and degauss magnetic tracks.
-  - **Interactive Erase Modal (<kbd>E</kbd>):** Single-track (<kbd>T</kbd>) or full-disk dual-head (<kbd>D</kbd>) DC erasure with interactive track count bounds (40/42 for 48 TPI, 80/84 for 96/135 TPI).
+  - **Interactive Erase Modal (<kbd>E</kbd>):** Single-track (<kbd>T</kbd>), custom track range (<kbd>R</kbd>), or full-disk dual-head (<kbd>D</kbd>) DC erasure with interactive track count bounds (40/42 for 48 TPI, 80/84 for 96/135 TPI).
+  - **Integrated Navigation & Range Editing:** Track adjustment (<kbd>+</kbd>/<kbd>-</kbd>, <kbd>[</kbd>/<kbd>]</kbd>, arrows, mouse wheel), head toggle (<kbd>H</kbd>), and custom range editor (<kbd>R</kbd>).
+  - **Explicit Confirmation Safety Lock (`[y/N]`):** Prompts for explicit confirmation before activating the erase gate (<kbd>Y</kbd> to proceed, <kbd>N</kbd> / <kbd>Enter</kbd> / <kbd>Esc</kbd> to cancel).
   - **Hardware Write-Protect Safety:** Proactively queries Pin 28 before seeking or activating write gate.
 - 🕹️ **Multi-System Retro Platform Support (IBM PC, Amiga, Atari ST, Amstrad CPC):**
   - **Amiga (Paula MFM):** Décodage bit-level *even/odd*, checksums 32-bit XOR, 11 secteurs/piste en DD (880 Ko) et 22 secteurs en HD (1.76 Mo).
@@ -104,13 +110,15 @@ cargo run --release -- --shugart --drive 0
 
 ## ⌨️ Interactive Keybindings Quick Reference
 
+### Main Screen Commands
+
 | Key | Action | Description |
 |:---:|:---|:---|
 | <kbd>?</kbd> / <kbd>F1</kbd> | **Help Modal** | Open interactive help modal overlay |
 | <kbd>A</kbd> | **Analyze** | Start continuous real-time track alignment analysis |
 | <kbd>D</kbd> | **Read Data** | Read and test sector CRC integrity across the cylinder |
-| <kbd>E</kbd> | **Erase** | Low-Level Hardware DC Erase Modal (`[T]` Track, `[D]` Disk, `+`/`-` Tracks, `[Esc]` Cancel) |
-| <kbd>F</kbd> | **Format** | Low-Level Track & Full Disk Format with dynamic track count override (`+`/`-`), Verify toggle (<kbd>V</kbd>), Index Sync (`[T]` Track, `[D]` Disk, `[Esc]` Cancel) |
+| <kbd>E</kbd> | **Erase Modal** | Open Low-Level Hardware DC Erase Modal (`[T]` Track, `[R]` Range, `[D]` Disk, `[Esc]` Cancel) |
+| <kbd>F</kbd> | **Format Modal** | Open Low-Level Track & Disk Formatter Modal (`[T]` Track, `[R]` Range, `[D]` Disk, `[V]` Verify, `[Esc]` Cancel) |
 | <kbd>L</kbd> | **Live RPM** | Live RPM tachometer & jitter stability test |
 | <kbd>P</kbd> | **Preset (Hardware & Format)** | Cycle unified hardware & format presets (`Pc35Hd` ➔ `Pc35Dd` ➔ `Pc525Hd` ➔ `Pc525DdOnHd` ➔ `Pc525Dd` ➔ `Amiga35Dd` ➔ `Atari35Dd` ➔ `Cpc30Data`), atomically configuring bus, stepping rate, DPLL clock & nominal bitrate |
 | <kbd>S</kbd> | **Toggle Step Rate** | Toggle Single (1:1) / Double (2:1) step mode (48/96 TPI, for reading 40-track media on 80-track drives) |
@@ -122,12 +130,34 @@ cargo run --release -- --shugart --drive 0
 | <kbd>V</kbd> | **Toggle Verbose** | Switch between Standard and Detailed Verbose Stream views |
 | <kbd>R</kbd> | **Recalibrate** | Recalibrate carriage to Track 0 and return to current track |
 | <kbd>Z</kbd> | **Zero Track** | Direct single seek step return to Track 0 |
-| <kbd>+</kbd> / <kbd>→</kbd> | **Step Forward (+1)** | Step carriage forward by +1 track (up to Track 83) |
-| <kbd>-</kbd> / <kbd>←</kbd> | **Step Backward (-1)** | Step carriage backward by -1 track (down to Track 0) |
-| <kbd>0</kbd>–<kbd>9</kbd> | **Direct Seek** | Direct seek jump to decade tracks (0, 10, 20 ... 80) |
-| <kbd>Esc</kbd> | **Stop** | Stop spindle motor, flush pending buffers, dismiss help |
+| <kbd>+</kbd> / <kbd>→</kbd> / <kbd>▲</kbd> / `ScrollUp` | **Step Forward (+1)** | Step carriage forward by +1 track (up to Track 83) |
+| <kbd>-</kbd> / <kbd>←</kbd> / <kbd>▼</kbd> / `ScrollDown` | **Step Backward (-1)** | Step carriage backward by -1 track (down to Track 0) |
+| <kbd>0</kbd>–<kbd>8</kbd> | **Direct Decade Seek** | Direct seek jump to decade tracks (0, 10, 20 ... 80) |
+| <kbd>9</kbd> | **Overtrack Seek** | Direct seek jump to physical limit (Track 83) |
+| <kbd>Esc</kbd> | **Stop / Cancel** | Stop spindle motor, flush pending buffers, dismiss active modal |
 | <kbd>Backspace</kbd> | **Panic Reset** | Emergency instant motor cut and hardware re-initialization |
 | <kbd>Q</kbd> / <kbd>X</kbd> / <kbd>Ctrl+C</kbd> | **Exit** | Clean shutdown (cuts spindle motor, disables LEDs, exits raw mode) |
+
+### Modal & Range Navigation Controls
+
+| Context | Controls | Function |
+|:---|:---|:---|
+| **Format / Erase Modals** | <kbd>T</kbd> | Execute operation on **Current Track** only (Head 0 or Head 1) |
+| | <kbd>R</kbd> | Open **Custom Track Range Editor** (`RangeEditModal`) |
+| | <kbd>D</kbd> | Execute operation on **Entire Disk** (Dual-Head, 00..max) |
+| | <kbd>H</kbd> | Switch physical target head (`Head 0` $\leftrightarrow$ `Head 1`) |
+| | <kbd>+</kbd> / <kbd>-</kbd>, <kbd>[</kbd> / <kbd>]</kbd>, <kbd>←</kbd> / <kbd>→</kbd>, `Scroll` | Step target cylinder for single-track operations |
+| | <kbd>PgUp</kbd> / <kbd>PgDn</kbd>, <kbd>↑</kbd> / <kbd>↓</kbd> | Adjust total disk tracks (40/42 for 48 TPI, 80/84 for 96/135 TPI) |
+| | <kbd>V</kbd> *(Format only)* | Toggle **Read-After-Write Verify** (`ON` ~70s / `OFF` ~35s) |
+| | <kbd>Esc</kbd> / <kbd>Q</kbd> / <kbd>X</kbd> | Close modal and cancel |
+| **Range Editor (`RangeEditModal`)** | <kbd>Tab</kbd> | Switch active input field (`Start Track` $\leftrightarrow$ `End Track`) |
+| | <kbd>0</kbd>–<kbd>9</kbd> | Type track number directly |
+| | <kbd>+</kbd> / <kbd>-</kbd>, <kbd>↑</kbd> / <kbd>↓</kbd>, <kbd>←</kbd> / <kbd>→</kbd>, `Scroll` | Increment / decrement active bound |
+| | <kbd>Backspace</kbd> | Clear / backspace active field digits |
+| | <kbd>Enter</kbd> | Validate track range and arm execution |
+| | <kbd>Esc</kbd> | Cancel range edit and return to parent modal |
+| **Confirmation Prompt (`[y/N]`)** | <kbd>Y</kbd> / <kbd>y</kbd> | **Confirm & Execute** destructive format/erase action |
+| | <kbd>N</kbd> / <kbd>n</kbd>, <kbd>Enter</kbd>, <kbd>Esc</kbd> | **Abort** confirmation and return to modal (Safe default) |
 
 ---
 

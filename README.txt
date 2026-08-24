@@ -94,9 +94,11 @@ Key / Shortcut       Action & Technical Description
 ? / F1               Help Modal       : Toggle full-screen help modal overlay
 A                    Analyze          : Continuous real-time track alignment test
 D                    Read Data        : Read and verify sector CCITT CRC-16 integrity
-F                    Format           : Low-Level Track & Entire Disk Format with dynamic
-                                        track count override (+/- or arrows), 2-rev pipeline
-                                        (~35s) & 1-rev DPLL read verification ([T]/[D]/[Esc])
+E                    Erase Modal      : Low-Level DC Erase ([T] Track, [R] Range,
+                                         [D] Disk, [Esc] Cancel) with [y/N] safety lock
+F                    Format Modal     : Low-Level Track & Disk Format with dynamic
+                                         track count (+/- or arrows), Verify toggle [V],
+                                         [T] Track, [R] Range, [D] Disk, [y/N] safety lock
 L                    Live RPM         : 72 MHz spindle tachometer & jitter stability
 P                    Preset Profile   : Cycle hardware & format presets (PC, Amiga, Atari, CPC)
 S                    Step Rate        : Toggle Single (1:1) / Double (2:1) step mode (48/96 TPI)
@@ -113,11 +115,19 @@ R                    Recalibrate      : Recalibrate carriage to Track 0 and retu
 Z                    Zero Track       : Direct single seek step return to Track 0
 + / = / Up / Right   Step Forward     : Step head carriage +1 track (up to Track 83)
 - / _ / Down / Left  Step Backward    : Step head carriage -1 track (down to Track 0)
+ScrollUp / Down      Mouse Wheel      : Step track +1 / -1 or adjust active field
 0 .. 8               Decade Seek      : Direct seek jump to Track 0, 10, 20 .. 80
 9                    Overtrack Seek   : Direct seek jump to physical limit (Track 83)
-Esc                  Stop             : Stop spindle motor, flush buffers, dismiss help
+Esc                  Stop / Dismiss   : Stop spindle motor, flush buffers, dismiss modal
 Backspace            Panic Reset      : Emergency instant motor cut & bus re-init
 Q / X / Ctrl+C       Exit             : Clean shutdown (cuts motor & exits raw mode)
+
+MODAL & RANGE NAVIGATION:
+- In Format/Erase: [T] Single Track, [R] Custom Range, [D] Full Disk, [H] Head Toggle,
+                   [PgUp]/[PgDn] Adjust Total Tracks, [V] Toggle Verify (Format only).
+- In Range Editor: [Tab] Switch Field (Start/End), [0-9] Direct Digit Input,
+                   [+/-] or [Up/Down] Inc/Dec, [Bksp] Delete, [Enter] Validate, [Esc] Back.
+- In Confirmation: [Y] Confirm & Execute, [N] / [Enter] / [Esc] Abort (Safe default).
 
 --------------------------------------------------------------------------------
 5. ACOUSTIC VARIOMETER TIER MAPPING
@@ -131,7 +141,8 @@ Q / X / Ctrl+C       Exit             : Clean shutdown (cuts motor & exits raw m
 --------------------------------------------------------------------------------
 6. AUTOMATED TEST SUITE
 --------------------------------------------------------------------------------
-AlignTesterDiag features an automated test suite with 165 unit tests (100% pass rate).
+AlignTesterDiag features an automated test suite with 171 unit tests (100% pass rate)
+and strict Clippy zero-warning compliance.
 Run with:
   cargo test
 

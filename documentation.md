@@ -44,7 +44,7 @@ The application executes across three decoupled OS threads:
    - Automatically drains intermediate backlog events to eliminate latency and acoustic lag.
    - Issues non-blocking Win32 `Beep()` or POSIX terminal bell pulses.
 
-### 1.2 Thread Communication Enums
+### 1.2 Thread Communication Enums & Structures
 
 ```rust
 pub enum HwCmd {
@@ -66,6 +66,10 @@ pub enum HwCmd {
     ToggleBeep,
     SetVerbose(bool),
     SetBeep(bool),
+    FormatTrack { track: u8, head: u8, verify: bool },
+    FormatDisk { range: TrackRange, verify: bool },
+    EraseTrack { track: u8, head: u8 },
+    EraseDisk { range: TrackRange },
     Stop,
     PanicReset,
     SetDiskFormat(DiskFormat),
@@ -77,6 +81,33 @@ pub enum HwCmd {
     CyclePreset,
     SetPreset(PresetProfile),
     Exit,
+}
+
+/// Explicit confirmation state for destructive actions (Format / Erase)
+pub enum PendingConfirmation {
+    FormatTrack { track: u8, head: u8, verify: bool },
+    FormatDisk { range: TrackRange, verify: bool },
+    FormatRange { range: TrackRange, verify: bool },
+    EraseTrack { track: u8, head: u8 },
+    EraseDisk { range: TrackRange },
+    EraseRange { range: TrackRange },
+}
+
+/// Modal editor context and field selection
+pub enum RangeModalKind {
+    Format,
+    Erase,
+}
+
+pub enum RangeField {
+    Start,
+    End,
+}
+
+/// Bounded contiguous track range specification
+pub struct TrackRange {
+    pub start: u8,
+    pub end: u8,
 }
 ```
 
@@ -404,6 +435,25 @@ Accessed via the <kbd>F</kbd> key, the Low-Level Format Engine enables bit-accur
 4. **Automated Verification Pass:** Verifies 100% presence of expected sectors, 0 CRC errors on headers and data fields, and quality score $Q \ge 90\%$.
 5. **Auto-Retry Mechanism:** Re-attempts format up to 2 times upon verification failure before flagging a track error.
 
+### 8.4 Custom Track Range & Explicit Safety Confirmation Lock
+
+1. **Custom Track Range (`TrackRange`):**
+   - Both format and erase operations support batch execution on a custom contiguous cylinder slice `TrackRange { start, end }` configured via `[R] Range`.
+   - Batch formatting and erasing iterate over every cylinder in `start..=end`, executing on Head 0 then Head 1 before stepping inward ($2 \times (end - start + 1)$ total passes).
+2. **Interactive Range Editor (`RangeEditModal`):**
+   - Centered dialog allowing direct digit input (`0-9`), incremental adjustment (`+`/`-`, `↑`/`↓`, mouse wheel), and single-key backspace (`Backspace`).
+   - Field focus is toggled exclusively with <kbd>Tab</kbd> (`Start Track` $\leftrightarrow$ `End Track`).
+   - Strict validation guarantees `0 <= start <= end < max_tracks`, preventing invalid carriage seeks.
+3. **Explicit User Confirmation Lock (`PendingConfirmation [y/N]`):**
+   - Prior to asserting the write gate for any destructive operation (Single Track format/erase, Custom Range format/erase, or Full Disk format/erase), AlignTesterDiag presents an in-modal security gate displaying the exact targeted parameters:
+     * `Confirm Format Track XX (Head Y)? [y/N]`
+     * `Confirm FULL DISK Format (00..XX, Dual-Head)? [y/N]`
+     * `Confirm Format Range XX..YY (Dual-Head)? [y/N]`
+     * `Confirm Erase Track XX (Head Y)? [y/N]`
+     * `Confirm FULL DISK Erase (00..XX, Dual-Head)? [y/N]`
+     * `Confirm Erase Range XX..YY (Dual-Head)? [y/N]`
+   - Execution occurs **only** when <kbd>Y</kbd> or <kbd>y</kbd> is pressed. Pressing <kbd>N</kbd>, <kbd>n</kbd>, <kbd>Enter</kbd>, or <kbd>Esc</kbd> cancels the confirmation, returning to the modal safely (secure default).
+
 ---
 
 ## 9. User Interface, Visual Indicators & Controls
@@ -431,7 +481,7 @@ The interface is divided into three primary functional zones: Top Header, Left C
 └───────────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 9.1 Visual Components
+### 9.1 Visual Components & Overlay Modals
 1. **Top Header Banner:**
    - **Branding & Port Badge:** Clean title banner spanning top border: ` 💾 AlignTesterDiag v{VERSION} ` on the left, active Greaseweazle COM port `[ Port: {PORT_NAME} ]` (e.g. `[ Port: COM3 ]`, `[ Port: /dev/ttyACM0 ]`) on the right.
    - **Drive & Track:** Active unit (`A:` / `B:` in IBM PC mode, `DS0`..`DS3` in Shugart mode), Density (`500k HD` / `250k DD`), Cylinder (`T40`), Head (`H0`, `H1`, `HB(H0)`).
@@ -452,24 +502,35 @@ The interface is divided into three primary functional zones: Top Header, Left C
      - 🟧 `■ ` (Orange): Misaligned sector claiming a different track ID (`MISALIGNED`).
      - ⬜ `░ ` (Dark Gray): Missing sector.
 4. **Interactive Help Modal (<kbd>?</kbd> / <kbd>F1</kbd>):**
-   - Centered overlay modal dialog featuring a double-line border and dark slate background, presenting version, author attribution, and the full interactive keybinding cheat sheet.
+   - Centered overlay modal dialog presenting version, author attribution, and full interactive keybinding cheat sheet.
+5. **Interactive Format & Erase Modals (<kbd>F</kbd> / <kbd>E</kbd>):**
+   - Dedicated centered configuration modals for low-level flux synthesis (`CMD_WRITE_FLUX`) and DC erasure (`CMD_ERASE_FLUX`).
+   - Displays target drive, active preset, cylinder target, physical head, total tracks bounds, and verify status.
+   - Interactive cylinder stepping (<kbd>+</kbd>/<kbd>-</kbd>, <kbd>[</kbd>/<kbd>]</kbd>, arrows, mouse wheel), head toggle (<kbd>H</kbd>), and total tracks adjustment (<kbd>PgUp</kbd>/<kbd>PgDn</kbd>, <kbd>↑</kbd>/<kbd>↓</kbd>).
+6. **Custom Range Editor Modal (`RangeEditModal`):**
+   - Interactive dialog with highlighted active field, instant total tracks calculation, dual-head pass projection, and validation messaging.
+7. **Pending Confirmation Overlay (`[y/N]`):**
+   - High-visibility safety warning embedded inside the active modal displaying the action prompt and requiring explicit <kbd>Y</kbd> to proceed.
 
 ### 9.2 Keyboard Shortcuts & Interactive Commands
 
 All keyboard inputs are captured in raw mode via Crossterm non-blocking polling (`event::poll(Duration::from_millis(15))`) and mapped into strongly-typed `HwCmd` messages sent across the unbounded channel to the hardware thread.
+
+#### Main Screen Keybindings
 
 | Key / Shortcut | Function & Action Name | Target Subsystem | Detailed Technical Description |
 |:---|:---|:---:|:---|
 | <kbd>?</kbd> / <kbd>F1</kbd> | **Toggle Interactive Help Modal** | `UI` | Opens/closes the full-screen centered interactive help modal overlay displaying all keybindings, version, author attribution, and license details. |
 | <kbd>A</kbd> / <kbd>a</kbd> | **Real-Time Track Analysis** | `UI` & `Hardware I/O` | Dispatches `HwCmd::Analyze` and `Action::Analyze`. Spins up spindle motor if stopped (enforcing `SPIN_UP_DELAY_MS` 350 ms delay), samples physical `/WRTPRT` pin, sets `DisplayMode::Analyze` and `HwActivity::ReadingAnalyzing`. Initiates continuous raw flux capture (`CMD_READ_FLUX`), real-time DPLL MFM decoding, mechanical alignment percentage calculation, and acoustic variometer evaluation. |
 | <kbd>D</kbd> / <kbd>d</kbd> | **Read Sector Data & CRC Test** | `Hardware I/O` | Dispatches `HwCmd::ReadData`. Purges UART buffer, asserts spindle motor power (`CMD_MOTOR 1`), queries `/WRTPRT`, and enters `DisplayMode::ReadData`. Continuously decodes IDAM/DAM headers and verifies 512-byte sector data integrity against CCITT CRC-16 checksums, updating the sector ribbon and summary metrics. |
-| <kbd>E</kbd> / <kbd>e</kbd> | **Low-Level Hardware DC Erase Modal** | `UI` & `Hardware I/O` | Opens the Low-Level DC Erase Confirmation Modal. Supports interactive track target adjustment (`+`/`-` or Arrows). Dispatches `HwCmd::EraseTrack` on <kbd>T</kbd> (erases current track only) or `HwCmd::EraseDisk` on <kbd>D</kbd> (erases entire disk across both heads) using continuous write gate asserting neutral flux for $\ge 1.1$ revolutions (`CMD_ERASE_FLUX 0x11`) with Pin 28 write-protect pre-check. |
+| <kbd>E</kbd> / <kbd>e</kbd> | **Low-Level Hardware DC Erase Modal** | `UI` & `Hardware I/O` | Opens the Low-Level DC Erase Confirmation Modal. Supports interactive track target adjustment (`+`/`-`, arrows, mouse wheel), head toggle (<kbd>H</kbd>), custom range (<kbd>R</kbd>), single-track (<kbd>T</kbd>), or full-disk (<kbd>D</kbd>) erasure with Pin 28 write-protect verification and explicit `[y/N]` confirmation lock. |
+| <kbd>F</kbd> / <kbd>f</kbd> | **Low-Level Track & Disk Formatter Modal** | `UI` & `Hardware I/O` | Opens the Low-Level Format Confirmation Modal. Allows dynamic interactive track count adjustment with `+`/`-`, arrows, or mouse wheel, head toggle (<kbd>H</kbd>), Read-After-Write Verify toggle (<kbd>V</kbd>), custom range (<kbd>R</kbd>), single-track (<kbd>T</kbd>), or full-disk (<kbd>D</kbd>) formatting with cycle-accurate 72 MHz pulse synthesis, write pre-compensation, index cueing, and explicit `[y/N]` confirmation lock. |
 | <kbd>Esc</kbd> | **Safe Stop / Motor OFF** | `UI` & `Hardware I/O` | Dispatches `HwCmd::Stop` and `Action::Stop` (or dismisses Help/Format/Erase modal if open). Immediately turns off spindle motor (`CMD_MOTOR 0`), halts continuous flux capture, resets mode to `DisplayMode::None`, sets activity to `HwActivity::Stopped`, and invalidates transient sector buffers. Establishes safe mechanical state for inserting or swapping diskettes. |
 | <kbd>Backspace</kbd> / `\x08` / `\u{8}` | **Emergency Panic Reset** | `Hardware I/O` | Dispatches `HwCmd::PanicReset`. Instantly drains all pending command queues in `rx_cmd`, purges all UART buffers, cuts motor power (`CMD_MOTOR 0`), deselects head (`CMD_HEAD 0`), re-initializes Greaseweazle bus (`CMD_SET_BUS_TYPE 1`), re-selects drive unit, and resets internal state to `[IDLE / READY]`. |
 | <kbd>Z</kbd> / <kbd>z</kbd> | **Zero Track (Return to Cyl 00)** | `Hardware I/O` | Dispatches `HwCmd::ZeroTrack`. Performs motor-gated seek to Track 00 (`CMD_SEEK 0`) with 3000 ms optical stop timeout (`SEEK_TRK0_TIMEOUT_MS`). Enforces 200 ms mechanical shock dissipation delay (`RECALIBRATE_WAIT_MS`), resets Track 0 flag (`TRK0=ON`), re-queries write-protect pin, purges input UART buffers, and resumes active diagnostic mode if previously analyzing. |
 | <kbd>R</kbd> / <kbd>r</kbd> | **Recalibrate & Seek Return** | `Hardware I/O` | Dispatches `HwCmd::RecalibrateSeek`. Saves origin cylinder, issues motor-gated seek to physical Track 00 (`CMD_SEEK 0`), pauses for 60 ms dwell time (`DWELL_TIME_TRK0_MS`) against the stop, then seeks directly back to origin cylinder with 30 ms vibration dampening (`HEAD_SETTLE_TIME_MS`). Clears lead-screw backlash and motor step slip. (If already at Track 00, performs a 2-track step-out clearance cycle `Seek(2)` $\rightarrow$ `Seek(0)`). |
-| <kbd>+</kbd> / <kbd>=</kbd> / <kbd>▲ Up</kbd> / <kbd>► Right</kbd> | **Step Track +1 (Outward)** | `Hardware I/O` | Dispatches `HwCmd::Seek(track + 1)`. Steps head carriage outward by +1 cylinder (clamped at physical limit Track 83). Uses `perform_motor_gated_seek()` with electronic stepper wake-up if motor is stopped, clears prior track flux cache, enforces 30 ms head settling time (`HEAD_SETTLE_TIME_MS`), and queries `/WRTPRT`. |
-| <kbd>-</kbd> / <kbd>_</kbd> / <kbd>▼ Down</kbd> / <kbd>◄ Left</kbd> | **Step Track -1 (Inward)** | `Hardware I/O` | Dispatches `HwCmd::Seek(track - 1)`. Steps head carriage inward by -1 cylinder (clamped at physical limit Track 00). Uses motor-gated stepping, enforces 30 ms damping delay (`HEAD_SETTLE_TIME_MS`), purges residual UART flux frames, and updates `TRK0` indicator if cylinder 00 is reached. |
+| <kbd>+</kbd> / <kbd>=</kbd> / <kbd>▲ Up</kbd> / <kbd>► Right</kbd> / `ScrollUp` | **Step Track +1 (Outward)** | `Hardware I/O` | Dispatches `HwCmd::Seek(track + 1)`. Steps head carriage outward by +1 cylinder (clamped at physical limit Track 83). Uses `perform_motor_gated_seek()` with electronic stepper wake-up if motor is stopped, clears prior track flux cache, enforces 30 ms head settling time (`HEAD_SETTLE_TIME_MS`), and queries `/WRTPRT`. |
+| <kbd>-</kbd> / <kbd>_</kbd> / <kbd>▼ Down</kbd> / <kbd>◄ Left</kbd> / `ScrollDown` | **Step Track -1 (Inward)** | `Hardware I/O` | Dispatches `HwCmd::Seek(track - 1)`. Steps head carriage inward by -1 cylinder (clamped at physical limit Track 00). Uses motor-gated stepping, enforces 30 ms damping delay (`HEAD_SETTLE_TIME_MS`), purges residual UART flux frames, and updates `TRK0` indicator if cylinder 00 is reached. |
 | <kbd>0</kbd> .. <kbd>8</kbd> | **Direct Decade Track Jump** | `Hardware I/O` | Dispatches `HwCmd::Seek(digit * 10)`. Immediately seeks to cylinder 00, 10, 20, 30, 40, 50, 60, 70, or 80. Dynamically scales serial seek timeout ($T = 1200\text{ ms} + \vert\Delta T\vert \times 25\text{ ms}$), dampens mechanical carriage vibration for 30 ms, clears sector history, and re-locks DPLL stream. |
 | <kbd>9</kbd> | **Overtrack Limit Jump (Track 83)** | `Hardware I/O` | Dispatches `HwCmd::Seek(90 \rightarrow \min 83)`. Steps carriage to the maximum physical overtrack boundary (Cylinder 83) to verify overtracking headroom, head carriage clearance, and upper limit mechanical stop safety. |
 | <kbd>H</kbd> / <kbd>h</kbd> | **Toggle Physical Head** | `Hardware I/O` | Dispatches `HwCmd::ToggleHead`. Cycles head selection: `Head 0` (Side 0 / Lower) $\rightarrow$ `Head 1` (Side 1 / Upper) $\rightarrow$ `Both (0+1)` (Alternating Dual-Head Mode). Transmits `CMD_HEAD` (0x03), applies 1 ms electronic preamplifier settle delay (`HEAD_SWITCH_SETTLE_MS`), clears transient sector logs, and resets per-head diagnostic passes. |
@@ -480,17 +541,37 @@ All keyboard inputs are captured in raw mode via Crossterm non-blocking polling 
 | <kbd>V</kbd> / <kbd>v</kbd> | **Toggle Verbose Stream Mode** | `UI` & `Hardware I/O` | Dispatches `HwCmd::ToggleVerbose`. Switches stream display between Standard mode (compact graphical sector blocks `[ ■ ■ ■ ]`) and Verbose History mode (detailed microsecond cell timings, DPLL phase drift, instantaneous RPM per revolution, and individual error causes). |
 | <kbd>Q</kbd> / <kbd>q</kbd> / <kbd>X</kbd> / <kbd>x</kbd> / <kbd>Ctrl</kbd>+<kbd>C</kbd> | **Clean Application Exit** | `UI` & `Hardware I/O` | Dispatches `HwCmd::Exit`. Gracefully terminates background worker threads, shuts down spindle motor, deselects drive unit (`CMD_DESELECT`), tri-states interface bus (`CMD_SET_BUS_TYPE 0`), lowers DTR/RTS lines, restores terminal raw mode, and exits the application cleanly. |
 | <kbd>P</kbd> / <kbd>p</kbd> | **Cycle Hardware & Format Preset** | `UI` & `Hardware I/O` | Dispatches `HwCmd::CyclePreset` and `Action::CyclePreset`. Atomically cycles through standard hardware & format presets: `Pc35Hd` (3.5" HD, 1.44M, PC Bus, Step 1:1, 500 kbps @ 300 RPM) ➔ `Pc35Dd` (3.5" DD, 720K, PC Bus, Step 1:1, 250 kbps @ 300 RPM) ➔ `Pc525Hd` (5.25" HD, 1.2M, PC Bus, Step 1:1, 500 kbps @ 360 RPM) ➔ `Pc525DdOnHd` (5.25" DD on HD Drive, 360K, PC Bus, Step 2:1, DPLL 300 kbps @ 360 RPM) ➔ `Pc525Dd` (5.25" DD on DD Drive, 360K, PC Bus, Step 1:1, 250 kbps @ 300 RPM) ➔ `Amiga35Dd` (Amiga 3.5", 880K, Shugart Bus, Step 1:1, 250 kbps @ 300 RPM) ➔ `Atari35Dd` (Atari 3.5", 720K, PC Bus, Step 1:1, 250 kbps @ 300 RPM) ➔ `Cpc30Data` (Amstrad CPC 3.0", 178K, Shugart Bus, Step 1:1, 250 kbps @ 300 RPM). Automatically syncs DPLL nominal window, bus mode, and step rate. |
-| <kbd>F</kbd> / <kbd>f</kbd> | **Low-Level Track & Disk Formatter** | `UI` & `Hardware I/O` | Opens the Low-Level Format Confirmation Modal. Allows dynamic interactive track count adjustment with `+`/`-` or Arrow keys (40 tracks standard `00..39`, max 42 for 48 TPI; 80 tracks standard `00..79`, max 84 for 96/135 TPI) and Read-After-Write Verify toggle (<kbd>V</kbd>). Dispatches `HwCmd::FormatTrack` on <kbd>T</kbd> (formats current track only) or `HwCmd::FormatDisk` on <kbd>D</kbd> (formats entire disk across both heads) using cycle-accurate 72 MHz pulse synthesis, write pre-compensation, physical index cueing, and fast 1-revolution read-after-write CRC verification (~70s with verify, ~35s fast format). |
 | <kbd>I</kbd> / <kbd>i</kbd> | **Track Flux Imaging Utility** | `Hardware I/O` *(Reserved)* | Reserved shortcut for raw multi-revolution flux imaging and flux-level surface degradation heatmaps in Roadmap Phase 4. |
 | <kbd>S</kbd> / <kbd>s</kbd> | **Toggle Step Rate (Single 1:1 / Double 2:1 for 48/96 TPI)** | `UI` & `Hardware I/O` | Dispatches `HwCmd::ToggleStepMode` and `Action::ToggleStepMode`. Alternates head carriage stepping rate between Single Step 1:1 (native 96/135 TPI drives, 0..83 cylinders) and Double Step 2:1 (48 TPI media on 96/135 TPI mechanics, multiplying physical seek cylinders by 2 to map 40-41 logical tracks T00..T40 onto physical cylinders 0..82). Automatically bounds active track to the maximum logical limit (83 in Single, 41 in Double). |
 | <kbd>T</kbd> / <kbd>t</kbd> | **Toggle Bus Type (IBM PC <-> Shugart)** | `UI` & `Hardware I/O` | Dispatches `HwCmd::ToggleBusType` and `Action::ToggleBusType`. Toggles floppy interface between IBM PC bus (`0x01`) and Shugart standard bus (`0x02`, e.g. Amiga / Atari / Commodore / CPC native drives). Dynamically updates pinout configuration and unit drive selection (automatically resetting the active unit to 0 if switching back to PC mode while on DS2 or DS3). |
 | <kbd>W</kbd> / <kbd>w</kbd> | **Write Sector Integrity Test** | `Hardware I/O` *(Reserved)* | Reserved shortcut for non-destructive sector rewrite and magnetic surface test patterns in Roadmap Phase 3. |
 
+#### Modal-Specific Controls & Subsystem Navigation
+
+| Context | Shortcut / Key | Function & Action |
+|:---|:---|:---|
+| **Format Modal (<kbd>F</kbd>) & Erase Modal (<kbd>E</kbd>)** | <kbd>T</kbd> / <kbd>t</kbd> | Arm single-track operation for active cylinder and head |
+| | <kbd>R</kbd> / <kbd>r</kbd> | Open the interactive custom track range editor (`RangeEditModal`) |
+| | <kbd>D</kbd> / <kbd>d</kbd> | Arm full-disk dual-head batch operation (Tracks `00..max`) |
+| | <kbd>H</kbd> / <kbd>h</kbd> | Toggle target physical head (`Head 0` $\leftrightarrow$ `Head 1`) |
+| | <kbd>+</kbd> / <kbd>-</kbd>, <kbd>[</kbd> / <kbd>]</kbd>, <kbd>←</kbd> / <kbd>→</kbd>, `ScrollUp`/`ScrollDown` | Step active cylinder target backward/forward |
+| | <kbd>PgUp</kbd> / <kbd>PgDn</kbd>, <kbd>↑</kbd> / <kbd>↓</kbd> | Adjust total disk tracks (40/42 for 48 TPI, 80/84 for 96/135 TPI) |
+| | <kbd>V</kbd> / <kbd>v</kbd> *(Format only)* | Toggle Read-After-Write verify mode (`ON` ~70s / `OFF` ~35s) |
+| | <kbd>Esc</kbd> / <kbd>Q</kbd> / <kbd>X</kbd> | Close modal dialog and return to main screen |
+| **Range Editor (`RangeEditModal`)** | <kbd>Tab</kbd> | Switch active editing field between `Start Track` and `End Track` |
+| | <kbd>0</kbd>–<kbd>9</kbd> | Type track numeric digits directly into the active field |
+| | <kbd>+</kbd> / <kbd>-</kbd>, <kbd>↑</kbd> / <kbd>↓</kbd>, <kbd>←</kbd> / <kbd>→</kbd>, `ScrollUp`/`ScrollDown` | Increment / decrement active bound |
+| | <kbd>Backspace</kbd> | Delete last digit or clear active field |
+| | <kbd>Enter</kbd> | Validate track range bounds and return to parent modal armed with `FormatRange` or `EraseRange` |
+| | <kbd>Esc</kbd> | Cancel range editing and return to parent modal |
+| **Confirmation Prompt (`[y/N]`)** | <kbd>Y</kbd> / <kbd>y</kbd> | **Confirm and Execute:** Dispatches `HwCmd` to hardware thread and closes modal |
+| | <kbd>N</kbd> / <kbd>n</kbd>, <kbd>Enter</kbd>, <kbd>Esc</kbd> | **Cancel Prompt:** Clears pending confirmation and returns safely to modal |
+
 ---
 
 ## 10. Automated Test & Verification Suite
 
-AlignTesterDiag includes an exhaustive **168-test automated unit test suite** built directly into Cargo (100% success rate).
+AlignTesterDiag includes an exhaustive **171-test automated unit test suite** built directly into Cargo (100% success rate), maintaining strict zero-warning Clippy compliance (`cargo clippy -- -D warnings`).
 
 ### 10.1 Automated Unit Test Harness
 Run the full test suite using Cargo:
@@ -498,9 +579,11 @@ Run the full test suite using Cargo:
 cargo test
 ```
 
-The 168 unit tests provide complete coverage across all subsystems:
+The 171 unit tests provide complete coverage across all subsystems:
 - Low-Level MFM track synthesizer, altered sync drops `0xA1*` -> `0x4489`, CRC16-CCITT static table validation, 72 MHz pulse timing translation for 250k/300k/500k, write pre-compensation ($\pm 125\text{ ns}$ on tracks $> 40$), Greaseweazle RLE flux decoding roundtrip, and Amiga Paula even/odd encoding & decoding roundtrips (`src/hw/format.rs`).
 - Hardware DC Erase engine (`CMD_ERASE_FLUX`), 6-byte packet builders, write-protect Pin 28 pre-checks, and multi-track erase loop execution (`src/hw/protocol.rs`, `src/hw/mod.rs`).
+- `PendingConfirmation` prompt rendering, string formatting, and validation (`src/app.rs`, `src/main.rs`).
+- `RangeEditModal` lifecycle, active field switching via `Tab`, digit insertion/backspace, boundary validation, and error reporting (`src/app.rs`, `src/main.rs`).
 - State transitions on `HwCmd` and `Action` dispatches (`src/app.rs`, `src/hw/mod.rs`).
 - Hardware & format presets lifecycle, cycling, and CLI argument parsing (`src/hw/protocol.rs`, `src/app.rs`, `src/main.rs`).
 - Dynamic drive unit cycling across bus types (`0..1` for IBM PC, `0..3` for Shugart) and automatic unit fallback (`src/app.rs`, `src/hw/mod.rs`, `src/main.rs`).
@@ -510,7 +593,7 @@ The 168 unit tests provide complete coverage across all subsystems:
 - Spindle tachometer rolling average windowing, sub-microsecond interval conversion, and jitter calculations (`src/hw/mod.rs`).
 - Multi-system retro encoding & decoding engines (Amiga Paula even/odd bit deinterleaving & 32-bit XOR checksums, Atari ST 9/10/11 sectors & overtracks, Amstrad CPC DATA/SYSTEM sector ID formats) (`src/hw/mod.rs`, `src/app.rs`, `src/ui.rs`).
 - Dual-head "Both" mode consolidation, active pointer tracking, and mismatch handling (`src/app.rs`, `src/hw/mod.rs`, `src/ui.rs`).
-- Format confirmation modal formatting, verify toggle (<kbd>V</kbd>), erase modal formatting, shortcut styling (`[T]` / `[D]` / `[V]` / `[Esc]`), progress bar calculation, and right panel format/erase diagnostics (`src/ui.rs`, `src/main.rs`).
+- Format confirmation modal formatting, verify toggle (<kbd>V</kbd>), erase modal formatting, shortcut styling (`[T]` / `[D]` / `[R]` / `[V]` / `[Esc]`), progress bar calculation, and right panel format/erase diagnostics (`src/ui.rs`, `src/main.rs`).
 - TUI ribbon span coloring, phosphor decay interpolation, spinner animation, zero-allocation ruler line, and dynamic text generation (`src/ui.rs`).
 - Hardware protocol packet encoders, bus modes, step modes, and opcode definitions (`src/hw/protocol.rs`).
 - CLI argument parsing (`--preset`, `-p`, `--port`, `--drive`, `--bus`, `--step`, `--double-step`, `--shugart`, short & key-value syntax) and auto-detection fallback (`src/main.rs`).
