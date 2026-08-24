@@ -2687,7 +2687,7 @@ mod tests {
         assert!(full_text.contains("LOW-LEVEL MFM FORMATTING"));
         assert!(full_text.contains("Preset: [3.5\" HD (1.44M) (RPM Cible: 300 RPM | 500 kbps)]"));
         assert!(full_text.contains("Head : Head 0"));
-        assert!(full_text.contains("Target Tracks : 80"));
+        assert!(full_text.contains("Target Tracks : 80 tracks"));
         assert!(full_text.contains("Range: 00..79 | Standard: 80, Max: 84"));
         assert!(full_text.contains("Read-After-Write Verify : ON"));
         assert!(full_text.contains("Cycle Preset Profile"));
@@ -2755,7 +2755,7 @@ mod tests {
 
         assert!(full_text.contains("Target Preset : [3.5\" HD (1.44M) (RPM Cible: 300 RPM | 500 kbps)]"));
         assert!(full_text.contains("Head : Head 0"));
-        assert!(full_text.contains("Target Tracks : 80"));
+        assert!(full_text.contains("Target Tracks : 80 tracks"));
         assert!(full_text.contains("WARNING: This will permanently wipe all magnetic flux"));
         assert!(full_text.contains("Cycle Preset Profile"));
         assert!(full_text.contains("Erase Current Track only  (Track 40, Head 0 only)"));
@@ -2946,7 +2946,7 @@ mod tests {
             .collect();
         assert!(text.contains("LOW-LEVEL FORMAT ENGINE"));
         assert!(text.contains("WRITING FLUX"));
-        assert!(text.contains("Track 20/80 (Phys: 20) | Head 1/1"));
+        assert!(text.contains("Track 20 of 80 total (Phys: 20) | Head 1/1"));
         assert!(text.contains("Sectors: 18/18"));
         assert!(text.contains("(41/160 passes)"));
 
@@ -3121,7 +3121,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(text_48.contains("Target Tracks : 40"));
+        assert!(text_48.contains("Target Tracks : 40 tracks"));
         assert!(text_48.contains("Range: 00..39 | Standard: 40, Max: 42"));
         assert!(text_48.contains("Tracks 00..39, Head 0 only"));
         assert!(text_48.contains("Target Track  : Track 20"));
@@ -3147,7 +3147,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(text_48_over.contains("Target Tracks : 42"));
+        assert!(text_48_over.contains("Target Tracks : 42 tracks"));
         assert!(text_48_over.contains("Range: 00..41 | Standard: 40, Max: 42"));
         assert!(text_48_over.contains("Tracks 00..41, Head 1 only"));
         assert!(text_48_over.contains("Target Track  : Track 20"));
@@ -3173,7 +3173,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(text_80.contains("Target Tracks : 80"));
+        assert!(text_80.contains("Target Tracks : 80 tracks"));
         assert!(text_80.contains("Range: 00..79 | Standard: 80, Max: 84"));
         assert!(text_80.contains("Tracks 00..79, Dual-Head"));
         assert!(text_80.contains("Target Track  : Track 00"));
@@ -3199,7 +3199,7 @@ mod tests {
             .collect();
         assert!(text.contains("Target Track  : Track 35"));
         assert!(text.contains("Head : Head 1"));
-        assert!(text.contains("Target Tracks : 80"));
+        assert!(text.contains("Target Tracks : 80 tracks"));
         assert!(text.contains("Erase Current Track only  (Track 35, Head 1 only)"));
         assert!(text.contains("Erase Track Range     (Tracks 10..20, Head 1 only)"));
         assert!(text.contains("Erase Entire Disk         (Tracks 00..79, Head 1 only)"));

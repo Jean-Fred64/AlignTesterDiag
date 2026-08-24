@@ -1199,7 +1199,7 @@ pub fn build_format_modal_lines(
             Span::styled("  [", gray),
             Span::styled("PgUp/PgDn", accent_bold),
             Span::styled("] Target Tracks : ", white),
-            Span::styled(format!("{}", target_tracks), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{} tracks", target_tracks), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
             Span::styled(format!(" (Range: 00..{:02} | Standard: {}, Max: {})", last_track_idx, standard_tracks, max_tracks_allowed), cyan),
         ]),
         Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", gray)),
@@ -1388,7 +1388,7 @@ pub fn build_erase_modal_lines(
             Span::styled("[", gray),
             Span::styled("PgUp/PgDn", accent_bold),
             Span::styled("] Target Tracks : ", white),
-            Span::styled(format!("{}", target_tracks), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{} tracks", target_tracks), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
             Span::styled(format!(" (Range: 00..{:02} | Standard: {}, Max: {})", last_track_idx, standard_tracks, max_tracks_allowed), cyan),
         ]),
         Line::from(Span::styled("────────────────────────────────────────────────────────────────────────────", gray)),
@@ -1717,7 +1717,7 @@ pub fn build_format_progress_lines(status: &crate::hw::DriveStatus) -> Vec<Line<
             Span::styled(" | Target: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 format!(
-                    "Track {:02}/{} (Phys: {:02}) | Head {}/{}",
+                    "Track {:02} of {} total (Phys: {:02}) | Head {}/{}",
                     prog.current_track,
                     prog.total_tracks,
                     phys_cyl,
