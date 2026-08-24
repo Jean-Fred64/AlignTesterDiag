@@ -1,4 +1,7 @@
-use crate::hw::{BusType, DiskFormat, DisplayMode, DriveStatus, HwActivity, PresetProfile, StepMode, TrackRange};
+use crate::hw::{
+    BusType, DiskFormat, DisplayMode, DriveStatus, FsInitMode, HwActivity, PresetProfile, StepMode,
+    TrackRange,
+};
 
 pub use crate::hw::HeadSelection;
 
@@ -20,30 +23,97 @@ pub enum RangeModalKind {
 /// Explicit user confirmation state before running destructive format/erase operations
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingConfirmation {
-    FormatTrack { track: u8, head_sel: HeadSelection, verify: bool },
-    FormatDisk { range: TrackRange, head_sel: HeadSelection, verify: bool },
-    FormatRange { range: TrackRange, head_sel: HeadSelection, verify: bool },
-    EraseTrack { track: u8, head_sel: HeadSelection },
-    EraseDisk { range: TrackRange, head_sel: HeadSelection },
-    EraseRange { range: TrackRange, head_sel: HeadSelection },
+    FormatTrack {
+        track: u8,
+        head_sel: HeadSelection,
+        verify: bool,
+        fs_mode: FsInitMode,
+        preset: PresetProfile,
+    },
+    FormatDisk {
+        range: TrackRange,
+        head_sel: HeadSelection,
+        verify: bool,
+        fs_mode: FsInitMode,
+        preset: PresetProfile,
+    },
+    FormatRange {
+        range: TrackRange,
+        head_sel: HeadSelection,
+        verify: bool,
+        fs_mode: FsInitMode,
+        preset: PresetProfile,
+    },
+    EraseTrack {
+        track: u8,
+        head_sel: HeadSelection,
+    },
+    EraseDisk {
+        range: TrackRange,
+        head_sel: HeadSelection,
+    },
+    EraseRange {
+        range: TrackRange,
+        head_sel: HeadSelection,
+    },
 }
 
 impl PendingConfirmation {
     pub fn prompt_string(&self) -> String {
         match self {
-            PendingConfirmation::FormatTrack { track, head_sel, .. } => {
-                format!("Confirm Format Track {:02} ({})? [y/N]", track, head_sel.conf_label())
-            }
-            PendingConfirmation::FormatDisk { range, head_sel, .. } => {
+            PendingConfirmation::FormatTrack {
+                track,
+                head_sel,
+                fs_mode,
+                preset,
+                ..
+            } => {
+                let fs_tag = match fs_mode {
+                    FsInitMode::OsReady => format!(", OS-Ready: {}", FsInitMode::os_desc(*preset)),
+                    FsInitMode::Blank => String::new(),
+                };
                 format!(
-                    "Confirm FULL DISK Format (00..{:02}, {})? [y/N]",
-                    range.end, head_sel.conf_label()
+                    "Confirm Format Track {:02} ({}{})? [y/N]",
+                    track,
+                    head_sel.conf_label(),
+                    fs_tag
                 )
             }
-            PendingConfirmation::FormatRange { range, head_sel, .. } => {
+            PendingConfirmation::FormatDisk {
+                range,
+                head_sel,
+                fs_mode,
+                preset,
+                ..
+            } => {
+                let fs_tag = match fs_mode {
+                    FsInitMode::OsReady => format!(", OS-Ready: {}", FsInitMode::os_desc(*preset)),
+                    FsInitMode::Blank => String::new(),
+                };
                 format!(
-                    "Confirm Format Range {:02}..{:02} ({})? [y/N]",
-                    range.start, range.end, head_sel.conf_label()
+                    "Confirm FULL DISK Format (00..{:02}, {}{})? [y/N]",
+                    range.end,
+                    head_sel.conf_label(),
+                    fs_tag
+                )
+            }
+            PendingConfirmation::FormatRange {
+                range,
+                head_sel,
+                fs_mode,
+                preset,
+                ..
+            } => {
+                let fs_tag = match fs_mode {
+                    FsInitMode::OsReady => format!(", OS-Ready: {}", FsInitMode::os_desc(*preset)),
+                    FsInitMode::Blank => String::new(),
+                };
+                format!(
+                    "Confirm Format Range {:02}..{:02} ({}{})? [y/N]",
+                    range.start,
+                    range.end,
+                    head_sel.conf_label(),
+                    fs_tag
                 )
             }
             PendingConfirmation::EraseTrack { track, head_sel } => {
@@ -198,12 +268,30 @@ pub enum Action {
     OpenFormatModal,
     CloseFormatModal,
     ToggleFormatVerify,
-    FormatTrack { track: u8, head_sel: HeadSelection, verify: bool },
-    FormatDisk { range: TrackRange, head_sel: HeadSelection, verify: bool },
+    ToggleFormatFsMode,
+    SetFormatFsMode(FsInitMode),
+    FormatTrack {
+        track: u8,
+        head_sel: HeadSelection,
+        verify: bool,
+        fs_mode: FsInitMode,
+    },
+    FormatDisk {
+        range: TrackRange,
+        head_sel: HeadSelection,
+        verify: bool,
+        fs_mode: FsInitMode,
+    },
     OpenEraseModal,
     CloseEraseModal,
-    EraseTrack { track: u8, head_sel: HeadSelection },
-    EraseDisk { range: TrackRange, head_sel: HeadSelection },
+    EraseTrack {
+        track: u8,
+        head_sel: HeadSelection,
+    },
+    EraseDisk {
+        range: TrackRange,
+        head_sel: HeadSelection,
+    },
 }
 
 /// Application state wrapper
@@ -220,6 +308,7 @@ pub struct App {
     pub show_help: bool,
     pub show_format_modal: bool,
     pub format_verify: bool,
+    pub format_fs_mode: FsInitMode,
     pub format_target_tracks: u8,
     pub format_range: TrackRange,
     pub show_erase_modal: bool,
@@ -299,6 +388,7 @@ impl App {
             show_help: false,
             show_format_modal: false,
             format_verify: true,
+            format_fs_mode: FsInitMode::Blank,
             format_target_tracks: default_tracks,
             format_range: default_range,
             show_erase_modal: false,
@@ -331,6 +421,14 @@ impl App {
 
     pub fn toggle_format_verify(&mut self) {
         self.format_verify = !self.format_verify;
+    }
+
+    pub fn toggle_format_fs_mode(&mut self) {
+        self.format_fs_mode = self.format_fs_mode.toggle();
+    }
+
+    pub fn set_format_fs_mode(&mut self, mode: FsInitMode) {
+        self.format_fs_mode = mode;
     }
 
     pub fn default_track_range(&self) -> TrackRange {
@@ -778,6 +876,8 @@ impl App {
             Action::CyclePreset => self.cycle_preset(),
             Action::SetPreset(preset) => self.apply_preset(preset),
             Action::ToggleFormatVerify => self.toggle_format_verify(),
+            Action::ToggleFormatFsMode => self.toggle_format_fs_mode(),
+            Action::SetFormatFsMode(mode) => self.set_format_fs_mode(mode),
             Action::OpenFormatModal => {
                 self.show_format_modal = true;
                 if self.format_target_tracks == 0 || self.format_target_tracks > self.max_format_tracks() {

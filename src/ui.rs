@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 use crate::app::{App, HeadSelection, PendingConfirmation, RangeField, RangeModalKind};
-use crate::hw::{HwActivity, TrackRange};
+use crate::hw::{FsInitMode, HwActivity, PresetProfile, TrackRange};
 
 /// Builds the track ruler line with visual highlight for active tracks (0 to 83)
 pub fn build_ruler_line(current_track: u8) -> Line<'static> {
@@ -1142,7 +1142,7 @@ pub fn build_format_modal_lines(
     track: u8,
     head_sel: HeadSelection,
     _max_track: u8,
-    preset_label: &str,
+    preset: PresetProfile,
     target_rpm: f64,
     bitrate: u16,
     bus_name: &str,
@@ -1150,6 +1150,7 @@ pub fn build_format_modal_lines(
     target_tracks: u8,
     is_48_tpi: bool,
     format_verify: bool,
+    fs_mode: FsInitMode,
     range: TrackRange,
     pending_confirm: Option<&PendingConfirmation>,
 ) -> Vec<Line<'static>> {
@@ -1187,7 +1188,7 @@ pub fn build_format_modal_lines(
         Line::from(vec![
             Span::styled("  Target Preset : ", gray),
             Span::styled(
-                format!("[{}]", preset_label),
+                format!("[{}]", preset.label()),
                 Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  |  Target: ", gray),
@@ -1230,6 +1231,27 @@ pub fn build_format_modal_lines(
                 cyan,
             ),
         ]),
+        Line::from(vec![
+            Span::styled("  [", gray),
+            Span::styled("S", accent_bold),
+            Span::styled("] ", white),
+            Span::styled("S", accent_bold),
+            Span::styled("ystem FS Init : ", white),
+            match fs_mode {
+                FsInitMode::Blank => Span::styled("Blank (Raw 0xE5)", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                FsInitMode::OsReady => Span::styled(
+                    format!("OS-Ready ({})", FsInitMode::os_desc(preset)),
+                    Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+                ),
+            },
+            Span::styled(
+                match fs_mode {
+                    FsInitMode::Blank => " (Direct unformatted raw sectors)",
+                    FsInitMode::OsReady => " (Boot & Root FS initialized)",
+                },
+                cyan,
+            ),
+        ]),
     ];
 
     if let Some(confirm) = pending_confirm {
@@ -1249,6 +1271,13 @@ pub fn build_format_modal_lines(
         lines.push(Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", Style::default().fg(Color::Yellow))));
     } else {
         lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("  [", gray),
+            Span::styled("S", accent_bold),
+            Span::styled("] Toggle ", white),
+            Span::styled("S", accent_bold),
+            Span::styled("ystem FS Init (Blank / OS-Ready)", white),
+        ]));
         lines.push(Line::from(vec![
             Span::styled("  [", gray),
             Span::styled("P", accent_bold),
@@ -1307,7 +1336,7 @@ pub fn render_format_modal(
     track: u8,
     head_sel: HeadSelection,
     max_track: u8,
-    preset_label: &str,
+    preset: PresetProfile,
     target_rpm: f64,
     bitrate: u16,
     bus_name: &str,
@@ -1315,11 +1344,12 @@ pub fn render_format_modal(
     target_tracks: u8,
     is_48_tpi: bool,
     format_verify: bool,
+    fs_mode: FsInitMode,
     range: TrackRange,
     pending_confirm: Option<&PendingConfirmation>,
 ) {
     let modal_width = (area.width.saturating_sub(2)).clamp(82, 88).min(area.width);
-    let modal_height = (area.height.saturating_sub(2)).clamp(25, 27).min(area.height);
+    let modal_height = (area.height.saturating_sub(2)).clamp(26, 29).min(area.height);
     let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(x, y, modal_width, modal_height);
@@ -1337,7 +1367,7 @@ pub fn render_format_modal(
         track,
         head_sel,
         max_track,
-        preset_label,
+        preset,
         target_rpm,
         bitrate,
         bus_name,
@@ -1345,6 +1375,7 @@ pub fn render_format_modal(
         target_tracks,
         is_48_tpi,
         format_verify,
+        fs_mode,
         range,
         pending_confirm,
     ))

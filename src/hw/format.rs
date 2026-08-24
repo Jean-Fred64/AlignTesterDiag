@@ -4,6 +4,7 @@
 //! CRC16-CCITT generation via lookup tables, Paula AmigaDOS split even/odd encoding,
 //! and Greaseweazle `GW_FLUX` packet generation for low-level floppy formatting.
 
+use crate::hw::fs::{generate_sector_payload, FsInitMode};
 use crate::hw::protocol::PresetProfile;
 
 /// Greaseweazle master sample clock frequency (72 MHz)
@@ -193,11 +194,23 @@ impl MfmTrackEncoder {
         }
     }
 
-    /// Synthesizes a full MFM track bitstream into the provided buffer based on the active PresetProfile
+    /// Synthesizes a full MFM track bitstream into the provided buffer based on the active PresetProfile with standard Blank fill
+    #[allow(dead_code)]
     pub fn encode_track_into(
         preset: PresetProfile,
         cyl: u8,
         head: u8,
+        buffer: &mut MfmTrackBuffer,
+    ) {
+        Self::encode_track_into_with_fs(preset, cyl, head, FsInitMode::Blank, buffer);
+    }
+
+    /// Synthesizes a full MFM track bitstream into the provided buffer based on the active PresetProfile and FsInitMode
+    pub fn encode_track_into_with_fs(
+        preset: PresetProfile,
+        cyl: u8,
+        head: u8,
+        fs_mode: FsInitMode,
         buffer: &mut MfmTrackBuffer,
     ) {
         buffer.bits.clear();
@@ -205,11 +218,12 @@ impl MfmTrackEncoder {
 
         match preset {
             PresetProfile::Amiga35Dd => {
-                Self::encode_amiga_track(cyl, head, &mut buffer.bits, &mut last_bit);
+                Self::encode_amiga_track(cyl, head, fs_mode, &mut buffer.bits, &mut last_bit);
             }
             PresetProfile::Pc35Hd => {
                 // IBM PC 1.44M HD: 18 sectors, 512B, Gap1=80, Gap2=22, Gap3=84, Gap4b=approx 650, 500 kbps @ 300 RPM
                 Self::encode_ibm_track(
+                    preset,
                     cyl,
                     head,
                     18,
@@ -217,7 +231,7 @@ impl MfmTrackEncoder {
                     80,
                     22,
                     84,
-                    0xE5,
+                    fs_mode,
                     100_000,
                     &mut buffer.bits,
                     &mut last_bit,
@@ -226,6 +240,7 @@ impl MfmTrackEncoder {
             PresetProfile::Pc35Dd => {
                 // IBM PC 720K DD: 9 sectors, 512B, Gap1=32, Gap2=22, Gap3=54, Gap4b=approx 600, 250 kbps @ 300 RPM
                 Self::encode_ibm_track(
+                    preset,
                     cyl,
                     head,
                     9,
@@ -233,7 +248,7 @@ impl MfmTrackEncoder {
                     32,
                     22,
                     54,
-                    0xE5,
+                    fs_mode,
                     50_000,
                     &mut buffer.bits,
                     &mut last_bit,
@@ -242,6 +257,7 @@ impl MfmTrackEncoder {
             PresetProfile::Pc525Hd => {
                 // 5.25" HD (1.2M): 15 sectors, 512B, Gap1=80, Gap2=22, Gap3=84, 500 kbps @ 360 RPM (~83,333 bits)
                 Self::encode_ibm_track(
+                    preset,
                     cyl,
                     head,
                     15,
@@ -249,7 +265,7 @@ impl MfmTrackEncoder {
                     80,
                     22,
                     84,
-                    0xE5,
+                    fs_mode,
                     83_333,
                     &mut buffer.bits,
                     &mut last_bit,
@@ -258,6 +274,7 @@ impl MfmTrackEncoder {
             PresetProfile::Pc525DdOnHd => {
                 // 5.25" DD on HD (360K @ 360 RPM): 9 sectors, 512B, Gap1=32, Gap2=22, Gap3=54, 300 kbps @ 360 RPM (~50,000 bits)
                 Self::encode_ibm_track(
+                    preset,
                     cyl,
                     head,
                     9,
@@ -265,7 +282,7 @@ impl MfmTrackEncoder {
                     32,
                     22,
                     54,
-                    0xE5,
+                    fs_mode,
                     50_000,
                     &mut buffer.bits,
                     &mut last_bit,
@@ -274,6 +291,7 @@ impl MfmTrackEncoder {
             PresetProfile::Pc525Dd => {
                 // 5.25" DD (360K @ 300 RPM): 9 sectors, 512B, Gap1=32, Gap2=22, Gap3=54, 250 kbps @ 300 RPM (~50,000 bits)
                 Self::encode_ibm_track(
+                    preset,
                     cyl,
                     head,
                     9,
@@ -281,7 +299,7 @@ impl MfmTrackEncoder {
                     32,
                     22,
                     54,
-                    0xE5,
+                    fs_mode,
                     50_000,
                     &mut buffer.bits,
                     &mut last_bit,
@@ -290,6 +308,7 @@ impl MfmTrackEncoder {
             PresetProfile::Atari35Dd => {
                 // Atari ST 720K: 9 sectors, 512B, Gap1=32, Gap2=22, Gap3=54, 250 kbps @ 300 RPM
                 Self::encode_ibm_track(
+                    preset,
                     cyl,
                     head,
                     9,
@@ -297,7 +316,7 @@ impl MfmTrackEncoder {
                     32,
                     22,
                     54,
-                    0xE5,
+                    fs_mode,
                     50_000,
                     &mut buffer.bits,
                     &mut last_bit,
@@ -306,6 +325,7 @@ impl MfmTrackEncoder {
             PresetProfile::Cpc30Data => {
                 // Amstrad CPC 3.0" Data: 9 sectors (0xC1..0xC9), 512B, Gap1=32, Gap2=22, Gap3=54, 250 kbps @ 300 RPM
                 Self::encode_ibm_track(
+                    preset,
                     cyl,
                     head,
                     9,
@@ -313,7 +333,7 @@ impl MfmTrackEncoder {
                     32,
                     22,
                     54,
-                    0xE5,
+                    fs_mode,
                     50_000,
                     &mut buffer.bits,
                     &mut last_bit,
@@ -325,6 +345,7 @@ impl MfmTrackEncoder {
     /// Internal generator for standard IBM PC / ISO track format (WD177x / uPD765 compliant)
     #[allow(clippy::too_many_arguments)]
     fn encode_ibm_track(
+        preset: PresetProfile,
         cyl: u8,
         head: u8,
         sector_count: u8,
@@ -332,7 +353,7 @@ impl MfmTrackEncoder {
         gap1_len: usize,
         gap2_len: usize,
         gap3_len: usize,
-        fill_byte: u8,
+        fs_mode: FsInitMode,
         nominal_rev_bits: usize,
         bits: &mut Vec<bool>,
         last_bit: &mut bool,
@@ -340,9 +361,14 @@ impl MfmTrackEncoder {
         // 1. Post-Index Gap 1 (Lead-in Gap)
         Self::push_mfm_repeat(bits, 0x4E, gap1_len, last_bit);
 
+        let mut payload = [0u8; 512];
+
         // 2. Sectors
         for sec_idx in 0..sector_count {
             let sec_id = first_sector_id + sec_idx;
+
+            // Generate sector payload (Blank 0xE5 or OS structure)
+            generate_sector_payload(preset, cyl, head, sec_id, fs_mode, &mut payload);
 
             // --- ID Field ---
             // Sync: 12 bytes 0x00
@@ -385,9 +411,9 @@ impl MfmTrackEncoder {
             data_crc = crc16_update(data_crc, 0xFB);
 
             Self::push_mfm_byte(bits, 0xFB, last_bit);
-            for _ in 0..512 {
-                data_crc = crc16_update(data_crc, fill_byte);
-                Self::push_mfm_byte(bits, fill_byte, last_bit);
+            for &byte in &payload {
+                data_crc = crc16_update(data_crc, byte);
+                Self::push_mfm_byte(bits, byte, last_bit);
             }
             Self::push_mfm_byte(bits, (data_crc >> 8) as u8, last_bit);
             Self::push_mfm_byte(bits, (data_crc & 0xFF) as u8, last_bit);
@@ -408,6 +434,7 @@ impl MfmTrackEncoder {
     fn encode_amiga_track(
         cyl: u8,
         head: u8,
+        fs_mode: FsInitMode,
         bits: &mut Vec<bool>,
         last_bit: &mut bool,
     ) {
@@ -415,8 +442,18 @@ impl MfmTrackEncoder {
         Self::push_u32_bits(bits, 0xAAAA_AAAA);
 
         let track_num = (cyl << 1) | (head & 1);
+        let mut payload = [0u8; 512];
 
         for sec_id in 0..11u8 {
+            generate_sector_payload(
+                PresetProfile::Amiga35Dd,
+                cyl,
+                head,
+                sec_id,
+                fs_mode,
+                &mut payload,
+            );
+
             // 1. Sync: 2 words 0x44894489
             Self::push_amiga_sync_word(bits, last_bit);
             Self::push_amiga_sync_word(bits, last_bit);
@@ -459,10 +496,22 @@ impl MfmTrackEncoder {
             Self::push_u32_bits(bits, even_hdr_chk);
             Self::push_u32_bits(bits, odd_hdr_chk);
 
-            // 5. Data Field: 512 bytes = 128 longwords of 0xE5E5E5E5
-            let mut data_lws = [0xE5E5E5E5u32; 128];
-            // Optionally tag longword 0 with sector identifier
-            data_lws[0] = 0xE5E50000 | (sec_id as u32);
+            // 5. Data Field: 512 bytes = 128 longwords
+            let mut data_lws = [0u32; 128];
+            for (i, lw) in data_lws.iter_mut().enumerate() {
+                let offset = i * 4;
+                *lw = u32::from_be_bytes([
+                    payload[offset],
+                    payload[offset + 1],
+                    payload[offset + 2],
+                    payload[offset + 3],
+                ]);
+            }
+
+            // If Blank mode, tag longword 0 with sector identifier for backward compatibility
+            if fs_mode == FsInitMode::Blank {
+                data_lws[0] = 0xE5E50000 | (sec_id as u32);
+            }
 
             let mut even_data = [0u32; 128];
             let mut odd_data = [0u32; 128];
@@ -605,16 +654,28 @@ impl FluxSynthesizer {
         out_bytes.push(0x00);
     }
 
-    /// High-level single-pass synthesizer: transforms MFM bitstream into final Greaseweazle flux packet
+    /// High-level single-pass synthesizer with filesystem mode: transforms MFM bitstream into final Greaseweazle flux packet
+    pub fn synthesize_track_with_fs(
+        preset: PresetProfile,
+        cyl: u8,
+        head: u8,
+        fs_mode: FsInitMode,
+        buffer: &mut MfmTrackBuffer,
+    ) {
+        MfmTrackEncoder::encode_track_into_with_fs(preset, cyl, head, fs_mode, buffer);
+        Self::bits_to_flux_ticks(&buffer.bits, preset.target_data_rate(), cyl, &mut buffer.flux_ticks);
+        Self::flux_ticks_to_gw_bytes(&buffer.flux_ticks, &mut buffer.gw_flux_bytes);
+    }
+
+    /// High-level single-pass synthesizer: transforms MFM bitstream into final Greaseweazle flux packet (Blank 0xE5)
+    #[allow(dead_code)]
     pub fn synthesize_track(
         preset: PresetProfile,
         cyl: u8,
         head: u8,
         buffer: &mut MfmTrackBuffer,
     ) {
-        MfmTrackEncoder::encode_track_into(preset, cyl, head, buffer);
-        Self::bits_to_flux_ticks(&buffer.bits, preset.target_data_rate(), cyl, &mut buffer.flux_ticks);
-        Self::flux_ticks_to_gw_bytes(&buffer.flux_ticks, &mut buffer.gw_flux_bytes);
+        Self::synthesize_track_with_fs(preset, cyl, head, FsInitMode::Blank, buffer);
     }
 }
 

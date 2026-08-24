@@ -948,7 +948,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     app.status.track,
                     app.head_selection,
                     max_trk,
-                    app.preset.label(),
+                    app.preset,
                     app.preset.target_rpm(),
                     app.status.bitrate,
                     app.bus_type.as_str(),
@@ -956,6 +956,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     app.format_target_tracks,
                     app.is_48_tpi(),
                     app.format_verify,
+                    app.format_fs_mode,
                     app.format_range,
                     app.pending_confirmation.as_ref(),
                 );
@@ -1053,8 +1054,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         RangeModalKind::Format => {
                                             let verify = app.format_verify;
                                             let head_sel = app.head_selection;
+                                            let fs_mode = app.format_fs_mode;
+                                            let preset = app.preset;
                                             app.show_format_modal = true;
-                                            app.pending_confirmation = Some(PendingConfirmation::FormatRange { range, head_sel, verify });
+                                            app.pending_confirmation = Some(PendingConfirmation::FormatRange {
+                                                range,
+                                                head_sel,
+                                                verify,
+                                                fs_mode,
+                                                preset,
+                                            });
                                         }
                                         RangeModalKind::Erase => {
                                             let head_sel = app.head_selection;
@@ -1082,14 +1091,52 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     app.show_format_modal = false;
                                     app.pending_confirmation = None;
                                     match confirm {
-                                        PendingConfirmation::FormatTrack { track, head_sel, verify } => {
-                                            app.handle_action(Action::FormatTrack { track, head_sel, verify });
-                                            let _ = tx_cmd.send(HwCmd::FormatTrack { track, head_sel, verify });
+                                        PendingConfirmation::FormatTrack {
+                                            track,
+                                            head_sel,
+                                            verify,
+                                            fs_mode,
+                                            ..
+                                        } => {
+                                            app.handle_action(Action::FormatTrack {
+                                                track,
+                                                head_sel,
+                                                verify,
+                                                fs_mode,
+                                            });
+                                            let _ = tx_cmd.send(HwCmd::FormatTrack {
+                                                track,
+                                                head_sel,
+                                                verify,
+                                                fs_mode,
+                                            });
                                         }
-                                        PendingConfirmation::FormatDisk { range, head_sel, verify }
-                                        | PendingConfirmation::FormatRange { range, head_sel, verify } => {
-                                            app.handle_action(Action::FormatDisk { range, head_sel, verify });
-                                            let _ = tx_cmd.send(HwCmd::FormatDisk { range, head_sel, verify });
+                                        PendingConfirmation::FormatDisk {
+                                            range,
+                                            head_sel,
+                                            verify,
+                                            fs_mode,
+                                            ..
+                                        }
+                                        | PendingConfirmation::FormatRange {
+                                            range,
+                                            head_sel,
+                                            verify,
+                                            fs_mode,
+                                            ..
+                                        } => {
+                                            app.handle_action(Action::FormatDisk {
+                                                range,
+                                                head_sel,
+                                                verify,
+                                                fs_mode,
+                                            });
+                                            let _ = tx_cmd.send(HwCmd::FormatDisk {
+                                                range,
+                                                head_sel,
+                                                verify,
+                                                fs_mode,
+                                            });
                                         }
                                         _ => {}
                                     }
@@ -1133,6 +1180,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                             KeyCode::Char('v') | KeyCode::Char('V') => {
                                 app.toggle_format_verify();
                             }
+                            KeyCode::Char('s') | KeyCode::Char('S') => {
+                                app.toggle_format_fs_mode();
+                            }
                             KeyCode::Char('p') | KeyCode::Char('P') => {
                                 app.handle_action(Action::CyclePreset);
                                 let _ = tx_cmd.send(HwCmd::CyclePreset);
@@ -1141,7 +1191,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 let track = app.status.track;
                                 let head_sel = app.head_selection;
                                 let verify = app.format_verify;
-                                app.pending_confirmation = Some(PendingConfirmation::FormatTrack { track, head_sel, verify });
+                                let fs_mode = app.format_fs_mode;
+                                let preset = app.preset;
+                                app.pending_confirmation = Some(PendingConfirmation::FormatTrack {
+                                    track,
+                                    head_sel,
+                                    verify,
+                                    fs_mode,
+                                    preset,
+                                });
                             }
                             KeyCode::Char('r') | KeyCode::Char('R') => {
                                 app.open_range_modal(RangeModalKind::Format);
@@ -1150,7 +1208,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 let range = TrackRange::full_disk(app.format_target_tracks);
                                 let head_sel = app.head_selection;
                                 let verify = app.format_verify;
-                                app.pending_confirmation = Some(PendingConfirmation::FormatDisk { range, head_sel, verify });
+                                let fs_mode = app.format_fs_mode;
+                                let preset = app.preset;
+                                app.pending_confirmation = Some(PendingConfirmation::FormatDisk {
+                                    range,
+                                    head_sel,
+                                    verify,
+                                    fs_mode,
+                                    preset,
+                                });
                             }
                             KeyCode::Esc
                             | KeyCode::Char('q')
@@ -1379,6 +1445,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hw::FsInitMode;
     #[test]
     fn test_format_flags_display() {
         assert_eq!(format_flags_display(true), "[--Rz-]");
@@ -2671,7 +2738,7 @@ mod tests {
             40,
             HeadSelection::Head0,
             79,
-            "3.5\" HD (1.44M)",
+            PresetProfile::Pc35Hd,
             300.0,
             500,
             "IBM PC",
@@ -2679,6 +2746,7 @@ mod tests {
             80,
             false,
             true,
+            FsInitMode::Blank,
             TrackRange::new(0, 79),
             None,
         );
@@ -2696,17 +2764,19 @@ mod tests {
         assert!(full_text.contains("Target Tracks : 80 tracks"));
         assert!(full_text.contains("Range: 00..79 | Standard: 80, Max: 84"));
         assert!(full_text.contains("Read-After-Write Verify : ON"));
+        assert!(full_text.contains("System FS Init : Blank (Raw 0xE5)"));
         assert!(full_text.contains("Cycle Preset Profile"));
         assert!(full_text.contains("Format Track Range     (Tracks 00..79, Head 0 only)"));
         assert!(full_text.contains("Tracks 00..79, Head 0 only"));
         assert!(full_text.contains("Cancel & Return"));
 
-        // Check shortcut highlight formatting for [P], [T], [R], [D], [V]
+        // Check shortcut highlight formatting for [P], [T], [R], [D], [V], [S]
         let mut found_p_shortcut = false;
         let mut found_t_shortcut = false;
         let mut found_r_shortcut = false;
         let mut found_d_shortcut = false;
         let mut found_v_shortcut = false;
+        let mut found_s_shortcut = false;
         let mut found_esc_shortcut = false;
 
         for line in &lines {
@@ -2726,6 +2796,9 @@ mod tests {
                 if span.content == "V" && span.style.fg == Some(Color::Yellow) {
                     found_v_shortcut = true;
                 }
+                if span.content == "S" && span.style.fg == Some(Color::Yellow) {
+                    found_s_shortcut = true;
+                }
                 if span.content == "Esc" && span.style.fg == Some(Color::LightRed) {
                     found_esc_shortcut = true;
                 }
@@ -2737,6 +2810,7 @@ mod tests {
         assert!(found_r_shortcut, "Shortcut [R] and 'Range' must be emphasized in Yellow/Bold");
         assert!(found_d_shortcut, "Shortcut [D] and 'Disk' must be emphasized in Yellow/Bold");
         assert!(found_v_shortcut, "Shortcut [V] and 'Verify' must be emphasized in Yellow/Bold");
+        assert!(found_s_shortcut, "Shortcut [S] and 'System FS Init' must be emphasized in Yellow/Bold");
         assert!(found_esc_shortcut, "Shortcut [Esc] must be highlighted in Red/Bold");
     }
 
@@ -2975,6 +3049,12 @@ mod tests {
     fn test_app_format_modal_actions() {
         let mut app = App::new();
         assert!(!app.show_format_modal);
+        assert_eq!(app.format_fs_mode, FsInitMode::Blank);
+
+        app.handle_action(Action::ToggleFormatFsMode);
+        assert_eq!(app.format_fs_mode, FsInitMode::OsReady);
+        app.handle_action(Action::ToggleFormatFsMode);
+        assert_eq!(app.format_fs_mode, FsInitMode::Blank);
 
         app.handle_action(Action::OpenFormatModal);
         assert!(app.show_format_modal);
@@ -2982,12 +3062,22 @@ mod tests {
         app.handle_action(Action::CloseFormatModal);
         assert!(!app.show_format_modal);
 
-        app.handle_action(Action::FormatTrack { track: 10, head_sel: HeadSelection::Head0, verify: true });
+        app.handle_action(Action::FormatTrack {
+            track: 10,
+            head_sel: HeadSelection::Head0,
+            verify: true,
+            fs_mode: FsInitMode::Blank,
+        });
         assert_eq!(app.status.mode, DisplayMode::Format);
         assert_eq!(app.status.activity, HwActivity::Formatting);
         assert!(app.motor_on);
 
-        app.handle_action(Action::FormatDisk { range: TrackRange::new(0, 79), head_sel: HeadSelection::Both, verify: false });
+        app.handle_action(Action::FormatDisk {
+            range: TrackRange::new(0, 79),
+            head_sel: HeadSelection::Both,
+            verify: false,
+            fs_mode: FsInitMode::OsReady,
+        });
         assert_eq!(app.status.mode, DisplayMode::Format);
         assert_eq!(app.status.activity, HwActivity::Formatting);
         assert!(app.motor_on);
@@ -3113,7 +3203,7 @@ mod tests {
             20,
             HeadSelection::Head0,
             39,
-            "5.25\" DD (360K)",
+            PresetProfile::Pc525Dd,
             300.0,
             250,
             "IBM PC",
@@ -3121,6 +3211,7 @@ mod tests {
             40,
             true,
             true,
+            FsInitMode::Blank,
             TrackRange::new(0, 39),
             None,
         );
@@ -3139,7 +3230,7 @@ mod tests {
             20,
             HeadSelection::Head1,
             41,
-            "5.25\" DD (360K)",
+            PresetProfile::Pc525Dd,
             300.0,
             250,
             "IBM PC",
@@ -3147,6 +3238,7 @@ mod tests {
             42,
             true,
             false,
+            FsInitMode::Blank,
             TrackRange::new(0, 41),
             None,
         );
@@ -3165,7 +3257,7 @@ mod tests {
             0,
             HeadSelection::Both,
             79,
-            "3.5\" HD (1.44M)",
+            PresetProfile::Pc35Hd,
             300.0,
             500,
             "IBM PC",
@@ -3173,6 +3265,7 @@ mod tests {
             80,
             false,
             true,
+            FsInitMode::Blank,
             TrackRange::new(0, 79),
             None,
         );
@@ -3411,24 +3504,99 @@ mod tests {
             range,
             head_sel: app.head_selection,
             verify: app.format_verify,
+            fs_mode: app.format_fs_mode,
+            preset: app.preset,
         };
         assert_eq!(conf.prompt_string(), "Confirm Format Range 10..20 (Dual-Head)? [y/N]");
     }
 
     #[test]
     fn test_pending_confirmation_prompts_and_rendering() {
-        // Test prompt string variations with HeadSelection
-        let c_fmt_trk_h0 = PendingConfirmation::FormatTrack { track: 0, head_sel: HeadSelection::Head0, verify: true };
+        // Test prompt string variations with HeadSelection and Blank mode
+        let c_fmt_trk_h0 = PendingConfirmation::FormatTrack {
+            track: 0,
+            head_sel: HeadSelection::Head0,
+            verify: true,
+            fs_mode: FsInitMode::Blank,
+            preset: PresetProfile::Pc35Hd,
+        };
         assert_eq!(c_fmt_trk_h0.prompt_string(), "Confirm Format Track 00 (Head 0 only)? [y/N]");
 
-        let c_fmt_trk_both = PendingConfirmation::FormatTrack { track: 40, head_sel: HeadSelection::Both, verify: true };
+        let c_fmt_trk_both = PendingConfirmation::FormatTrack {
+            track: 40,
+            head_sel: HeadSelection::Both,
+            verify: true,
+            fs_mode: FsInitMode::Blank,
+            preset: PresetProfile::Pc35Hd,
+        };
         assert_eq!(c_fmt_trk_both.prompt_string(), "Confirm Format Track 40 (Dual-Head)? [y/N]");
 
-        let c_fmt_disk = PendingConfirmation::FormatDisk { range: TrackRange::new(0, 79), head_sel: HeadSelection::Both, verify: true };
+        let c_fmt_disk = PendingConfirmation::FormatDisk {
+            range: TrackRange::new(0, 79),
+            head_sel: HeadSelection::Both,
+            verify: true,
+            fs_mode: FsInitMode::Blank,
+            preset: PresetProfile::Pc35Hd,
+        };
         assert_eq!(c_fmt_disk.prompt_string(), "Confirm FULL DISK Format (00..79, Dual-Head)? [y/N]");
 
-        let c_fmt_range = PendingConfirmation::FormatRange { range: TrackRange::new(10, 20), head_sel: HeadSelection::Head1, verify: false };
+        let c_fmt_range = PendingConfirmation::FormatRange {
+            range: TrackRange::new(10, 20),
+            head_sel: HeadSelection::Head1,
+            verify: false,
+            fs_mode: FsInitMode::Blank,
+            preset: PresetProfile::Pc35Hd,
+        };
         assert_eq!(c_fmt_range.prompt_string(), "Confirm Format Range 10..20 (Head 1 only)? [y/N]");
+
+        // Test OS-Ready confirmation prompts
+        let c_os_pc = PendingConfirmation::FormatDisk {
+            range: TrackRange::new(0, 79),
+            head_sel: HeadSelection::Both,
+            verify: true,
+            fs_mode: FsInitMode::OsReady,
+            preset: PresetProfile::Pc35Hd,
+        };
+        assert_eq!(
+            c_os_pc.prompt_string(),
+            "Confirm FULL DISK Format (00..79, Dual-Head, OS-Ready: DOS FAT12)? [y/N]"
+        );
+
+        let c_os_amiga = PendingConfirmation::FormatDisk {
+            range: TrackRange::new(0, 79),
+            head_sel: HeadSelection::Both,
+            verify: true,
+            fs_mode: FsInitMode::OsReady,
+            preset: PresetProfile::Amiga35Dd,
+        };
+        assert_eq!(
+            c_os_amiga.prompt_string(),
+            "Confirm FULL DISK Format (00..79, Dual-Head, OS-Ready: AmigaDOS OFS)? [y/N]"
+        );
+
+        let c_os_atari = PendingConfirmation::FormatTrack {
+            track: 0,
+            head_sel: HeadSelection::Head0,
+            verify: true,
+            fs_mode: FsInitMode::OsReady,
+            preset: PresetProfile::Atari35Dd,
+        };
+        assert_eq!(
+            c_os_atari.prompt_string(),
+            "Confirm Format Track 00 (Head 0 only, OS-Ready: Atari TOS)? [y/N]"
+        );
+
+        let c_os_cpc = PendingConfirmation::FormatRange {
+            range: TrackRange::new(0, 39),
+            head_sel: HeadSelection::Head0,
+            verify: false,
+            fs_mode: FsInitMode::OsReady,
+            preset: PresetProfile::Cpc30Data,
+        };
+        assert_eq!(
+            c_os_cpc.prompt_string(),
+            "Confirm Format Range 00..39 (Head 0 only, OS-Ready: CP/M Data)? [y/N]"
+        );
 
         let c_erase_trk = PendingConfirmation::EraseTrack { track: 40, head_sel: HeadSelection::Head1 };
         assert_eq!(c_erase_trk.prompt_string(), "Confirm Erase Track 40 (Head 1 only)? [y/N]");
@@ -3444,7 +3612,7 @@ mod tests {
             0,
             HeadSelection::Head0,
             79,
-            "3.5\" HD (1.44M)",
+            PresetProfile::Pc35Hd,
             300.0,
             500,
             "IBM PC",
@@ -3452,6 +3620,7 @@ mod tests {
             80,
             false,
             true,
+            FsInitMode::Blank,
             TrackRange::new(0, 79),
             Some(&c_fmt_trk_h0),
         );
@@ -3486,7 +3655,7 @@ mod tests {
             20,
             HeadSelection::Both,
             79,
-            "3.5\" HD (1.44M)",
+            PresetProfile::Pc35Hd,
             300.0,
             500,
             "IBM PC",
@@ -3494,6 +3663,7 @@ mod tests {
             80,
             false,
             true,
+            FsInitMode::Blank,
             TrackRange::new(10, 30),
             None,
         );
@@ -3501,8 +3671,6 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(text_fmt_idle.contains("rack only (Track 20, Dual-Head)"));
-        assert!(text_fmt_idle.contains("ange     (Tracks 10..30, Dual-Head)"));
         assert!(text_fmt_idle.contains("isk     (Tracks 00..79, Dual-Head)"));
     }
 

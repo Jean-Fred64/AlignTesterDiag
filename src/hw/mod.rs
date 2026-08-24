@@ -10,8 +10,10 @@ use crate::app::DiagnosticPass;
 use crate::audio::{evaluate_alignment_audio_event, sound_worker, AudioEvent};
 
 pub mod format;
+pub mod fs;
 pub mod protocol;
 pub use format::*;
+pub use fs::*;
 pub use protocol::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -290,8 +292,8 @@ pub enum HwCmd {
     ToggleBeep,
     SetVerbose(bool),
     SetBeep(bool),
-    FormatTrack { track: u8, head_sel: HeadSelection, verify: bool },
-    FormatDisk { range: TrackRange, head_sel: HeadSelection, verify: bool },
+    FormatTrack { track: u8, head_sel: HeadSelection, verify: bool, fs_mode: FsInitMode },
+    FormatDisk { range: TrackRange, head_sel: HeadSelection, verify: bool, fs_mode: FsInitMode },
     EraseTrack { track: u8, head_sel: HeadSelection },
     EraseDisk { range: TrackRange, head_sel: HeadSelection },
     Stop,
@@ -3945,7 +3947,7 @@ pub fn handle_command(
             );
             let _ = tx_status.send(status.clone());
         }
-        HwCmd::FormatTrack { track, head_sel, verify } => {
+        HwCmd::FormatTrack { track, head_sel, verify, fs_mode } => {
             let mut track_buffer = MfmTrackBuffer::new();
             let _ = execute_format_track(
                 port,
@@ -3953,12 +3955,13 @@ pub fn handle_command(
                 track,
                 head_sel,
                 verify,
+                fs_mode,
                 rx_cmd,
                 tx_status,
                 &mut track_buffer,
             );
         }
-        HwCmd::FormatDisk { range, head_sel, verify } => {
+        HwCmd::FormatDisk { range, head_sel, verify, fs_mode } => {
             let mut track_buffer = MfmTrackBuffer::new();
             let _ = execute_format_disk(
                 port,
@@ -3966,6 +3969,7 @@ pub fn handle_command(
                 range,
                 head_sel,
                 verify,
+                fs_mode,
                 rx_cmd,
                 tx_status,
                 &mut track_buffer,
@@ -4003,6 +4007,7 @@ pub fn execute_format_track_single(
     target_track: u8,
     target_head: u8,
     verify: bool,
+    fs_mode: FsInitMode,
     _rx_cmd: &Receiver<HwCmd>,
     tx_status: &Sender<DriveStatus>,
     track_buffer: &mut MfmTrackBuffer,
@@ -4075,7 +4080,13 @@ pub fn execute_format_track_single(
     thread::sleep(Duration::from_millis(FORMAT_HEAD_SWITCH_SETTLE_MS));
 
     // 4. Synthesize Track MFM & Flux Timings
-    FluxSynthesizer::synthesize_track(status.preset, target_track, target_head, track_buffer);
+    FluxSynthesizer::synthesize_track_with_fs(
+        status.preset,
+        target_track,
+        target_head,
+        fs_mode,
+        track_buffer,
+    );
 
     let start_time = Instant::now();
     let mut verified_ok = false;
@@ -4234,6 +4245,7 @@ pub fn execute_format_track(
     target_track: u8,
     head_sel: HeadSelection,
     verify: bool,
+    fs_mode: FsInitMode,
     rx_cmd: &Receiver<HwCmd>,
     tx_status: &Sender<DriveStatus>,
     track_buffer: &mut MfmTrackBuffer,
@@ -4333,6 +4345,7 @@ pub fn execute_format_track(
             target_track,
             head,
             verify,
+            fs_mode,
             rx_cmd,
             tx_status,
             track_buffer,
@@ -4365,6 +4378,7 @@ pub fn execute_format_disk(
     range: TrackRange,
     head_sel: HeadSelection,
     verify: bool,
+    fs_mode: FsInitMode,
     rx_cmd: &Receiver<HwCmd>,
     tx_status: &Sender<DriveStatus>,
     track_buffer: &mut MfmTrackBuffer,
@@ -4494,6 +4508,7 @@ pub fn execute_format_disk(
                 cyl,
                 head,
                 verify,
+                fs_mode,
                 rx_cmd,
                 tx_status,
                 track_buffer,
