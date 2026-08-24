@@ -16,9 +16,16 @@
 - ⚡ **100% Non-Blocking Architecture (~60 Hz TUI):** Strict decoupling between the interactive Ratatui/Crossterm rendering loop, the USB hardware acquisition worker thread, and a dedicated real-time audio thread via lock-free `crossbeam-channel` queues. 64 KB extended serial block buffers eliminate micro-blocking system calls and USB CDC latency. 171 automated unit tests with strict Clippy compliance (`cargo clippy -- -D warnings`).
 - 💾 **High-Precision Low-Level Format Engine & MFM Synthesizer (`CMD_WRITE_FLUX`):**
   - **Ultra-Fast Formatter Pipeline (~35s Fast / ~70s Full Verify):** Direct index-synchronized flux emission with optional 1-revolution instant DPLL read-after-write verification per track (toggled with <kbd>V</kbd> in format modal).
+  - **OS-Ready Filesystem Initialization Mode (<kbd>S</kbd>):** Instant injection of valid boot sectors, file allocation structures, and root directories tailored to the active profile:
+    - **PC DOS FAT12:** Valid BPB standard (OEM `MSDOS5.0`), FAT1 & FAT2 tables with Media Descriptors (`0xF0` for 1.44M HD, `0xF9` for 720K DD / 1.2M 5.25" HD, `0xFD` for 360K DD), clean root directory, and `0x55AA` boot signature.
+    - **Atari ST TOS:** Standard BPB with valid 16-bit word boot sector checksum (`sum == 0x1234`).
+    - **Commodore Amiga OFS (`DOS\0`):** Valid Bootblock (Blocks 0 & 1, 32-bit circular carry checksum), RootBlock (Block 880, hash table & checksum), and BitmapBlock (Block 881, allocation map & checksum).
+    - **Amstrad CPC AMSDOS:** CP/M standard directory catalog initialized (Track 0, sectors `0xC1..0xC4` filled with `0xE5`).
+    - **Blank Mode (`Raw 0xE5`):** Low-level blank sectors filled with unformatted `0xE5` byte pattern.
+  - **Tri-State Head Selection (<kbd>H</kbd>):** Dedicated head targeting (`Both (Dual-Head)` ➔ `Head 0 only` ➔ `Head 1 only` ➔ `Both`) applied across Single Track (<kbd>T</kbd>), Custom Range (<kbd>R</kbd>), and Full Disk (<kbd>D</kbd>) operations, with dynamic pass calculation: `total_passes = range.count() * heads.len()`.
   - **Custom Track Range (`TrackRange`) & Full Disk:** Flexible format targeting via Single Track (<kbd>T</kbd>), Custom Range (<kbd>R</kbd>), or Full Disk (<kbd>D</kbd>).
-  - **Integrated Modal Navigation:** Live track stepping (<kbd>+</kbd>/<kbd>-</kbd>, <kbd>[</kbd>/<kbd>]</kbd>, <kbd>←</kbd>/<kbd>→</kbd>, or Mouse Wheel `ScrollUp`/`ScrollDown`), head toggle (<kbd>H</kbd>), and total cylinder count adjustment (<kbd>PgUp</kbd>/<kbd>PgDn</kbd> or <kbd>↑</kbd>/<kbd>↓</kbd>).
-  - **Interactive Range Editor (`RangeEditModal`):** Dual-bound modal editor with exclusive <kbd>Tab</kbd> field switching (`Start` / `End`), numeric typing (<kbd>0</kbd>–<kbd>9</kbd>), incremental adjustment (<kbd>+</kbd>/<kbd>-</kbd>, <kbd>↑</kbd>/<kbd>↓</kbd>, Mouse Wheel), and strict validation (`start <= end < max_tracks`).
+  - **Integrated Modal Navigation & Preset Cycling:** Live track stepping (<kbd>+</kbd>/<kbd>-</kbd>, <kbd>[</kbd>/<kbd>]</kbd>, <kbd>←</kbd>/<kbd>→</kbd>, or Mouse Wheel `ScrollUp`/`ScrollDown`), head cycle (<kbd>H</kbd>), preset cycle (<kbd>P</kbd>) with automatic geometry clamping, and total cylinder count adjustment (<kbd>PgUp</kbd>/<kbd>PgDn</kbd> or <kbd>↑</kbd>/<kbd>↓</kbd>).
+  - **Interactive Range Editor (`RangeEditModal`):** Dual-bound modal editor with exclusive <kbd>Tab</kbd> field switching (`Start` / `End`), numeric typing (<kbd>0</kbd>–<kbd>9</kbd>), incremental adjustment (<kbd>+</kbd>/<kbd>-</kbd>, <kbd>↑</kbd>/<kbd>↓</kbd>, Mouse Wheel), head toggle (<kbd>H</kbd>), and strict validation (`start <= end < max_tracks`).
   - **Explicit Confirmation Safety Lock (`[y/N]`):** All destructive operations require explicit user confirmation (<kbd>Y</kbd> to confirm, <kbd>N</kbd> / <kbd>Enter</kbd> / <kbd>Esc</kbd> to cancel, with `N` as default).
   - **72 MHz Pulse Timing:** Translates synthesized MFM bitstreams into cycle-accurate 72 MHz interval ticks ($2T, 3T, 4T$).
   - **Write Pre-Compensation:** Applies $\pm 125\text{ ns}$ ($\approx 9$ ticks @ 72 MHz) timing shifts on inner tracks ($> 40$) to counteract magnetic peak shift.
@@ -28,7 +35,7 @@
   - **Write-Protect Guard:** Hardware Pin 28 (`WPROT`) validation before any carriage movement or flux emission.
 - 🧲 **Hardware Low-Level DC Erase Engine (`CMD_ERASE_FLUX`):**
   - **Continuous Magnetic Neutralization:** Asserts raw continuous write gate without flux transitions for $\ge 1.1$ revolutions after index pulse to permanently wipe and degauss magnetic tracks.
-  - **Interactive Erase Modal (<kbd>E</kbd>):** Single-track (<kbd>T</kbd>), custom track range (<kbd>R</kbd>), or full-disk dual-head (<kbd>D</kbd>) DC erasure with interactive track count bounds (40/42 for 48 TPI, 80/84 for 96/135 TPI).
+  - **Interactive Erase Modal (<kbd>E</kbd>):** Single-track (<kbd>T</kbd>), custom track range (<kbd>R</kbd>), or full-disk (<kbd>D</kbd>) DC erasure with tri-state head targeting (<kbd>H</kbd>), preset cycling (<kbd>P</kbd>), and interactive track count bounds (40/42 for 48 TPI, 80/84 for 96/135 TPI).
   - **Integrated Navigation & Range Editing:** Track adjustment (<kbd>+</kbd>/<kbd>-</kbd>, <kbd>[</kbd>/<kbd>]</kbd>, arrows, mouse wheel), head toggle (<kbd>H</kbd>), and custom range editor (<kbd>R</kbd>).
   - **Explicit Confirmation Safety Lock (`[y/N]`):** Prompts for explicit confirmation before activating the erase gate (<kbd>Y</kbd> to proceed, <kbd>N</kbd> / <kbd>Enter</kbd> / <kbd>Esc</kbd> to cancel).
   - **Hardware Write-Protect Safety:** Proactively queries Pin 28 before seeking or activating write gate.
@@ -38,7 +45,7 @@
   - **Amstrad CPC (µPD765 / 3"):** Formats DATA (`0xC1..0xC9`), SYSTEM (`0x41..0x49`) et CPM.
 - 🎯 **Real-Time Mechanical Alignment Radar:** Continuous on-track vs. off-track sector validation with live percentage gauge calculation, detecting misaligned head carriages, tracking errors, and invalid track IDs.
 - 🔊 **Dynamic Pitch Acoustic Variometer:** Auditory feedback inspired by glider variometers. Continuously modulates multi-tier audio frequency (**1500 Hz – 2200 Hz** for nominal alignment $\ge 95\%$, **600 Hz – 1400 Hz** for marginal tracking $70\text{--}94\%$, **250 Hz – 500 Hz** continuous tone for severe misalignment $< 70\%$), with instantaneous **180 Hz pulsed warning buzz** on cross-track mismatch and **150 Hz hum** on zero decoded sectors.
-- ⏱️ **72 MHz Spindle Tachometer & Live RPM Jitter Gauge:** Sub-microsecond revolution interval timing extracted directly from hardware index pulses. Computes instant RPM, 10-revolution rolling average, peak-to-peak jitter ($\Delta\text{RPM}$, $\pm\Delta\%$), and displays a 21-character visual centering gauge.
+- ⏱️ **72 MHz Spindle Tachometer & Live RPM Jitter Gauge:** Sub-microsecond revolution interval timing extracted directly from hardware index pulses. Computes instant RPM, 10-revolution rolling average, peak-to-peak jitter ($\Delta\text{RPM}$, $\pm\Delta\%$), and displays a 21-character visual centering gauge. Nominal target speeds: **360.0 RPM** for 5.25" HD formats (`Pc525Hd`, `Pc525DdOnHd`) and **300.0 RPM** for 3.5" and 5.25" DD native formats.
 - 🔄 **Dual-Head ("Both" Mode) Acquisition:** Alternating Head 0 & Head 1 acquisition with automated cross-track divergence detection ($T_{\text{H0}} \ne T_{\text{H1}}$) and consolidated dual-head health scoring.
 - 🔌 **Universal Drive Support (26-Pin FFC & 34-Pin Shugart/PC):** Motor-gated seek with 15 ms electronic wake-up delay (`STEPPER_WAKEUP_DELAY_MS`) to eliminate stepper motor driver lockups on slim laptop mechanisms (e.g. TEAC FD-05HG). Dynamic drive unit selection (`A:`/`B:` for IBM PC, `DS0`..`DS3` for Shugart).
 - 📊 **Standard & Verbose Live Stream Views:** Color-coded segmented ribbon blocks representing sector-by-sector IDAM/DAM integrity, Gap0 timing in microseconds, phosphor decay animation, and interleave ratio.
@@ -118,7 +125,7 @@ cargo run --release -- --shugart --drive 0
 | <kbd>A</kbd> | **Analyze** | Start continuous real-time track alignment analysis |
 | <kbd>D</kbd> | **Read Data** | Read and test sector CRC integrity across the cylinder |
 | <kbd>E</kbd> | **Erase Modal** | Open Low-Level Hardware DC Erase Modal (`[T]` Track, `[R]` Range, `[D]` Disk, `[Esc]` Cancel) |
-| <kbd>F</kbd> | **Format Modal** | Open Low-Level Track & Disk Formatter Modal (`[T]` Track, `[R]` Range, `[D]` Disk, `[V]` Verify, `[Esc]` Cancel) |
+| <kbd>F</kbd> | **Format Modal** | Open Low-Level Track & Disk Formatter Modal (`[T]` Track, `[R]` Range, `[D]` Disk, `[S]` FS Mode, `[V]` Verify, `[Esc]` Cancel) |
 | <kbd>L</kbd> | **Live RPM** | Live RPM tachometer & jitter stability test |
 | <kbd>P</kbd> | **Preset (Hardware & Format)** | Cycle unified hardware & format presets (`Pc35Hd` ➔ `Pc35Dd` ➔ `Pc525Hd` ➔ `Pc525DdOnHd` ➔ `Pc525Dd` ➔ `Amiga35Dd` ➔ `Atari35Dd` ➔ `Cpc30Data`), atomically configuring bus, stepping rate, DPLL clock & nominal bitrate |
 | <kbd>S</kbd> | **Toggle Step Rate** | Toggle Single (1:1) / Double (2:1) step mode (48/96 TPI, for reading 40-track media on 80-track drives) |
@@ -142,17 +149,20 @@ cargo run --release -- --shugart --drive 0
 
 | Context | Controls | Function |
 |:---|:---|:---|
-| **Format / Erase Modals** | <kbd>T</kbd> | Execute operation on **Current Track** only (Head 0 or Head 1) |
+| **Format / Erase Modals** | <kbd>T</kbd> | Execute operation on **Current Track** only (Head 0, Head 1, or Both) |
 | | <kbd>R</kbd> | Open **Custom Track Range Editor** (`RangeEditModal`) |
-| | <kbd>D</kbd> | Execute operation on **Entire Disk** (Dual-Head, 00..max) |
-| | <kbd>H</kbd> | Switch physical target head (`Head 0` $\leftrightarrow$ `Head 1`) |
+| | <kbd>D</kbd> | Execute operation on **Entire Disk** (Tracks 00..max, Head 0, Head 1, or Both) |
+| | <kbd>H</kbd> | Cycle physical target head (`Both` ➔ `Head 0` ➔ `Head 1` ➔ `Both`) |
+| | <kbd>P</kbd> | Cycle active **Preset Profile** (auto-adjusts geometry, bitrate, RPM target, and clamps tracks) |
+| | <kbd>S</kbd> *(Format only)* | Toggle **System FS Init** (`Blank (Raw 0xE5)` $\leftrightarrow$ `OS-Ready (Boot & Root FS)`) |
+| | <kbd>V</kbd> *(Format only)* | Toggle **Read-After-Write Verify** (`ON` ~70s / `OFF` ~35s) |
 | | <kbd>+</kbd> / <kbd>-</kbd>, <kbd>[</kbd> / <kbd>]</kbd>, <kbd>←</kbd> / <kbd>→</kbd>, `Scroll` | Step target cylinder for single-track operations |
 | | <kbd>PgUp</kbd> / <kbd>PgDn</kbd>, <kbd>↑</kbd> / <kbd>↓</kbd> | Adjust total disk tracks (40/42 for 48 TPI, 80/84 for 96/135 TPI) |
-| | <kbd>V</kbd> *(Format only)* | Toggle **Read-After-Write Verify** (`ON` ~70s / `OFF` ~35s) |
 | | <kbd>Esc</kbd> / <kbd>Q</kbd> / <kbd>X</kbd> | Close modal and cancel |
 | **Range Editor (`RangeEditModal`)** | <kbd>Tab</kbd> | Switch active input field (`Start Track` $\leftrightarrow$ `End Track`) |
 | | <kbd>0</kbd>–<kbd>9</kbd> | Type track number directly |
 | | <kbd>+</kbd> / <kbd>-</kbd>, <kbd>↑</kbd> / <kbd>↓</kbd>, <kbd>←</kbd> / <kbd>→</kbd>, `Scroll` | Increment / decrement active bound |
+| | <kbd>H</kbd> | Cycle target head (`Both` ➔ `Head 0` ➔ `Head 1` ➔ `Both`, dynamic passes calculation) |
 | | <kbd>Backspace</kbd> | Clear / backspace active field digits |
 | | <kbd>Enter</kbd> | Validate track range and arm execution |
 | | <kbd>Esc</kbd> | Cancel range edit and return to parent modal |
@@ -219,6 +229,7 @@ AlignTesterDiag/
 │   └── hw/
 │       ├── mod.rs             # Greaseweazle USB communication, DPLL, MFM decoding, hardware timings
 │       ├── format.rs          # Low-level MFM track synthesis, CRC-16 table, pulse timing & format engine
+│       ├── fs.rs              # OS-Ready filesystem payload synthesizer (DOS FAT12, Atari TOS, Amiga OFS, CP/M)
 │       └── protocol.rs        # Greaseweazle binary protocol opcodes, ACK codes, packet builders
 └── export/
     ├── README.md              # Distribution showcase & quick reference

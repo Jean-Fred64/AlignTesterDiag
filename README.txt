@@ -18,9 +18,14 @@ AlignTesterDiag is a high-performance, non-blocking, modern terminal user
 interface (TUI) diagnostics and calibration platform for floppy disk drives.
 Interfacing directly with a Greaseweazle USB flux controller, it provides:
 - Real-time MFM sector decoding via software DPLL.
+- High-precision low-level format engine (CMD_WRITE_FLUX) with OS-Ready filesystem
+  initialization (DOS FAT12, Atari ST TOS, AmigaDOS OFS, CP/M AMSDOS).
+- Hardware DC Erase engine (CMD_ERASE_FLUX) for bulk magnetic track neutralization.
+- Tri-state head targeting (Both / Head 0 / Head 1) across format and erase modes.
 - Live mechanical alignment percentage radar.
 - Glider-inspired dynamic acoustic variometer with multi-tier pitch modulation.
-- Sub-microsecond 72 MHz spindle tachometer with RPM jitter & centering gauge.
+- Sub-microsecond 72 MHz spindle tachometer with RPM jitter & centering gauge
+  (360.0 RPM nominal for 5.25" HD formats, 300.0 RPM for 3.5" & 5.25" DD).
 - Multi-system retro support: IBM PC, Amiga DOS, Atari ST, Amstrad CPC.
 - Universal bus mode support: IBM PC (Drive A:/B:) & Shugart (DS0..DS3).
 
@@ -95,10 +100,11 @@ Key / Shortcut       Action & Technical Description
 A                    Analyze          : Continuous real-time track alignment test
 D                    Read Data        : Read and verify sector CCITT CRC-16 integrity
 E                    Erase Modal      : Low-Level DC Erase ([T] Track, [R] Range,
-                                         [D] Disk, [Esc] Cancel) with [y/N] safety lock
+                                         [D] Disk, [P] Preset, [H] Head, [Esc] Cancel)
 F                    Format Modal     : Low-Level Track & Disk Format with dynamic
-                                         track count (+/- or arrows), Verify toggle [V],
-                                         [T] Track, [R] Range, [D] Disk, [y/N] safety lock
+                                         track count (+/- or arrows), [S] FS Mode,
+                                         [P] Preset, [H] Head, [V] Verify, [T] Track,
+                                         [R] Range, [D] Disk, [y/N] safety lock
 L                    Live RPM         : 72 MHz spindle tachometer & jitter stability
 P                    Preset Profile   : Cycle hardware & format presets (PC, Amiga, Atari, CPC)
 S                    Step Rate        : Toggle Single (1:1) / Double (2:1) step mode (48/96 TPI)
@@ -123,11 +129,20 @@ Backspace            Panic Reset      : Emergency instant motor cut & bus re-ini
 Q / X / Ctrl+C       Exit             : Clean shutdown (cuts motor & exits raw mode)
 
 MODAL & RANGE NAVIGATION:
-- In Format/Erase: [T] Single Track, [R] Custom Range, [D] Full Disk, [H] Head Toggle,
-                   [PgUp]/[PgDn] Adjust Total Tracks, [V] Toggle Verify (Format only).
-- In Range Editor: [Tab] Switch Field (Start/End), [0-9] Direct Digit Input,
-                   [+/-] or [Up/Down] Inc/Dec, [Bksp] Delete, [Enter] Validate, [Esc] Back.
-- In Confirmation: [Y] Confirm & Execute, [N] / [Enter] / [Esc] Abort (Safe default).
+- In Format Modal:   [S] Toggle System FS Init (Blank / OS-Ready),
+                     [P] Cycle Preset Profile (auto-clamps geometry & tracks),
+                     [H] Cycle Target Head (Both -> Head 0 -> Head 1 -> Both),
+                     [V] Toggle Read-After-Write Verify (ON ~70s / OFF ~35s),
+                     [T] Format Track, [R] Format Range, [D] Format Entire Disk,
+                     [PgUp]/[PgDn] Adjust Total Tracks, [+/-] Step Cylinder, [Esc] Back.
+- In Erase Modal:    [P] Cycle Preset Profile, [H] Cycle Target Head (Both -> Head 0 -> Head 1),
+                     [T] Erase Track, [R] Erase Range, [D] Erase Entire Disk,
+                     [PgUp]/[PgDn] Adjust Total Tracks, [+/-] Step Cylinder, [Esc] Back.
+- In Range Editor:   [Tab] Switch Field (Start/End), [0-9] Direct Digit Input,
+                     [+/-] or [Up/Down] Inc/Dec, [H] Cycle Target Head,
+                     (total_passes = range_count * heads_count),
+                     [Bksp] Delete, [Enter] Validate & Arm, [Esc] Cancel & Back.
+- In Confirmation:   [Y] Confirm & Execute, [N] / [Enter] / [Esc] Abort (Safe default).
 
 --------------------------------------------------------------------------------
 5. ACOUSTIC VARIOMETER TIER MAPPING
