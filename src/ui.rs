@@ -1178,9 +1178,21 @@ pub fn build_format_modal_lines(
         Line::from(vec![
             Span::styled("  Target Drive  : ", gray),
             Span::styled(format!("Unit {} ({})", unit, bus_name), cyan),
-            Span::styled(" | Preset: ", gray),
+            Span::styled("  |  [", gray),
+            Span::styled("H", accent_bold),
+            Span::styled("] Head: ", white),
+            Span::styled(head_sel.label(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" (Bitrate: {} kbps)", bitrate), cyan),
+        ]),
+        Line::from(vec![
+            Span::styled("  Target Preset : ", gray),
             Span::styled(
-                format!("[{} (RPM Cible: {:.0} RPM | {} kbps)]", preset_label, target_rpm, bitrate),
+                format!("[{}]", preset_label),
+                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  |  Target: ", gray),
+            Span::styled(
+                format!("{:.0} RPM", target_rpm),
                 Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
             ),
         ]),
@@ -1189,11 +1201,6 @@ pub fn build_format_modal_lines(
             Span::styled("+/- or [ ]", accent_bold),
             Span::styled("] Target Track  : ", white),
             Span::styled(format!("Track {:02}", track), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
-            Span::styled("  |  [", gray),
-            Span::styled("H", accent_bold),
-            Span::styled("] Head : ", white),
-            Span::styled(head_sel.label(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  (Bitrate: {} kbps)", bitrate), cyan),
         ]),
         Line::from(vec![
             Span::styled("  [", gray),
@@ -1282,7 +1289,11 @@ pub fn build_format_modal_lines(
     lines.push(Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", gray)));
     lines.push(Line::from(vec![
         Span::styled("  Hardware Protection: ", gray),
-        Span::styled("Write-Protect pin 28 is checked before writing. Read-after-write auto-verifies CRC.", Style::default().fg(Color::LightCyan)),
+        Span::styled("Write-Protect pin 28 checked before writing.", Style::default().fg(Color::LightCyan)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Verify             : ", gray),
+        Span::styled("Read-after-write CRC check enabled.", Style::default().fg(Color::LightCyan)),
     ]));
 
     lines
@@ -1307,8 +1318,8 @@ pub fn render_format_modal(
     range: TrackRange,
     pending_confirm: Option<&PendingConfirmation>,
 ) {
-    let modal_width = (area.width.saturating_sub(2)).clamp(84, 88).min(area.width);
-    let modal_height = (area.height.saturating_sub(2)).clamp(24, 26).min(area.height);
+    let modal_width = (area.width.saturating_sub(2)).clamp(82, 88).min(area.width);
+    let modal_height = (area.height.saturating_sub(2)).clamp(25, 27).min(area.height);
     let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(x, y, modal_width, modal_height);
@@ -1368,75 +1379,81 @@ pub fn build_erase_modal_lines(
 
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("Target Preset : ", gray),
+            Span::styled("  Target Preset : ", gray),
             Span::styled(
-                format!("[{} (RPM Cible: {:.0} RPM | {} kbps)]", preset_label, target_rpm, bitrate),
+                format!("[{}]", preset_label),
+                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  |  Target: ", gray),
+            Span::styled(
+                format!("{:.0} RPM", target_rpm),
                 Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
-            Span::styled("[", gray),
+            Span::styled("  [", gray),
             Span::styled("+/- or [ ]", accent_bold),
             Span::styled("] Target Track  : ", white),
             Span::styled(format!("Track {:02}", track), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
             Span::styled("  |  [", gray),
             Span::styled("H", accent_bold),
-            Span::styled("] Head : ", white),
+            Span::styled("] Head: ", white),
             Span::styled(head_sel.label(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" (Bitrate: {} kbps)", bitrate), cyan),
         ]),
         Line::from(vec![
-            Span::styled("[", gray),
+            Span::styled("  [", gray),
             Span::styled("PgUp/PgDn", accent_bold),
             Span::styled("] Target Tracks : ", white),
             Span::styled(format!("{} tracks", target_tracks), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
             Span::styled(format!(" (Range: 00..{:02} | Standard: {}, Max: {})", last_track_idx, standard_tracks, max_tracks_allowed), cyan),
         ]),
-        Line::from(Span::styled("────────────────────────────────────────────────────────────────────────────", gray)),
+        Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", gray)),
         Line::from(vec![
-            Span::styled("⚠️  WARNING: This will permanently wipe all magnetic flux on target!", red_bold),
+            Span::styled("  ⚠️  WARNING: This will permanently wipe all magnetic flux on target!", red_bold),
         ]),
     ];
 
     if let Some(confirm) = pending_confirm {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("────────────────────────────────────────────────────────────────────────────", Style::default().fg(Color::Yellow))));
+        lines.push(Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", Style::default().fg(Color::Yellow))));
         lines.push(Line::from(vec![
-            Span::styled("⚠️  ", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),
+            Span::styled("  ⚠️  ", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),
             Span::styled(confirm.prompt_string(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("   Press ", gray),
+            Span::styled("     Press ", gray),
             Span::styled("Y", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
             Span::styled(" to confirm & execute, or ", gray),
             Span::styled("N / Enter / Esc", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),
             Span::styled(" to cancel", gray),
         ]));
-        lines.push(Line::from(Span::styled("────────────────────────────────────────────────────────────────────────────", Style::default().fg(Color::Yellow))));
+        lines.push(Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", Style::default().fg(Color::Yellow))));
     } else {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("[", gray),
+            Span::styled("  [", gray),
             Span::styled("P", accent_bold),
             Span::styled("] Cycle ", white),
             Span::styled("P", accent_bold),
             Span::styled("reset Profile", white),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("[", gray),
+            Span::styled("  [", gray),
             Span::styled("T", accent_bold),
             Span::styled("] Erase Current ", white),
             Span::styled("T", accent_bold),
             Span::styled(format!("rack only  (Track {:02}, {})", track, head_sel.conf_label()), white),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("[", gray),
+            Span::styled("  [", gray),
             Span::styled("R", accent_bold),
             Span::styled("] Erase Track ", white),
             Span::styled("R", accent_bold),
             Span::styled(format!("ange     (Tracks {:02}..{:02}, {})", range.start, range.end, head_sel.conf_label()), white),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("[", gray),
+            Span::styled("  [", gray),
             Span::styled("D", accent_bold),
             Span::styled("] Erase Entire ", white),
             Span::styled("D", accent_bold),
@@ -1444,11 +1461,18 @@ pub fn build_erase_modal_lines(
         ]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("[", gray),
+            Span::styled("  [", gray),
             Span::styled("Esc", red_bold),
             Span::styled("] Cancel & Return", white),
         ]));
     }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", gray)));
+    lines.push(Line::from(vec![
+        Span::styled("  Hardware Protection: ", gray),
+        Span::styled("Write-Protect pin 28 checked before erasing.", Style::default().fg(Color::LightCyan)),
+    ]));
 
     lines
 }
@@ -1468,8 +1492,8 @@ pub fn render_erase_modal(
     range: TrackRange,
     pending_confirm: Option<&PendingConfirmation>,
 ) {
-    let modal_width = (area.width.saturating_sub(2)).clamp(78, 84).min(area.width);
-    let modal_height = (area.height.saturating_sub(2)).clamp(16, 20).min(area.height);
+    let modal_width = (area.width.saturating_sub(2)).clamp(82, 88).min(area.width);
+    let modal_height = (area.height.saturating_sub(2)).clamp(18, 22).min(area.height);
     let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(x, y, modal_width, modal_height);

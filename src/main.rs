@@ -2685,8 +2685,9 @@ mod tests {
 
         // Must contain key English instructions
         assert!(full_text.contains("LOW-LEVEL MFM FORMATTING"));
-        assert!(full_text.contains("Preset: [3.5\" HD (1.44M) (RPM Cible: 300 RPM | 500 kbps)]"));
-        assert!(full_text.contains("Head : Head 0"));
+        assert!(full_text.contains("Target Preset : [3.5\" HD (1.44M)]"));
+        assert!(full_text.contains("Target: 300 RPM"));
+        assert!(full_text.contains("Head: Head 0"));
         assert!(full_text.contains("Target Tracks : 80 tracks"));
         assert!(full_text.contains("Range: 00..79 | Standard: 80, Max: 84"));
         assert!(full_text.contains("Read-After-Write Verify : ON"));
@@ -2753,8 +2754,9 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
 
-        assert!(full_text.contains("Target Preset : [3.5\" HD (1.44M) (RPM Cible: 300 RPM | 500 kbps)]"));
-        assert!(full_text.contains("Head : Head 0"));
+        assert!(full_text.contains("Target Preset : [3.5\" HD (1.44M)]"));
+        assert!(full_text.contains("Target: 300 RPM"));
+        assert!(full_text.contains("Head: Head 0"));
         assert!(full_text.contains("Target Tracks : 80 tracks"));
         assert!(full_text.contains("WARNING: This will permanently wipe all magnetic flux"));
         assert!(full_text.contains("Cycle Preset Profile"));
@@ -3125,7 +3127,7 @@ mod tests {
         assert!(text_48.contains("Range: 00..39 | Standard: 40, Max: 42"));
         assert!(text_48.contains("Tracks 00..39, Head 0 only"));
         assert!(text_48.contains("Target Track  : Track 20"));
-        assert!(text_48.contains("Head : Head 0"));
+        assert!(text_48.contains("Head: Head 0"));
 
         // Overtracked 48 TPI (42 tracks)
         let lines_48_over = build_format_modal_lines(
@@ -3151,7 +3153,7 @@ mod tests {
         assert!(text_48_over.contains("Range: 00..41 | Standard: 40, Max: 42"));
         assert!(text_48_over.contains("Tracks 00..41, Head 1 only"));
         assert!(text_48_over.contains("Target Track  : Track 20"));
-        assert!(text_48_over.contains("Head : Head 1"));
+        assert!(text_48_over.contains("Head: Head 1"));
 
         // 80 TPI modal line test
         let lines_80 = build_format_modal_lines(
@@ -3177,7 +3179,7 @@ mod tests {
         assert!(text_80.contains("Range: 00..79 | Standard: 80, Max: 84"));
         assert!(text_80.contains("Tracks 00..79, Dual-Head"));
         assert!(text_80.contains("Target Track  : Track 00"));
-        assert!(text_80.contains("Head : Both"));
+        assert!(text_80.contains("Head: Both"));
     }
 
     #[test]
@@ -3198,7 +3200,7 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
         assert!(text.contains("Target Track  : Track 35"));
-        assert!(text.contains("Head : Head 1"));
+        assert!(text.contains("Head: Head 1"));
         assert!(text.contains("Target Tracks : 80 tracks"));
         assert!(text.contains("Erase Current Track only  (Track 35, Head 1 only)"));
         assert!(text.contains("Erase Track Range     (Tracks 10..20, Head 1 only)"));
