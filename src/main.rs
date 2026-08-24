@@ -982,6 +982,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     f,
                     f.size(),
                     kind,
+                    app.head_selection,
                     &app.range_input_start,
                     &app.range_input_end,
                     app.range_edit_field,
@@ -1034,6 +1035,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                             | KeyCode::Char('-')
                             | KeyCode::Char('_') => {
                                 app.decrement_active_range_field();
+                            }
+                            KeyCode::Char('h') | KeyCode::Char('H') => {
+                                app.toggle_head();
+                                let _ = tx_cmd.send(HwCmd::SetHeadSelection(app.head_selection));
                             }
                             KeyCode::Char(c) if c.is_ascii_digit() => {
                                 app.range_input_push_digit(c);
@@ -3317,6 +3322,97 @@ mod tests {
         app.close_range_modal(true);
         assert_eq!(app.show_range_modal, None);
         assert!(app.show_erase_modal);
+    }
+
+    #[test]
+    fn test_range_edit_modal_lines_and_head_selection() {
+        // Test Dual-Head summary line
+        let lines_both = build_range_edit_modal_lines(
+            HeadSelection::Both,
+            "0",
+            "79",
+            RangeField::Start,
+            80,
+            None,
+        );
+        let text_both: String = lines_both
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text_both.contains("Total: 80 tracks (Tracks 00..79, Dual-Head = 160 passes)"));
+        assert!(text_both.contains("[Tab] Switch Field   [+/- or ↑/↓] Inc/Dec   [0-9] Edit   [Bksp] Clear"));
+        assert!(text_both.contains("[H] Toggle Head      [Enter] Validate & Start     [Esc] Cancel & Back"));
+
+        // Test Head 0 only summary line
+        let lines_h0 = build_range_edit_modal_lines(
+            HeadSelection::Head0,
+            "10",
+            "20",
+            RangeField::End,
+            80,
+            None,
+        );
+        let text_h0: String = lines_h0
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text_h0.contains("Total: 11 tracks (Tracks 10..20, Head 0 only = 11 passes)"));
+
+        // Test Head 1 only summary line
+        let lines_h1 = build_range_edit_modal_lines(
+            HeadSelection::Head1,
+            "5",
+            "15",
+            RangeField::Start,
+            80,
+            None,
+        );
+        let text_h1: String = lines_h1
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text_h1.contains("Total: 11 tracks (Tracks 05..15, Head 1 only = 11 passes)"));
+
+        // Test error display
+        let lines_err = build_range_edit_modal_lines(
+            HeadSelection::Both,
+            "50",
+            "20",
+            RangeField::Start,
+            80,
+            Some("Start track (50) cannot exceed End track (20)"),
+        );
+        let text_err: String = lines_err
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text_err.contains("⚠️  Start track (50) cannot exceed End track (20)"));
+
+        // Test head cycling integration in Range Modal
+        let mut app = App::with_full_preset_config(0, BusType::IbmPc, StepMode::Single, PresetProfile::Pc35Hd);
+        app.open_range_modal(RangeModalKind::Format);
+        assert_eq!(app.head_selection, HeadSelection::Head0);
+
+        // Cycle head in modal: Head 0 -> Head 1 -> Both -> Head 0
+        app.toggle_head();
+        assert_eq!(app.head_selection, HeadSelection::Head1);
+
+        app.toggle_head();
+        assert_eq!(app.head_selection, HeadSelection::Both);
+
+        app.range_input_start = "10".to_string();
+        app.range_input_end = "20".to_string();
+        let (range, kind) = app.validate_and_apply_range().unwrap();
+        assert_eq!(range, TrackRange::new(10, 20));
+        assert_eq!(kind, RangeModalKind::Format);
+
+        // Confirm created confirmation receives the HeadSelection::Both
+        let conf = PendingConfirmation::FormatRange {
+            range,
+            head_sel: app.head_selection,
+            verify: app.format_verify,
+        };
+        assert_eq!(conf.prompt_string(), "Confirm Format Range 10..20 (Dual-Head)? [y/N]");
     }
 
     #[test]

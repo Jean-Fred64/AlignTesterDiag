@@ -1524,47 +1524,15 @@ pub fn render_erase_modal(
     f.render_widget(paragraph, modal_area);
 }
 
-/// Renders an interactive custom track range editor modal dialog
-#[allow(clippy::too_many_arguments)]
-pub fn render_range_edit_modal(
-    f: &mut Frame,
-    area: Rect,
-    kind: RangeModalKind,
+/// Helper to construct the lines for the custom track range editor modal dialog
+pub fn build_range_edit_modal_lines<'a>(
+    head_sel: HeadSelection,
     start_str: &str,
     end_str: &str,
     active_field: RangeField,
     max_tracks: u8,
     error_msg: Option<&str>,
-) {
-    let modal_width = 68.min(area.width.saturating_sub(2));
-    let modal_height = 15.min(area.height.saturating_sub(2));
-    let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
-    let modal_area = Rect::new(x, y, modal_width, modal_height);
-
-    f.render_widget(Clear, modal_area);
-
-    let (title, title_col, bg_col) = match kind {
-        RangeModalKind::Format => (
-            " 🔢 Set Custom Track Range (Format) ",
-            Color::LightGreen,
-            Color::Rgb(20, 15, 30),
-        ),
-        RangeModalKind::Erase => (
-            " 🔢 Set Custom Track Range (DC Erase) ",
-            Color::LightRed,
-            Color::Rgb(25, 15, 20),
-        ),
-    };
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-        .title(title)
-        .title_style(Style::default().fg(title_col).add_modifier(Modifier::BOLD))
-        .style(Style::default().bg(bg_col));
-
+) -> Vec<Line<'a>> {
     let accent_bold = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
     let white = Style::default().fg(Color::White);
     let gray = Style::default().fg(Color::DarkGray);
@@ -1628,10 +1596,15 @@ pub fn render_range_edit_modal(
         if let (Some(s), Some(e)) = (s_val, e_val) {
             if s <= e && e < max_tracks {
                 let count = e - s + 1;
+                let (passes_str, head_desc) = match head_sel {
+                    HeadSelection::Both => (format!("{} passes", (count as usize) * 2), "Dual-Head"),
+                    HeadSelection::Head0 => (format!("{} passes", count), "Head 0 only"),
+                    HeadSelection::Head1 => (format!("{} passes", count), "Head 1 only"),
+                };
                 lines.push(Line::from(vec![
                     Span::styled(" Total: ", gray),
                     Span::styled(format!("{} tracks", count), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!(" (Tracks {:02}..{:02}, Dual-Head = {} passes)", s, e, (count as usize) * 2), cyan),
+                    Span::styled(format!(" (Tracks {:02}..{:02}, {} = {})", s, e, head_desc, passes_str), cyan),
                 ]));
             } else {
                 lines.push(Line::from(Span::styled(" Please specify a valid range", gray)));
@@ -1641,7 +1614,7 @@ pub fn render_range_edit_modal(
         }
     }
 
-    lines.push(Line::from(Span::styled(" ────────────────────────────────────────────────────────────", gray)));
+    lines.push(Line::from(Span::styled(" ────────────────────────────────────────────────────────────────────────────", gray)));
     lines.push(Line::from(vec![
         Span::styled(" [", gray),
         Span::styled("Tab", accent_bold),
@@ -1655,13 +1628,68 @@ pub fn render_range_edit_modal(
     ]));
     lines.push(Line::from(vec![
         Span::styled(" [", gray),
+        Span::styled("H", accent_bold),
+        Span::styled("] Toggle Head      [", gray),
         Span::styled("Enter", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
-        Span::styled("] Validate & Start      [", gray),
+        Span::styled("] Validate & Start     [", gray),
         Span::styled("Esc", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),
         Span::styled("] Cancel & Back", gray),
     ]));
 
-    let paragraph = Paragraph::new(lines).block(block);
+    lines
+}
+
+/// Renders an interactive custom track range editor modal dialog
+#[allow(clippy::too_many_arguments)]
+pub fn render_range_edit_modal(
+    f: &mut Frame,
+    area: Rect,
+    kind: RangeModalKind,
+    head_sel: HeadSelection,
+    start_str: &str,
+    end_str: &str,
+    active_field: RangeField,
+    max_tracks: u8,
+    error_msg: Option<&str>,
+) {
+    let modal_width = 82.min(area.width.saturating_sub(2));
+    let modal_height = 15.min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
+    let modal_area = Rect::new(x, y, modal_width, modal_height);
+
+    f.render_widget(Clear, modal_area);
+
+    let (title, title_col, bg_col) = match kind {
+        RangeModalKind::Format => (
+            " 🔢 Set Custom Track Range (Format) ",
+            Color::LightGreen,
+            Color::Rgb(20, 15, 30),
+        ),
+        RangeModalKind::Erase => (
+            " 🔢 Set Custom Track Range (DC Erase) ",
+            Color::LightRed,
+            Color::Rgb(25, 15, 20),
+        ),
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .title(title)
+        .title_style(Style::default().fg(title_col).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(bg_col));
+
+    let paragraph = Paragraph::new(build_range_edit_modal_lines(
+        head_sel,
+        start_str,
+        end_str,
+        active_field,
+        max_tracks,
+        error_msg,
+    ))
+    .block(block);
     f.render_widget(paragraph, modal_area);
 }
 
