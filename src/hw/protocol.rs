@@ -359,13 +359,14 @@ impl PresetProfile {
     /// Nominal spindle speed in RPM
     pub fn target_rpm(&self) -> f64 {
         match self {
-            PresetProfile::Pc525Hd | PresetProfile::Pc525DdOnHd => 360.0,
-            PresetProfile::Pc35Hd
-            | PresetProfile::Pc35Dd
-            | PresetProfile::Pc525Dd
-            | PresetProfile::Amiga35Dd
-            | PresetProfile::Atari35Dd
-            | PresetProfile::Cpc30Data => 300.0,
+            PresetProfile::Pc525Hd => 360.0,
+            PresetProfile::Pc525DdOnHd => 360.0,
+            PresetProfile::Pc35Hd => 300.0,
+            PresetProfile::Pc35Dd => 300.0,
+            PresetProfile::Pc525Dd => 300.0,
+            PresetProfile::Amiga35Dd => 300.0,
+            PresetProfile::Atari35Dd => 300.0,
+            PresetProfile::Cpc30Data => 300.0,
         }
     }
 

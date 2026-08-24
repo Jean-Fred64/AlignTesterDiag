@@ -508,7 +508,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     right_lines.push(Line::from(""));
 
                     if status.rpm_measure.sample_count > 0 {
-                        let target_rpm = 300.0f64;
+                        let target_rpm = status.preset.target_rpm();
                         let instant_rpm = status.rpm_measure.instant_rpm;
                         let diff = instant_rpm - target_rpm;
                         let sign = if diff >= 0.0 { "+" } else { "" };
@@ -949,6 +949,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     app.status.head,
                     max_trk,
                     app.preset.label(),
+                    app.preset.target_rpm(),
                     app.status.bitrate,
                     app.bus_type.as_str(),
                     app.drive_unit,
@@ -967,6 +968,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     app.status.track,
                     app.status.head,
                     app.preset.label(),
+                    app.preset.target_rpm(),
+                    app.status.bitrate,
                     app.erase_target_tracks,
                     app.is_48_tpi(),
                     app.erase_range,
@@ -1123,6 +1126,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                             KeyCode::Char('v') | KeyCode::Char('V') => {
                                 app.toggle_format_verify();
                             }
+                            KeyCode::Char('p') | KeyCode::Char('P') => {
+                                app.handle_action(Action::CyclePreset);
+                                let _ = tx_cmd.send(HwCmd::CyclePreset);
+                            }
                             KeyCode::Char('t') | KeyCode::Char('T') => {
                                 let track = app.status.track;
                                 let head = app.status.head;
@@ -1204,6 +1211,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                             KeyCode::Char('h') | KeyCode::Char('H') => {
                                 app.toggle_head();
                                 let _ = tx_cmd.send(HwCmd::ToggleHead);
+                            }
+                            KeyCode::Char('p') | KeyCode::Char('P') => {
+                                app.handle_action(Action::CyclePreset);
+                                let _ = tx_cmd.send(HwCmd::CyclePreset);
                             }
                             KeyCode::Char('t') | KeyCode::Char('T') => {
                                 let track = app.status.track;
@@ -2652,6 +2663,7 @@ mod tests {
             0,
             79,
             "3.5\" HD (1.44M)",
+            300.0,
             500,
             "IBM PC",
             0,
@@ -2669,15 +2681,18 @@ mod tests {
 
         // Must contain key English instructions
         assert!(full_text.contains("LOW-LEVEL MFM FORMATTING"));
+        assert!(full_text.contains("Preset: [3.5\" HD (1.44M) (RPM Cible: 300 RPM | 500 kbps)]"));
         assert!(full_text.contains("Track 40, Head 0"));
         assert!(full_text.contains("Target Tracks : 80"));
         assert!(full_text.contains("Range: 00..79 | Standard: 80, Max: 84"));
         assert!(full_text.contains("Read-After-Write Verify : ON"));
+        assert!(full_text.contains("Cycle Preset Profile"));
         assert!(full_text.contains("Format Track Range     (Tracks 00..79, Dual-Head)"));
         assert!(full_text.contains("Tracks 00..79, Dual-Head"));
         assert!(full_text.contains("Cancel & Return"));
 
-        // Check shortcut highlight formatting for [T] and [R] and [D] and [V]
+        // Check shortcut highlight formatting for [P], [T], [R], [D], [V]
+        let mut found_p_shortcut = false;
         let mut found_t_shortcut = false;
         let mut found_r_shortcut = false;
         let mut found_d_shortcut = false;
@@ -2686,6 +2701,9 @@ mod tests {
 
         for line in &lines {
             for span in &line.spans {
+                if span.content == "P" && span.style.fg == Some(Color::Yellow) {
+                    found_p_shortcut = true;
+                }
                 if span.content == "T" && span.style.fg == Some(Color::Yellow) {
                     found_t_shortcut = true;
                 }
@@ -2704,6 +2722,7 @@ mod tests {
             }
         }
 
+        assert!(found_p_shortcut, "Shortcut [P] and 'Preset' must be emphasized in Yellow/Bold");
         assert!(found_t_shortcut, "Shortcut [T] and 'Track' must be emphasized in Yellow/Bold");
         assert!(found_r_shortcut, "Shortcut [R] and 'Range' must be emphasized in Yellow/Bold");
         assert!(found_d_shortcut, "Shortcut [D] and 'Disk' must be emphasized in Yellow/Bold");
@@ -2717,6 +2736,8 @@ mod tests {
             40,
             0,
             "3.5\" HD (1.44M)",
+            300.0,
+            500,
             80,
             false,
             TrackRange::new(0, 79),
@@ -2728,14 +2749,16 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
 
-        assert!(full_text.contains("Target Preset : 3.5\" HD (1.44M)"));
+        assert!(full_text.contains("Target Preset : [3.5\" HD (1.44M) (RPM Cible: 300 RPM | 500 kbps)]"));
         assert!(full_text.contains("Target Tracks : 80"));
         assert!(full_text.contains("WARNING: This will permanently wipe all magnetic flux"));
+        assert!(full_text.contains("Cycle Preset Profile"));
         assert!(full_text.contains("Erase Current Track only"));
         assert!(full_text.contains("Erase Track Range     (Tracks 00..79, Dual-Head)"));
         assert!(full_text.contains("Erase Entire Disk"));
         assert!(full_text.contains("Cancel & Return"));
 
+        let mut found_p = false;
         let mut found_t = false;
         let mut found_r = false;
         let mut found_d = false;
@@ -2743,6 +2766,9 @@ mod tests {
 
         for line in &lines {
             for span in &line.spans {
+                if span.content == "P" && span.style.fg == Some(Color::Yellow) {
+                    found_p = true;
+                }
                 if span.content == "T" && span.style.fg == Some(Color::Yellow) {
                     found_t = true;
                 }
@@ -2758,10 +2784,115 @@ mod tests {
             }
         }
 
+        assert!(found_p, "Shortcut [P] must be emphasized in Yellow/Bold");
         assert!(found_t, "Shortcut [T] must be emphasized in Yellow/Bold");
         assert!(found_r, "Shortcut [R] must be emphasized in Yellow/Bold");
         assert!(found_d, "Shortcut [D] must be emphasized in Yellow/Bold");
         assert!(found_esc, "Shortcut [Esc] must be highlighted in Red/Bold");
+    }
+
+    #[test]
+    fn test_modal_preset_cycling_and_track_clamping() {
+        let mut app = App::with_full_preset_config(0, BusType::IbmPc, StepMode::Single, PresetProfile::Pc35Hd);
+        app.status.track = 79;
+        app.status.target_track = 79;
+
+        // Open Format modal
+        app.handle_action(Action::OpenFormatModal);
+        assert!(app.show_format_modal);
+        assert_eq!(app.preset, PresetProfile::Pc35Hd);
+        assert_eq!(app.preset.target_rpm(), 300.0);
+        assert_eq!(app.format_target_tracks, 80);
+        assert_eq!(app.format_range, TrackRange::new(0, 79));
+        assert_eq!(app.status.track, 79);
+
+        // Cycle preset: Pc35Hd -> Pc35Dd
+        app.handle_action(Action::CyclePreset);
+        assert_eq!(app.preset, PresetProfile::Pc35Dd);
+        assert_eq!(app.preset.target_rpm(), 300.0);
+        assert_eq!(app.status.bitrate, 250);
+        assert_eq!(app.format_target_tracks, 80);
+        assert_eq!(app.format_range, TrackRange::new(0, 79));
+        assert_eq!(app.status.track, 79);
+
+        // Cycle preset: Pc35Dd -> Pc525Hd
+        app.handle_action(Action::CyclePreset);
+        assert_eq!(app.preset, PresetProfile::Pc525Hd);
+        assert_eq!(app.preset.target_rpm(), 360.0);
+        assert_eq!(app.status.bitrate, 500);
+        assert_eq!(app.format_target_tracks, 80);
+        assert_eq!(app.format_range, TrackRange::new(0, 79));
+        assert_eq!(app.status.track, 79);
+
+        // Cycle preset: Pc525Hd -> Pc525DdOnHd (48 TPI, Double step, 40 tracks default)
+        app.handle_action(Action::CyclePreset);
+        assert_eq!(app.preset, PresetProfile::Pc525DdOnHd);
+        assert_eq!(app.preset.target_rpm(), 360.0);
+        assert_eq!(app.status.bitrate, 300);
+        assert_eq!(app.step_mode, StepMode::Double);
+        assert_eq!(app.format_target_tracks, 40);
+        assert_eq!(app.format_range, TrackRange::new(0, 39));
+        // Track 79 must be clamped to max_tracks - 1 = 41
+        assert_eq!(app.status.track, 41);
+        assert_eq!(app.status.target_track, 41);
+
+        // Cycle preset: Pc525DdOnHd -> Pc525Dd (48 TPI, Single step, 40 tracks default)
+        app.handle_action(Action::CyclePreset);
+        assert_eq!(app.preset, PresetProfile::Pc525Dd);
+        assert_eq!(app.preset.target_rpm(), 300.0);
+        assert_eq!(app.status.bitrate, 250);
+        assert_eq!(app.format_target_tracks, 40);
+        assert_eq!(app.format_range, TrackRange::new(0, 39));
+        assert_eq!(app.status.track, 41);
+
+        // Close format modal, open erase modal
+        app.handle_action(Action::CloseFormatModal);
+        app.status.track = 30;
+        app.status.target_track = 30;
+        app.handle_action(Action::OpenEraseModal);
+        assert!(app.show_erase_modal);
+
+        // Cycle preset: Pc525Dd -> Amiga35Dd (80 tracks, Shugart)
+        app.handle_action(Action::CyclePreset);
+        assert_eq!(app.preset, PresetProfile::Amiga35Dd);
+        assert_eq!(app.preset.target_rpm(), 300.0);
+        assert_eq!(app.bus_type, BusType::Shugart);
+        assert_eq!(app.erase_target_tracks, 80);
+        assert_eq!(app.erase_range, TrackRange::new(0, 79));
+        assert_eq!(app.status.track, 30);
+
+        // Move track to 75
+        app.status.track = 75;
+        app.status.target_track = 75;
+
+        // Cycle preset: Amiga35Dd -> Atari35Dd (80 tracks, IBM PC)
+        app.handle_action(Action::CyclePreset);
+        assert_eq!(app.preset, PresetProfile::Atari35Dd);
+        assert_eq!(app.preset.target_rpm(), 300.0);
+        assert_eq!(app.bus_type, BusType::IbmPc);
+        assert_eq!(app.erase_target_tracks, 80);
+        assert_eq!(app.erase_range, TrackRange::new(0, 79));
+        assert_eq!(app.status.track, 75);
+
+        // Cycle preset: Atari35Dd -> Cpc30Data (48 TPI, 40 tracks, Shugart)
+        app.handle_action(Action::CyclePreset);
+        assert_eq!(app.preset, PresetProfile::Cpc30Data);
+        assert_eq!(app.preset.target_rpm(), 300.0);
+        assert_eq!(app.bus_type, BusType::Shugart);
+        assert_eq!(app.erase_target_tracks, 40);
+        assert_eq!(app.erase_range, TrackRange::new(0, 39));
+        // Track 75 clamped to 41
+        assert_eq!(app.status.track, 41);
+        assert_eq!(app.status.target_track, 41);
+
+        // Cycle preset: Cpc30Data -> Pc35Hd (80 tracks, IBM PC)
+        app.handle_action(Action::CyclePreset);
+        assert_eq!(app.preset, PresetProfile::Pc35Hd);
+        assert_eq!(app.preset.target_rpm(), 300.0);
+        assert_eq!(app.bus_type, BusType::IbmPc);
+        assert_eq!(app.erase_target_tracks, 80);
+        assert_eq!(app.erase_range, TrackRange::new(0, 79));
+        assert_eq!(app.status.track, 41);
     }
 
     #[test]
@@ -2971,6 +3102,7 @@ mod tests {
             0,
             39,
             "5.25\" DD (360K)",
+            300.0,
             250,
             "IBM PC",
             0,
@@ -2996,6 +3128,7 @@ mod tests {
             1,
             41,
             "5.25\" DD (360K)",
+            300.0,
             250,
             "IBM PC",
             0,
@@ -3021,6 +3154,7 @@ mod tests {
             0,
             79,
             "3.5\" HD (1.44M)",
+            300.0,
             500,
             "IBM PC",
             0,
@@ -3047,6 +3181,8 @@ mod tests {
             35,
             1,
             "3.5\" HD (1.44M)",
+            300.0,
+            500,
             80,
             false,
             TrackRange::new(10, 20),
@@ -3203,6 +3339,7 @@ mod tests {
             0,
             79,
             "3.5\" HD (1.44M)",
+            300.0,
             500,
             "IBM PC",
             0,
@@ -3224,6 +3361,8 @@ mod tests {
             40,
             1,
             "3.5\" HD (1.44M)",
+            300.0,
+            500,
             80,
             false,
             TrackRange::new(0, 79),

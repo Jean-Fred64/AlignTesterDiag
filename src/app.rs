@@ -737,8 +737,9 @@ impl App {
     pub fn toggle_step_mode(&mut self) {
         self.step_mode = self.step_mode.toggle();
         self.status.step_mode = self.step_mode;
-        self.status.track = self.status.track.min(self.step_mode.max_logical_tracks());
-        self.status.target_track = self.status.target_track.min(self.step_mode.max_logical_tracks());
+        let max_track_idx = self.max_tracks().saturating_sub(1).min(self.step_mode.max_logical_tracks());
+        self.status.track = self.status.track.min(max_track_idx);
+        self.status.target_track = self.status.target_track.min(max_track_idx);
         self.format_target_tracks = self.default_format_tracks();
         self.erase_target_tracks = self.default_erase_tracks();
         self.format_range = self.default_track_range();
@@ -748,8 +749,9 @@ impl App {
     pub fn set_step_mode(&mut self, mode: StepMode) {
         self.step_mode = mode;
         self.status.step_mode = self.step_mode;
-        self.status.track = self.status.track.min(self.step_mode.max_logical_tracks());
-        self.status.target_track = self.status.target_track.min(self.step_mode.max_logical_tracks());
+        let max_track_idx = self.max_tracks().saturating_sub(1).min(self.step_mode.max_logical_tracks());
+        self.status.track = self.status.track.min(max_track_idx);
+        self.status.target_track = self.status.target_track.min(max_track_idx);
         self.format_target_tracks = self.default_format_tracks();
         self.erase_target_tracks = self.default_erase_tracks();
         self.format_range = self.default_track_range();
@@ -771,6 +773,9 @@ impl App {
         self.status.step_mode = self.step_mode;
         self.status.bitrate = preset.target_data_rate();
         self.status.density = self.status.bitrate == 500;
+        let max_track_idx = self.max_tracks().saturating_sub(1).min(self.step_mode.max_logical_tracks());
+        self.status.track = self.status.track.min(max_track_idx);
+        self.status.target_track = self.status.target_track.min(max_track_idx);
         self.format_target_tracks = self.default_format_tracks();
         self.erase_target_tracks = self.default_erase_tracks();
         self.format_range = self.default_track_range();

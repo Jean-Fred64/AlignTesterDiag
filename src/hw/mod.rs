@@ -3890,8 +3890,13 @@ pub fn handle_command(
             status.step_mode = next_preset.default_step();
             status.bitrate = next_preset.target_data_rate();
             status.density = status.bitrate == 500;
-            status.track = status.track.min(status.step_mode.max_logical_tracks());
-            status.target_track = status.target_track.min(status.step_mode.max_logical_tracks());
+            let max_logical = if next_preset.is_48_tpi() || status.step_mode == StepMode::Double {
+                39
+            } else {
+                79
+            };
+            status.track = status.track.min(max_logical);
+            status.target_track = status.target_track.min(max_logical);
             status.log_msg = format!(
                 "Preset: {} ({} | {} | {}k)",
                 next_preset.label(),
@@ -3924,8 +3929,13 @@ pub fn handle_command(
             status.step_mode = preset.default_step();
             status.bitrate = preset.target_data_rate();
             status.density = status.bitrate == 500;
-            status.track = status.track.min(status.step_mode.max_logical_tracks());
-            status.target_track = status.target_track.min(status.step_mode.max_logical_tracks());
+            let max_logical = if preset.is_48_tpi() || status.step_mode == StepMode::Double {
+                39
+            } else {
+                79
+            };
+            status.track = status.track.min(max_logical);
+            status.target_track = status.target_track.min(max_logical);
             status.log_msg = format!(
                 "Preset: {} ({} | {} | {}k)",
                 preset.label(),

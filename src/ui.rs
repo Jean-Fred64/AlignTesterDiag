@@ -1142,6 +1142,7 @@ pub fn build_format_modal_lines(
     head: u8,
     _max_track: u8,
     preset_label: &str,
+    target_rpm: f64,
     bitrate: u16,
     bus_name: &str,
     unit: u8,
@@ -1177,7 +1178,10 @@ pub fn build_format_modal_lines(
             Span::styled("  Target Drive  : ", gray),
             Span::styled(format!("Unit {} ({})", unit, bus_name), cyan),
             Span::styled(" | Preset: ", gray),
-            Span::styled(preset_label.to_string(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("[{} (RPM Cible: {:.0} RPM | {} kbps)]", preset_label, target_rpm, bitrate),
+                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
             Span::styled("  [", gray),
@@ -1239,6 +1243,13 @@ pub fn build_format_modal_lines(
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("  [", gray),
+            Span::styled("P", accent_bold),
+            Span::styled("] Cycle ", white),
+            Span::styled("P", accent_bold),
+            Span::styled("reset Profile", white),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  [", gray),
             Span::styled("T", accent_bold),
             Span::styled("] Format Current ", white),
             Span::styled("T", accent_bold),
@@ -1285,6 +1296,7 @@ pub fn render_format_modal(
     head: u8,
     max_track: u8,
     preset_label: &str,
+    target_rpm: f64,
     bitrate: u16,
     bus_name: &str,
     unit: u8,
@@ -1314,6 +1326,7 @@ pub fn render_format_modal(
         head,
         max_track,
         preset_label,
+        target_rpm,
         bitrate,
         bus_name,
         unit,
@@ -1330,10 +1343,13 @@ pub fn render_format_modal(
 }
 
 /// Builds the formatted confirmation and selection lines for the Low-Level DC Erase modal dialog
+#[allow(clippy::too_many_arguments)]
 pub fn build_erase_modal_lines(
     track: u8,
     head: u8,
     preset_label: &str,
+    target_rpm: f64,
+    bitrate: u16,
     target_tracks: u8,
     is_48_tpi: bool,
     range: TrackRange,
@@ -1352,7 +1368,10 @@ pub fn build_erase_modal_lines(
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Target Preset : ", gray),
-            Span::styled(preset_label.to_string(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("[{} (RPM Cible: {:.0} RPM | {} kbps)]", preset_label, target_rpm, bitrate),
+                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
             Span::styled("[", gray),
@@ -1396,6 +1415,13 @@ pub fn build_erase_modal_lines(
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("[", gray),
+            Span::styled("P", accent_bold),
+            Span::styled("] Cycle ", white),
+            Span::styled("P", accent_bold),
+            Span::styled("reset Profile", white),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("[", gray),
             Span::styled("T", accent_bold),
             Span::styled("] Erase Current ", white),
             Span::styled("T", accent_bold),
@@ -1434,13 +1460,15 @@ pub fn render_erase_modal(
     track: u8,
     head: u8,
     preset_label: &str,
+    target_rpm: f64,
+    bitrate: u16,
     target_tracks: u8,
     is_48_tpi: bool,
     range: TrackRange,
     pending_confirm: Option<&PendingConfirmation>,
 ) {
     let modal_width = (area.width.saturating_sub(2)).clamp(78, 84).min(area.width);
-    let modal_height = (area.height.saturating_sub(2)).clamp(15, 18).min(area.height);
+    let modal_height = (area.height.saturating_sub(2)).clamp(16, 20).min(area.height);
     let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(x, y, modal_width, modal_height);
@@ -1458,6 +1486,8 @@ pub fn render_erase_modal(
         track,
         head,
         preset_label,
+        target_rpm,
+        bitrate,
         target_tracks,
         is_48_tpi,
         range,
