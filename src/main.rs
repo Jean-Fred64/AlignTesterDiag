@@ -1,5 +1,8 @@
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseEventKind,
+    },
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -29,7 +32,7 @@ pub use app::*;
 pub use audio::*;
 pub use hw::{
     get_status_expected_sector_ids, hw_thread, BusType, DiskFormat, DisplayMode, DriveStatus,
-    FormatProgress, FormatStep, HwActivity, HwCmd, PresetProfile, StepMode,
+    FormatProgress, FormatStep, HwActivity, HwCmd, PresetProfile, StepMode, TrackRange,
 };
 pub use ui::*;
 
@@ -243,6 +246,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     enable_raw_mode()?;
     let mut stdout = stdout();
     stdout.execute(EnterAlternateScreen)?;
+    stdout.execute(EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -951,6 +955,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     app.format_target_tracks,
                     app.is_48_tpi(),
                     app.format_verify,
+                    app.format_range,
+                    app.pending_confirmation.as_ref(),
                 );
             }
 
@@ -963,212 +969,389 @@ fn main() -> Result<(), Box<dyn Error>> {
                     app.preset.label(),
                     app.erase_target_tracks,
                     app.is_48_tpi(),
+                    app.erase_range,
+                    app.pending_confirmation.as_ref(),
+                );
+            }
+
+            if let Some(kind) = app.show_range_modal {
+                render_range_edit_modal(
+                    f,
+                    f.size(),
+                    kind,
+                    &app.range_input_start,
+                    &app.range_input_end,
+                    app.range_edit_field,
+                    app.max_format_tracks(),
+                    app.range_error_msg.as_deref(),
                 );
             }
         })?;
 
         if event::poll(Duration::from_millis(15))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C'))
-                {
-                    let _ = tx_cmd.send(HwCmd::Exit);
-                    break;
-                }
-
-                if app.show_help {
-                    match key.code {
-                        KeyCode::Esc
-                        | KeyCode::Char('?')
-                        | KeyCode::F(1)
-                        | KeyCode::Char('q')
-                        | KeyCode::Char('Q') => {
-                            app.show_help = false;
-                        }
-                        _ => {}
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
                     }
-                    continue;
-                }
-
-                if app.show_format_modal {
-                    match key.code {
-                        KeyCode::Left
-                        | KeyCode::Down
-                        | KeyCode::Char('-')
-                        | KeyCode::Char('_') => {
-                            app.decrement_format_tracks();
-                        }
-                        KeyCode::Right
-                        | KeyCode::Up
-                        | KeyCode::Char('+')
-                        | KeyCode::Char('=') => {
-                            app.increment_format_tracks();
-                        }
-                        KeyCode::Char('v') | KeyCode::Char('V') => {
-                            app.toggle_format_verify();
-                        }
-                        KeyCode::Char('t') | KeyCode::Char('T') => {
-                            app.show_format_modal = false;
-                            let track = app.status.track;
-                            let head = app.status.head;
-                            let verify = app.format_verify;
-                            app.handle_action(Action::FormatTrack { track, head, verify });
-                            let _ = tx_cmd.send(HwCmd::FormatTrack { track, head, verify });
-                        }
-                        KeyCode::Char('d') | KeyCode::Char('D') => {
-                            app.show_format_modal = false;
-                            let tracks = app.format_target_tracks;
-                            let verify = app.format_verify;
-                            app.handle_action(Action::FormatDisk { tracks, verify });
-                            let _ = tx_cmd.send(HwCmd::FormatDisk { tracks, verify });
-                        }
-                        KeyCode::Esc
-                        | KeyCode::Char('q')
-                        | KeyCode::Char('Q')
-                        | KeyCode::Char('x')
-                        | KeyCode::Char('X') => {
-                            app.show_format_modal = false;
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-
-                if app.show_erase_modal {
-                    match key.code {
-                        KeyCode::Left
-                        | KeyCode::Down
-                        | KeyCode::Char('-')
-                        | KeyCode::Char('_') => {
-                            app.decrement_erase_tracks();
-                        }
-                        KeyCode::Right
-                        | KeyCode::Up
-                        | KeyCode::Char('+')
-                        | KeyCode::Char('=') => {
-                            app.increment_erase_tracks();
-                        }
-                        KeyCode::Char('t') | KeyCode::Char('T') => {
-                            app.show_erase_modal = false;
-                            let track = app.status.track;
-                            let head = app.status.head;
-                            app.handle_action(Action::EraseTrack { track, head });
-                            let _ = tx_cmd.send(HwCmd::EraseTrack { track, head });
-                        }
-                        KeyCode::Char('d') | KeyCode::Char('D') => {
-                            app.show_erase_modal = false;
-                            let tracks = app.erase_target_tracks;
-                            app.handle_action(Action::EraseDisk { tracks });
-                            let _ = tx_cmd.send(HwCmd::EraseDisk { tracks });
-                        }
-                        KeyCode::Esc
-                        | KeyCode::Char('q')
-                        | KeyCode::Char('Q')
-                        | KeyCode::Char('x')
-                        | KeyCode::Char('X') => {
-                            app.show_erase_modal = false;
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-
-                if key.code == KeyCode::Backspace
-                    || key.code == KeyCode::Char('\x08')
-                    || key.code == KeyCode::Char('\u{8}')
-                {
-                    app.handle_action(Action::PanicReset);
-                    let _ = tx_cmd.send(HwCmd::PanicReset);
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Char('?') | KeyCode::F(1) => {
-                        app.toggle_help();
-                    }
-                    KeyCode::Char('x') | KeyCode::Char('X') | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C'))
+                    {
                         let _ = tx_cmd.send(HwCmd::Exit);
                         break;
                     }
-                    KeyCode::Esc => {
-                        app.handle_action(Action::Stop);
-                        let _ = tx_cmd.send(HwCmd::Stop);
+
+                    if app.show_help {
+                        match key.code {
+                            KeyCode::Esc
+                            | KeyCode::Char('?')
+                            | KeyCode::F(1)
+                            | KeyCode::Char('q')
+                            | KeyCode::Char('Q') => {
+                                app.show_help = false;
+                            }
+                            _ => {}
+                        }
+                        continue;
                     }
-                    KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right | KeyCode::Up => {
-                        let max_trk = app.step_mode.max_logical_tracks();
-                        let _ = tx_cmd.send(HwCmd::Seek(app.status.track.saturating_add(1).min(max_trk)));
+
+                    if app.show_range_modal.is_some() {
+                        match key.code {
+                            KeyCode::Tab => {
+                                app.toggle_range_field();
+                            }
+                            KeyCode::Up
+                            | KeyCode::Right
+                            | KeyCode::Char('+')
+                            | KeyCode::Char('=') => {
+                                app.increment_active_range_field();
+                            }
+                            KeyCode::Down
+                            | KeyCode::Left
+                            | KeyCode::Char('-')
+                            | KeyCode::Char('_') => {
+                                app.decrement_active_range_field();
+                            }
+                            KeyCode::Char(c) if c.is_ascii_digit() => {
+                                app.range_input_push_digit(c);
+                            }
+                            KeyCode::Backspace
+                            | KeyCode::Char('\x08') => {
+                                app.range_input_backspace();
+                            }
+                            KeyCode::Enter => {
+                                match app.validate_and_apply_range() {
+                                    Ok((range, kind)) => match kind {
+                                        RangeModalKind::Format => {
+                                            let verify = app.format_verify;
+                                            app.show_format_modal = true;
+                                            app.pending_confirmation = Some(PendingConfirmation::FormatRange { range, verify });
+                                        }
+                                        RangeModalKind::Erase => {
+                                            app.show_erase_modal = true;
+                                            app.pending_confirmation = Some(PendingConfirmation::EraseRange { range });
+                                        }
+                                    },
+                                    Err(err) => {
+                                        app.range_error_msg = Some(err);
+                                    }
+                                }
+                            }
+                            KeyCode::Esc => {
+                                app.close_range_modal(true);
+                            }
+                            _ => {}
+                        }
+                        continue;
                     }
-                    KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Left | KeyCode::Down => {
-                        let _ = tx_cmd.send(HwCmd::Seek(app.status.track.saturating_sub(1)));
+
+                    if app.show_format_modal {
+                        if let Some(confirm) = app.pending_confirmation.clone() {
+                            match key.code {
+                                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                    app.show_format_modal = false;
+                                    app.pending_confirmation = None;
+                                    match confirm {
+                                        PendingConfirmation::FormatTrack { track, head, verify } => {
+                                            app.handle_action(Action::FormatTrack { track, head, verify });
+                                            let _ = tx_cmd.send(HwCmd::FormatTrack { track, head, verify });
+                                        }
+                                        PendingConfirmation::FormatDisk { range, verify }
+                                        | PendingConfirmation::FormatRange { range, verify } => {
+                                            app.handle_action(Action::FormatDisk { range, verify });
+                                            let _ = tx_cmd.send(HwCmd::FormatDisk { range, verify });
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                KeyCode::Char('n')
+                                | KeyCode::Char('N')
+                                | KeyCode::Enter
+                                | KeyCode::Esc => {
+                                    app.pending_confirmation = None;
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
+                        match key.code {
+                            KeyCode::Left
+                            | KeyCode::Char('-')
+                            | KeyCode::Char('_')
+                            | KeyCode::Char('[') => {
+                                let prev = app.step_track_down();
+                                let _ = tx_cmd.send(HwCmd::Seek(prev));
+                            }
+                            KeyCode::Right
+                            | KeyCode::Char('+')
+                            | KeyCode::Char('=')
+                            | KeyCode::Char(']') => {
+                                let next = app.step_track_up();
+                                let _ = tx_cmd.send(HwCmd::Seek(next));
+                            }
+                            KeyCode::PageUp | KeyCode::Up => {
+                                app.increment_format_tracks();
+                            }
+                            KeyCode::PageDown | KeyCode::Down => {
+                                app.decrement_format_tracks();
+                            }
+                            KeyCode::Char('h') | KeyCode::Char('H') => {
+                                app.toggle_head();
+                                let _ = tx_cmd.send(HwCmd::ToggleHead);
+                            }
+                            KeyCode::Char('v') | KeyCode::Char('V') => {
+                                app.toggle_format_verify();
+                            }
+                            KeyCode::Char('t') | KeyCode::Char('T') => {
+                                let track = app.status.track;
+                                let head = app.status.head;
+                                let verify = app.format_verify;
+                                app.pending_confirmation = Some(PendingConfirmation::FormatTrack { track, head, verify });
+                            }
+                            KeyCode::Char('r') | KeyCode::Char('R') => {
+                                app.open_range_modal(RangeModalKind::Format);
+                            }
+                            KeyCode::Char('d') | KeyCode::Char('D') => {
+                                let range = TrackRange::full_disk(app.format_target_tracks);
+                                let verify = app.format_verify;
+                                app.pending_confirmation = Some(PendingConfirmation::FormatDisk { range, verify });
+                            }
+                            KeyCode::Esc
+                            | KeyCode::Char('q')
+                            | KeyCode::Char('Q')
+                            | KeyCode::Char('x')
+                            | KeyCode::Char('X') => {
+                                app.show_format_modal = false;
+                                app.pending_confirmation = None;
+                            }
+                            _ => {}
+                        }
+                        continue;
                     }
-                    KeyCode::Char(c) if c.is_ascii_digit() => {
-                        if let Some(d) = c.to_digit(10) {
+
+                    if app.show_erase_modal {
+                        if let Some(confirm) = app.pending_confirmation.clone() {
+                            match key.code {
+                                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                    app.show_erase_modal = false;
+                                    app.pending_confirmation = None;
+                                    match confirm {
+                                        PendingConfirmation::EraseTrack { track, head } => {
+                                            app.handle_action(Action::EraseTrack { track, head });
+                                            let _ = tx_cmd.send(HwCmd::EraseTrack { track, head });
+                                        }
+                                        PendingConfirmation::EraseDisk { range }
+                                        | PendingConfirmation::EraseRange { range } => {
+                                            app.handle_action(Action::EraseDisk { range });
+                                            let _ = tx_cmd.send(HwCmd::EraseDisk { range });
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                KeyCode::Char('n')
+                                | KeyCode::Char('N')
+                                | KeyCode::Enter
+                                | KeyCode::Esc => {
+                                    app.pending_confirmation = None;
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
+                        match key.code {
+                            KeyCode::Left
+                            | KeyCode::Char('-')
+                            | KeyCode::Char('_')
+                            | KeyCode::Char('[') => {
+                                let prev = app.step_track_down();
+                                let _ = tx_cmd.send(HwCmd::Seek(prev));
+                            }
+                            KeyCode::Right
+                            | KeyCode::Char('+')
+                            | KeyCode::Char('=')
+                            | KeyCode::Char(']') => {
+                                let next = app.step_track_up();
+                                let _ = tx_cmd.send(HwCmd::Seek(next));
+                            }
+                            KeyCode::PageUp | KeyCode::Up => {
+                                app.increment_erase_tracks();
+                            }
+                            KeyCode::PageDown | KeyCode::Down => {
+                                app.decrement_erase_tracks();
+                            }
+                            KeyCode::Char('h') | KeyCode::Char('H') => {
+                                app.toggle_head();
+                                let _ = tx_cmd.send(HwCmd::ToggleHead);
+                            }
+                            KeyCode::Char('t') | KeyCode::Char('T') => {
+                                let track = app.status.track;
+                                let head = app.status.head;
+                                app.pending_confirmation = Some(PendingConfirmation::EraseTrack { track, head });
+                            }
+                            KeyCode::Char('r') | KeyCode::Char('R') => {
+                                app.open_range_modal(RangeModalKind::Erase);
+                            }
+                            KeyCode::Char('d') | KeyCode::Char('D') => {
+                                let range = TrackRange::full_disk(app.erase_target_tracks);
+                                app.pending_confirmation = Some(PendingConfirmation::EraseDisk { range });
+                            }
+                            KeyCode::Esc
+                            | KeyCode::Char('q')
+                            | KeyCode::Char('Q')
+                            | KeyCode::Char('x')
+                            | KeyCode::Char('X') => {
+                                app.show_erase_modal = false;
+                                app.pending_confirmation = None;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    if key.code == KeyCode::Backspace
+                        || key.code == KeyCode::Char('\x08')
+                    {
+                        app.handle_action(Action::PanicReset);
+                        let _ = tx_cmd.send(HwCmd::PanicReset);
+                        continue;
+                    }
+                    match key.code {
+                        KeyCode::Char('?') | KeyCode::F(1) => {
+                            app.toggle_help();
+                        }
+                        KeyCode::Char('x') | KeyCode::Char('X') | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                            let _ = tx_cmd.send(HwCmd::Exit);
+                            break;
+                        }
+                        KeyCode::Esc => {
+                            app.handle_action(Action::Stop);
+                            let _ = tx_cmd.send(HwCmd::Stop);
+                        }
+                        KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right | KeyCode::Up | KeyCode::Char(']') => {
                             let max_trk = app.step_mode.max_logical_tracks();
-                            let track = ((d as u8) * 10).min(max_trk);
-                            let _ = tx_cmd.send(HwCmd::Seek(track));
+                            let next = app.step_track_up().min(max_trk);
+                            let _ = tx_cmd.send(HwCmd::Seek(next));
+                        }
+                        KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Left | KeyCode::Down | KeyCode::Char('[') => {
+                            let prev = app.step_track_down();
+                            let _ = tx_cmd.send(HwCmd::Seek(prev));
+                        }
+                        KeyCode::Char(c) if c.is_ascii_digit() => {
+                            if let Some(d) = c.to_digit(10) {
+                                let max_trk = app.step_mode.max_logical_tracks();
+                                let track = ((d as u8) * 10).min(max_trk);
+                                app.status.track = track;
+                                app.status.target_track = track;
+                                let _ = tx_cmd.send(HwCmd::Seek(track));
+                            }
+                        }
+                        KeyCode::Char('h') | KeyCode::Char('H') => {
+                            app.toggle_head();
+                            let _ = tx_cmd.send(HwCmd::ToggleHead);
+                        }
+                        KeyCode::Char('l') | KeyCode::Char('L') => {
+                            let _ = tx_cmd.send(HwCmd::MeasureRpm);
+                        }
+                        KeyCode::Char('m') | KeyCode::Char('M') => {
+                            app.handle_action(Action::ToggleMotor);
+                            let _ = tx_cmd.send(HwCmd::ToggleMotor);
+                        }
+                        KeyCode::Char('r') | KeyCode::Char('R') => {
+                            let _ = tx_cmd.send(HwCmd::RecalibrateSeek);
+                        }
+                        KeyCode::Char('u') | KeyCode::Char('U') => {
+                            app.handle_action(Action::ToggleDriveUnit);
+                            let _ = tx_cmd.send(HwCmd::ToggleDriveUnit);
+                        }
+                        KeyCode::Char('z') | KeyCode::Char('Z') => {
+                            app.status.track = 0;
+                            app.status.target_track = 0;
+                            let _ = tx_cmd.send(HwCmd::ZeroTrack);
+                        }
+                        KeyCode::Char('a') | KeyCode::Char('A') => {
+                            app.handle_action(Action::Analyze);
+                            let _ = tx_cmd.send(HwCmd::Analyze);
+                        }
+                        KeyCode::Char('d') | KeyCode::Char('D') => {
+                            let _ = tx_cmd.send(HwCmd::ReadData);
+                        }
+                        KeyCode::Char('e') | KeyCode::Char('E') => {
+                            app.handle_action(Action::OpenEraseModal);
+                        }
+                        KeyCode::Char('f') | KeyCode::Char('F') => {
+                            app.handle_action(Action::OpenFormatModal);
+                        }
+                        KeyCode::Char('v') | KeyCode::Char('V') => {
+                            let _ = tx_cmd.send(HwCmd::ToggleVerbose);
+                        }
+                        KeyCode::Char('b') | KeyCode::Char('B') => {
+                            let _ = tx_cmd.send(HwCmd::ToggleBeep);
+                        }
+                        KeyCode::Char('p') | KeyCode::Char('P') => {
+                            app.handle_action(Action::CyclePreset);
+                            let _ = tx_cmd.send(HwCmd::CyclePreset);
+                        }
+                        KeyCode::Char('t') | KeyCode::Char('T') => {
+                            app.handle_action(Action::ToggleBusType);
+                            let _ = tx_cmd.send(HwCmd::ToggleBusType);
+                        }
+                        KeyCode::Char('s') | KeyCode::Char('S') => {
+                            app.handle_action(Action::ToggleStepMode);
+                            let _ = tx_cmd.send(HwCmd::ToggleStepMode);
+                        }
+                        _ => {}
+                    }
+                }
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        if app.show_range_modal.is_some() {
+                            app.increment_active_range_field();
+                        } else {
+                            let next = app.step_track_up();
+                            let _ = tx_cmd.send(HwCmd::Seek(next));
                         }
                     }
-                    KeyCode::Char('h') | KeyCode::Char('H') => {
-                        let _ = tx_cmd.send(HwCmd::ToggleHead);
-                    }
-                    KeyCode::Char('l') | KeyCode::Char('L') => {
-                        let _ = tx_cmd.send(HwCmd::MeasureRpm);
-                    }
-                    KeyCode::Char('m') | KeyCode::Char('M') => {
-                        app.handle_action(Action::ToggleMotor);
-                        let _ = tx_cmd.send(HwCmd::ToggleMotor);
-                    }
-                    KeyCode::Char('r') | KeyCode::Char('R') => {
-                        let _ = tx_cmd.send(HwCmd::RecalibrateSeek);
-                    }
-                    KeyCode::Char('u') | KeyCode::Char('U') => {
-                        app.handle_action(Action::ToggleDriveUnit);
-                        let _ = tx_cmd.send(HwCmd::ToggleDriveUnit);
-                    }
-                    KeyCode::Char('z') | KeyCode::Char('Z') => {
-                        let _ = tx_cmd.send(HwCmd::ZeroTrack);
-                    }
-                    KeyCode::Char('a') | KeyCode::Char('A') => {
-                        app.handle_action(Action::Analyze);
-                        let _ = tx_cmd.send(HwCmd::Analyze);
-                    }
-                    KeyCode::Char('d') | KeyCode::Char('D') => {
-                        let _ = tx_cmd.send(HwCmd::ReadData);
-                    }
-                    KeyCode::Char('e') | KeyCode::Char('E') => {
-                        app.handle_action(Action::OpenEraseModal);
-                    }
-                    KeyCode::Char('f') | KeyCode::Char('F') => {
-                        app.handle_action(Action::OpenFormatModal);
-                    }
-                    KeyCode::Char('v') | KeyCode::Char('V') => {
-                        let _ = tx_cmd.send(HwCmd::ToggleVerbose);
-                    }
-                    KeyCode::Char('b') | KeyCode::Char('B') => {
-                        let _ = tx_cmd.send(HwCmd::ToggleBeep);
-                    }
-                    KeyCode::Char('p') | KeyCode::Char('P') => {
-                        app.handle_action(Action::CyclePreset);
-                        let _ = tx_cmd.send(HwCmd::CyclePreset);
-                    }
-                    KeyCode::Char('t') | KeyCode::Char('T') => {
-                        app.handle_action(Action::ToggleBusType);
-                        let _ = tx_cmd.send(HwCmd::ToggleBusType);
-                    }
-                    KeyCode::Char('s') | KeyCode::Char('S') => {
-                        app.handle_action(Action::ToggleStepMode);
-                        let _ = tx_cmd.send(HwCmd::ToggleStepMode);
+                    MouseEventKind::ScrollDown => {
+                        if app.show_range_modal.is_some() {
+                            app.decrement_active_range_field();
+                        } else {
+                            let prev = app.step_track_down();
+                            let _ = tx_cmd.send(HwCmd::Seek(prev));
+                        }
                     }
                     _ => {}
-                }
+                },
+                _ => {}
             }
         }
     }
 
     disable_raw_mode()?;
-    std::io::stdout().execute(LeaveAlternateScreen)?;
+    let mut out = std::io::stdout();
+    let _ = out.execute(DisableMouseCapture);
+    let _ = out.execute(LeaveAlternateScreen);
     println!("Alignment Diagnostic session ended cleanly.");
     Ok(())
 }
@@ -2475,6 +2658,8 @@ mod tests {
             80,
             false,
             true,
+            TrackRange::new(0, 79),
+            None,
         );
 
         let full_text: String = lines
@@ -2488,11 +2673,13 @@ mod tests {
         assert!(full_text.contains("Target Tracks : 80"));
         assert!(full_text.contains("Range: 00..79 | Standard: 80, Max: 84"));
         assert!(full_text.contains("Read-After-Write Verify : ON"));
+        assert!(full_text.contains("Format Track Range     (Tracks 00..79, Dual-Head)"));
         assert!(full_text.contains("Tracks 00..79, Dual-Head"));
         assert!(full_text.contains("Cancel & Return"));
 
-        // Check shortcut highlight formatting for [T] and [D] and [V]
+        // Check shortcut highlight formatting for [T] and [R] and [D] and [V]
         let mut found_t_shortcut = false;
+        let mut found_r_shortcut = false;
         let mut found_d_shortcut = false;
         let mut found_v_shortcut = false;
         let mut found_esc_shortcut = false;
@@ -2501,6 +2688,9 @@ mod tests {
             for span in &line.spans {
                 if span.content == "T" && span.style.fg == Some(Color::Yellow) {
                     found_t_shortcut = true;
+                }
+                if span.content == "R" && span.style.fg == Some(Color::Yellow) {
+                    found_r_shortcut = true;
                 }
                 if span.content == "D" && span.style.fg == Some(Color::Yellow) {
                     found_d_shortcut = true;
@@ -2515,6 +2705,7 @@ mod tests {
         }
 
         assert!(found_t_shortcut, "Shortcut [T] and 'Track' must be emphasized in Yellow/Bold");
+        assert!(found_r_shortcut, "Shortcut [R] and 'Range' must be emphasized in Yellow/Bold");
         assert!(found_d_shortcut, "Shortcut [D] and 'Disk' must be emphasized in Yellow/Bold");
         assert!(found_v_shortcut, "Shortcut [V] and 'Verify' must be emphasized in Yellow/Bold");
         assert!(found_esc_shortcut, "Shortcut [Esc] must be highlighted in Red/Bold");
@@ -2528,6 +2719,8 @@ mod tests {
             "3.5\" HD (1.44M)",
             80,
             false,
+            TrackRange::new(0, 79),
+            None,
         );
 
         let full_text: String = lines
@@ -2539,10 +2732,12 @@ mod tests {
         assert!(full_text.contains("Target Tracks : 80"));
         assert!(full_text.contains("WARNING: This will permanently wipe all magnetic flux"));
         assert!(full_text.contains("Erase Current Track only"));
+        assert!(full_text.contains("Erase Track Range     (Tracks 00..79, Dual-Head)"));
         assert!(full_text.contains("Erase Entire Disk"));
         assert!(full_text.contains("Cancel & Return"));
 
         let mut found_t = false;
+        let mut found_r = false;
         let mut found_d = false;
         let mut found_esc = false;
 
@@ -2550,6 +2745,9 @@ mod tests {
             for span in &line.spans {
                 if span.content == "T" && span.style.fg == Some(Color::Yellow) {
                     found_t = true;
+                }
+                if span.content == "R" && span.style.fg == Some(Color::Yellow) {
+                    found_r = true;
                 }
                 if span.content == "D" && span.style.fg == Some(Color::Yellow) {
                     found_d = true;
@@ -2561,6 +2759,7 @@ mod tests {
         }
 
         assert!(found_t, "Shortcut [T] must be emphasized in Yellow/Bold");
+        assert!(found_r, "Shortcut [R] must be emphasized in Yellow/Bold");
         assert!(found_d, "Shortcut [D] must be emphasized in Yellow/Bold");
         assert!(found_esc, "Shortcut [Esc] must be highlighted in Red/Bold");
     }
@@ -2645,7 +2844,7 @@ mod tests {
         assert_eq!(app.status.activity, HwActivity::Formatting);
         assert!(app.motor_on);
 
-        app.handle_action(Action::FormatDisk { tracks: 80, verify: false });
+        app.handle_action(Action::FormatDisk { range: TrackRange::new(0, 79), verify: false });
         assert_eq!(app.status.mode, DisplayMode::Format);
         assert_eq!(app.status.activity, HwActivity::Formatting);
         assert!(app.motor_on);
@@ -2778,19 +2977,23 @@ mod tests {
             40,
             true,
             true,
+            TrackRange::new(0, 39),
+            None,
         );
         let text_48: String = lines_48
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(text_48.contains("[+ / -] Target Tracks : 40"));
+        assert!(text_48.contains("Target Tracks : 40"));
         assert!(text_48.contains("Range: 00..39 | Standard: 40, Max: 42"));
         assert!(text_48.contains("Tracks 00..39, Dual-Head"));
+        assert!(text_48.contains("Target Track  : Track 20"));
+        assert!(text_48.contains("Head : Head 0"));
 
         // Overtracked 48 TPI (42 tracks)
         let lines_48_over = build_format_modal_lines(
             20,
-            0,
+            1,
             41,
             "5.25\" DD (360K)",
             250,
@@ -2799,14 +3002,18 @@ mod tests {
             42,
             true,
             false,
+            TrackRange::new(0, 41),
+            None,
         );
         let text_48_over: String = lines_48_over
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(text_48_over.contains("[+ / -] Target Tracks : 42"));
+        assert!(text_48_over.contains("Target Tracks : 42"));
         assert!(text_48_over.contains("Range: 00..41 | Standard: 40, Max: 42"));
         assert!(text_48_over.contains("Tracks 00..41, Dual-Head"));
+        assert!(text_48_over.contains("Target Track  : Track 20"));
+        assert!(text_48_over.contains("Head : Head 1"));
 
         // 80 TPI modal line test
         let lines_80 = build_format_modal_lines(
@@ -2820,14 +3027,214 @@ mod tests {
             80,
             false,
             true,
+            TrackRange::new(0, 79),
+            None,
         );
         let text_80: String = lines_80
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(text_80.contains("[+ / -] Target Tracks : 80"));
+        assert!(text_80.contains("Target Tracks : 80"));
         assert!(text_80.contains("Range: 00..79 | Standard: 80, Max: 84"));
         assert!(text_80.contains("Tracks 00..79, Dual-Head"));
+        assert!(text_80.contains("Target Track  : Track 00"));
+        assert!(text_80.contains("Head : Head 0"));
+    }
+
+    #[test]
+    fn test_erase_modal_rendering_with_dynamic_tracks_and_head() {
+        let lines = build_erase_modal_lines(
+            35,
+            1,
+            "3.5\" HD (1.44M)",
+            80,
+            false,
+            TrackRange::new(10, 20),
+            None,
+        );
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text.contains("Target Track  : Track 35"));
+        assert!(text.contains("Head : Head 1"));
+        assert!(text.contains("Target Tracks : 80"));
+        assert!(text.contains("Erase Current Track only  (Track 35, Head 1)"));
+        assert!(text.contains("Erase Track Range     (Tracks 10..20, Dual-Head)"));
+        assert!(text.contains("Erase Entire Disk         (Tracks 00..79, Dual-Head)"));
+    }
+
+    #[test]
+    fn test_app_track_and_head_navigation() {
+        let mut app = App::with_full_preset_config(0, BusType::IbmPc, StepMode::Single, PresetProfile::Pc35Hd);
+        assert_eq!(app.status.track, 0);
+        assert_eq!(app.status.head, 0);
+
+        // Step track up
+        assert_eq!(app.step_track_up(), 1);
+        assert_eq!(app.status.track, 1);
+        assert_eq!(app.step_track_up(), 2);
+        assert_eq!(app.status.track, 2);
+
+        // Step track down
+        assert_eq!(app.step_track_down(), 1);
+        assert_eq!(app.status.track, 1);
+        assert_eq!(app.step_track_down(), 0);
+        assert_eq!(app.status.track, 0);
+        // Clamped at 0
+        assert_eq!(app.step_track_down(), 0);
+        assert_eq!(app.status.track, 0);
+
+        // Head toggle (0 -> 1 -> Both -> 0)
+        app.toggle_head();
+        assert_eq!(app.status.head, 1);
+        assert_eq!(app.status.head_select, HeadSelection::Head1);
+
+        app.toggle_head();
+        assert_eq!(app.status.head, 0);
+        assert_eq!(app.status.head_select, HeadSelection::Both);
+
+        app.toggle_head();
+        assert_eq!(app.status.head, 0);
+        assert_eq!(app.status.head_select, HeadSelection::Head0);
+    }
+
+    #[test]
+    fn test_range_edit_modal_lifecycle_and_validation() {
+        let mut app = App::with_full_preset_config(0, BusType::IbmPc, StepMode::Single, PresetProfile::Pc35Hd);
+
+        // 1. Open for Format
+        app.open_range_modal(RangeModalKind::Format);
+        assert_eq!(app.show_range_modal, Some(RangeModalKind::Format));
+        assert_eq!(app.range_edit_field, RangeField::Start);
+        assert_eq!(app.range_input_start, "0");
+        assert_eq!(app.range_input_end, "79");
+        assert!(app.range_error_msg.is_none());
+
+        // Increment Start field
+        app.increment_active_range_field();
+        assert_eq!(app.range_input_start, "1");
+        app.increment_active_range_field();
+        assert_eq!(app.range_input_start, "2");
+        app.decrement_active_range_field();
+        assert_eq!(app.range_input_start, "1");
+
+        // Toggle field exclusively via Tab to End
+        app.toggle_range_field();
+        assert_eq!(app.range_edit_field, RangeField::End);
+
+        // Increment End field (clamped at max allowed 83)
+        app.range_input_end = "82".to_string();
+        app.increment_active_range_field();
+        assert_eq!(app.range_input_end, "83");
+        app.increment_active_range_field();
+        assert_eq!(app.range_input_end, "83"); // Clamped
+
+        // Decrement End field (clamped at 0)
+        app.range_input_end = "1".to_string();
+        app.decrement_active_range_field();
+        assert_eq!(app.range_input_end, "0");
+        app.decrement_active_range_field();
+        assert_eq!(app.range_input_end, "0"); // Clamped
+
+        // Edit End field: backspace twice, type "40"
+        app.range_input_start = "0".to_string();
+        app.range_input_end = "40".to_string();
+
+        // Validate
+        let res = app.validate_and_apply_range();
+        assert!(res.is_ok());
+        let (range, kind) = res.unwrap();
+        assert_eq!(range, TrackRange::new(0, 40));
+        assert_eq!(kind, RangeModalKind::Format);
+        assert_eq!(app.format_range, TrackRange::new(0, 40));
+        assert_eq!(app.show_range_modal, None);
+
+        // 2. Open for Erase and test error cases
+        app.open_range_modal(RangeModalKind::Erase);
+        assert_eq!(app.show_range_modal, Some(RangeModalKind::Erase));
+
+        // Set start to "50" and end to "20" -> should error start > end
+        app.range_edit_field = RangeField::Start;
+        app.range_input_start = "50".to_string();
+        app.range_input_end = "20".to_string();
+
+        let err_res = app.validate_and_apply_range();
+        assert!(err_res.is_err());
+        assert!(err_res.unwrap_err().contains("cannot exceed End track"));
+
+        // Set end to "90" -> exceeds max limit (84 for 80 TPI)
+        app.range_input_start = "10".to_string();
+        app.range_input_end = "90".to_string();
+        let err_res2 = app.validate_and_apply_range();
+        assert!(err_res2.is_err());
+        assert!(err_res2.unwrap_err().contains("exceeds max allowed"));
+
+        // Close and return to parent modal
+        app.close_range_modal(true);
+        assert_eq!(app.show_range_modal, None);
+        assert!(app.show_erase_modal);
+    }
+
+    #[test]
+    fn test_pending_confirmation_prompts_and_rendering() {
+        // Test all 6 prompt string variations
+        let c_fmt_trk = PendingConfirmation::FormatTrack { track: 0, head: 0, verify: true };
+        assert_eq!(c_fmt_trk.prompt_string(), "Confirm Format Track 00 (Head 0)? [y/N]");
+
+        let c_fmt_disk = PendingConfirmation::FormatDisk { range: TrackRange::new(0, 79), verify: true };
+        assert_eq!(c_fmt_disk.prompt_string(), "Confirm FULL DISK Format (00..79, Dual-Head)? [y/N]");
+
+        let c_fmt_range = PendingConfirmation::FormatRange { range: TrackRange::new(10, 20), verify: false };
+        assert_eq!(c_fmt_range.prompt_string(), "Confirm Format Range 10..20 (Dual-Head)? [y/N]");
+
+        let c_erase_trk = PendingConfirmation::EraseTrack { track: 40, head: 1 };
+        assert_eq!(c_erase_trk.prompt_string(), "Confirm Erase Track 40 (Head 1)? [y/N]");
+
+        let c_erase_disk = PendingConfirmation::EraseDisk { range: TrackRange::new(0, 79) };
+        assert_eq!(c_erase_disk.prompt_string(), "Confirm FULL DISK Erase (00..79, Dual-Head)? [y/N]");
+
+        let c_erase_range = PendingConfirmation::EraseRange { range: TrackRange::new(5, 15) };
+        assert_eq!(c_erase_range.prompt_string(), "Confirm Erase Range 05..15 (Dual-Head)? [y/N]");
+
+        // Test Format modal with confirmation active
+        let lines_fmt = build_format_modal_lines(
+            0,
+            0,
+            79,
+            "3.5\" HD (1.44M)",
+            500,
+            "IBM PC",
+            0,
+            80,
+            false,
+            true,
+            TrackRange::new(0, 79),
+            Some(&c_fmt_trk),
+        );
+        let text_fmt: String = lines_fmt
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text_fmt.contains("Confirm Format Track 00 (Head 0)? [y/N]"));
+        assert!(text_fmt.contains("Press Y to confirm & execute, or N / Enter / Esc to cancel"));
+
+        // Test Erase modal with confirmation active
+        let lines_erase = build_erase_modal_lines(
+            40,
+            1,
+            "3.5\" HD (1.44M)",
+            80,
+            false,
+            TrackRange::new(0, 79),
+            Some(&c_erase_trk),
+        );
+        let text_erase: String = lines_erase
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text_erase.contains("Confirm Erase Track 40 (Head 1)? [y/N]"));
+        assert!(text_erase.contains("Press Y to confirm & execute, or N / Enter / Esc to cancel"));
     }
 
     #[test]

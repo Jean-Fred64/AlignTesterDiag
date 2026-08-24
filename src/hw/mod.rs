@@ -291,9 +291,9 @@ pub enum HwCmd {
     SetVerbose(bool),
     SetBeep(bool),
     FormatTrack { track: u8, head: u8, verify: bool },
-    FormatDisk { tracks: u8, verify: bool },
+    FormatDisk { range: TrackRange, verify: bool },
     EraseTrack { track: u8, head: u8 },
-    EraseDisk { tracks: u8 },
+    EraseDisk { range: TrackRange },
     Stop,
     PanicReset,
     SetDiskFormat(DiskFormat),
@@ -3948,12 +3948,12 @@ pub fn handle_command(
                 &mut track_buffer,
             );
         }
-        HwCmd::FormatDisk { tracks, verify } => {
+        HwCmd::FormatDisk { range, verify } => {
             let mut track_buffer = MfmTrackBuffer::new();
             let _ = execute_format_disk(
                 port,
                 status,
-                tracks,
+                range,
                 verify,
                 rx_cmd,
                 tx_status,
@@ -3970,11 +3970,11 @@ pub fn handle_command(
                 tx_status,
             );
         }
-        HwCmd::EraseDisk { tracks } => {
+        HwCmd::EraseDisk { range } => {
             let _ = execute_erase_disk(
                 port,
                 status,
-                tracks,
+                range,
                 rx_cmd,
                 tx_status,
             );
@@ -4214,11 +4214,11 @@ pub fn execute_format_track(
     verified_ok
 }
 
-/// Executes a full multi-track low-level format and read-after-write verification on the entire diskette
+/// Executes a full multi-track low-level format and read-after-write verification on the specified track range
 pub fn execute_format_disk(
     port: &mut Box<dyn serialport::SerialPort>,
     status: &mut DriveStatus,
-    target_tracks: u8,
+    range: TrackRange,
     verify: bool,
     rx_cmd: &Receiver<HwCmd>,
     tx_status: &Sender<DriveStatus>,
@@ -4240,14 +4240,14 @@ pub fn execute_format_disk(
         status.write_protected = wp;
     }
 
-    let total_tracks = target_tracks;
+    let total_tracks = range.count();
     let total_heads = 2u8;
     let total_passes = (total_tracks as u16) * (total_heads as u16);
 
     if status.write_protect {
-        status.log_msg = String::from("Full Disk Format REJECTED: Disk is WRITE-PROTECTED (Pin 28 asserted)!");
+        status.log_msg = String::from("Format REJECTED: Disk is WRITE-PROTECTED (Pin 28 asserted)!");
         let prog = FormatProgress {
-            current_track: 0,
+            current_track: range.start,
             current_head: 0,
             total_tracks,
             total_heads,
@@ -4284,7 +4284,7 @@ pub fn execute_format_disk(
     let start_time = Instant::now();
 
     let prog = FormatProgress {
-        current_track: 0,
+        current_track: range.start,
         current_head: 0,
         total_tracks,
         total_heads,
@@ -4299,12 +4299,12 @@ pub fn execute_format_disk(
         expected_sectors: status.preset.format_profile().expected_sector_count(status.bitrate, 0),
         elapsed_secs: 0.0,
         eta_secs: 0.0,
-        message: "Starting Full Disk Format...".to_string(),
+        message: format!("Starting Format (Tracks {:02}..{:02})...", range.start, range.end),
     };
     status.format_progress = Some(prog);
     let _ = tx_status.send(status.clone());
 
-    for cyl in 0..total_tracks {
+    for cyl in range.start..=range.end {
         for head in 0..total_heads {
             // Check for user abort commands
             while let Ok(cmd) = rx_cmd.try_recv() {
@@ -4383,8 +4383,8 @@ pub fn execute_format_disk(
 
     let elapsed = start_time.elapsed().as_secs_f64();
     status.log_msg = format!(
-        "Full Disk Format COMPLETED successfully! ({} tracks, 2 heads, total {:.1}s)",
-        total_tracks, elapsed
+        "Format COMPLETED successfully! (Tracks {:02}..{:02}, {} tracks, 2 heads, total {:.1}s)",
+        range.start, range.end, total_tracks, elapsed
     );
     if let Some(ref mut p) = status.format_progress {
         p.step = FormatStep::Completed;
@@ -4394,7 +4394,7 @@ pub fn execute_format_disk(
         p.verification_ok = true;
         p.elapsed_secs = elapsed;
         p.eta_secs = 0.0;
-        p.message = "Full Disk Format Completed OK".to_string();
+        p.message = "Format Completed OK".to_string();
     }
     let _ = tx_status.send(status.clone());
     true
@@ -4553,11 +4553,11 @@ pub fn execute_erase_track(
     erase_ok
 }
 
-/// Executes a full multi-track low-level DC erase across the diskette
+/// Executes a full multi-track low-level DC erase across the specified track range
 pub fn execute_erase_disk(
     port: &mut Box<dyn serialport::SerialPort>,
     status: &mut DriveStatus,
-    target_tracks: u8,
+    range: TrackRange,
     rx_cmd: &Receiver<HwCmd>,
     tx_status: &Sender<DriveStatus>,
 ) -> bool {
@@ -4577,14 +4577,14 @@ pub fn execute_erase_disk(
         status.write_protected = wp;
     }
 
-    let total_tracks = target_tracks;
+    let total_tracks = range.count();
     let total_heads = 2u8;
     let total_passes = (total_tracks as u16) * (total_heads as u16);
 
     if status.write_protect {
-        status.log_msg = String::from("Full Disk Erase REJECTED: Disk is WRITE-PROTECTED (Pin 28 asserted)!");
+        status.log_msg = String::from("Erase REJECTED: Disk is WRITE-PROTECTED (Pin 28 asserted)!");
         let prog = FormatProgress {
-            current_track: 0,
+            current_track: range.start,
             current_head: 0,
             total_tracks,
             total_heads,
@@ -4621,7 +4621,7 @@ pub fn execute_erase_disk(
     let start_time = Instant::now();
 
     let prog = FormatProgress {
-        current_track: 0,
+        current_track: range.start,
         current_head: 0,
         total_tracks,
         total_heads,
@@ -4636,12 +4636,12 @@ pub fn execute_erase_disk(
         expected_sectors: 0,
         elapsed_secs: 0.0,
         eta_secs: 0.0,
-        message: "Starting Full Disk DC Erase...".to_string(),
+        message: format!("Starting DC Erase (Tracks {:02}..{:02})...", range.start, range.end),
     };
     status.format_progress = Some(prog);
     let _ = tx_status.send(status.clone());
 
-    for cyl in 0..total_tracks {
+    for cyl in range.start..=range.end {
         for head in 0..total_heads {
             // Check for user abort commands
             while let Ok(cmd) = rx_cmd.try_recv() {
@@ -4715,8 +4715,8 @@ pub fn execute_erase_disk(
 
     let elapsed = start_time.elapsed().as_secs_f64();
     status.log_msg = format!(
-        "Full Disk DC Erase SUCCESS: {} tracks ({} passes in {:.1}s)",
-        total_tracks, total_passes, elapsed
+        "DC Erase SUCCESS: Tracks {:02}..{:02} ({} tracks, {} passes in {:.1}s)",
+        range.start, range.end, total_tracks, total_passes, elapsed
     );
     if let Some(ref mut p) = status.format_progress {
         p.step = FormatStep::Completed;

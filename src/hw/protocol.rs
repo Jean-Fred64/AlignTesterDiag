@@ -436,6 +436,11 @@ impl PresetProfile {
         }
     }
 
+    /// Standard default track range for this preset (0..=39 or 0..=79)
+    pub fn default_track_range(&self) -> TrackRange {
+        TrackRange::new(0, self.default_track_count().saturating_sub(1))
+    }
+
     /// Case-insensitive parser supporting aliases for CLI and commands
     pub fn from_str_loose(s: &str) -> Option<Self> {
         let clean = s.trim().to_lowercase().replace(['-', '_', '.', ' ', '"', '\''], "");
@@ -531,6 +536,51 @@ pub fn build_erase_flux_packet(ticks: u32) -> [u8; 6] {
 /// Builds a 3-byte `CMD_GET_PIN` packet: `[0x14, 0x03, pin_num]`.
 pub fn build_get_pin_packet(pin_num: u8) -> [u8; 3] {
     [CMD_GET_PIN, 0x03, pin_num]
+}
+
+/// Inclusive track range [start..=end] for batch formatting or erasing
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrackRange {
+    pub start: u8,
+    pub end: u8,
+}
+
+impl TrackRange {
+    pub const fn new(start: u8, end: u8) -> Self {
+        Self { start, end }
+    }
+
+    /// Number of tracks in the range if start <= end, otherwise 0
+    pub const fn count(&self) -> u8 {
+        if self.end >= self.start {
+            self.end - self.start + 1
+        } else {
+            0
+        }
+    }
+
+    /// Checks if the range is valid (start <= end and end < max_tracks)
+    pub const fn is_valid(&self, max_tracks: u8) -> bool {
+        self.start <= self.end && (self.end as u16) < (max_tracks as u16)
+    }
+
+    /// Creates a full disk track range for given track count (0..=tracks-1)
+    pub const fn full_disk(tracks: u8) -> Self {
+        if tracks > 0 {
+            Self {
+                start: 0,
+                end: tracks - 1,
+            }
+        } else {
+            Self { start: 0, end: 0 }
+        }
+    }
+}
+
+impl Default for TrackRange {
+    fn default() -> Self {
+        Self { start: 0, end: 79 }
+    }
 }
 
 /// Status of the low-level format engine state machine
@@ -798,6 +848,39 @@ mod tests {
         assert_eq!(PresetProfile::Cpc30Data.default_track_count(), 40);
         assert_eq!(PresetProfile::Cpc30Data.max_track_count(), 42);
         assert!(PresetProfile::Cpc30Data.is_48_tpi());
+
+        // TrackRange tests
+        let tr_default = TrackRange::default();
+        assert_eq!(tr_default, TrackRange { start: 0, end: 79 });
+        assert_eq!(tr_default.count(), 80);
+        assert!(tr_default.is_valid(80));
+        assert!(tr_default.is_valid(84));
+        assert!(!tr_default.is_valid(79));
+
+        let tr_custom = TrackRange::new(10, 20);
+        assert_eq!(tr_custom.count(), 11);
+        assert!(tr_custom.is_valid(80));
+
+        let tr_invalid = TrackRange::new(20, 10);
+        assert_eq!(tr_invalid.count(), 0);
+        assert!(!tr_invalid.is_valid(80));
+
+        let tr_full_40 = TrackRange::full_disk(40);
+        assert_eq!(tr_full_40, TrackRange { start: 0, end: 39 });
+        assert_eq!(tr_full_40.count(), 40);
+
+        let tr_full_0 = TrackRange::full_disk(0);
+        assert_eq!(tr_full_0, TrackRange { start: 0, end: 0 });
+
+        // PresetProfile default_track_range
+        assert_eq!(PresetProfile::Pc35Hd.default_track_range(), TrackRange::new(0, 79));
+        assert_eq!(PresetProfile::Pc35Dd.default_track_range(), TrackRange::new(0, 79));
+        assert_eq!(PresetProfile::Pc525Hd.default_track_range(), TrackRange::new(0, 79));
+        assert_eq!(PresetProfile::Pc525DdOnHd.default_track_range(), TrackRange::new(0, 39));
+        assert_eq!(PresetProfile::Pc525Dd.default_track_range(), TrackRange::new(0, 39));
+        assert_eq!(PresetProfile::Amiga35Dd.default_track_range(), TrackRange::new(0, 79));
+        assert_eq!(PresetProfile::Atari35Dd.default_track_range(), TrackRange::new(0, 79));
+        assert_eq!(PresetProfile::Cpc30Data.default_track_range(), TrackRange::new(0, 39));
 
         // FormatProgress Default values
         let prog = FormatProgress::default();

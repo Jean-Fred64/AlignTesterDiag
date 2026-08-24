@@ -5,8 +5,8 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
     Frame,
 };
-use crate::app::{App, HeadSelection};
-use crate::hw::HwActivity;
+use crate::app::{App, HeadSelection, PendingConfirmation, RangeField, RangeModalKind};
+use crate::hw::{HwActivity, TrackRange};
 
 /// Builds the track ruler line with visual highlight for active tracks (0 to 83)
 pub fn build_ruler_line(current_track: u8) -> Line<'static> {
@@ -1136,8 +1136,6 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
 
     f.render_widget(paragraph, modal_area);
 }
-
-/// Builds the formatted confirmation and selection lines for the Low-Level Format modal dialog
 #[allow(clippy::too_many_arguments)]
 pub fn build_format_modal_lines(
     track: u8,
@@ -1150,6 +1148,8 @@ pub fn build_format_modal_lines(
     target_tracks: u8,
     is_48_tpi: bool,
     format_verify: bool,
+    range: TrackRange,
+    pending_confirm: Option<&PendingConfirmation>,
 ) -> Vec<Line<'static>> {
     let accent_bold = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
     let red_bold = Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD);
@@ -1161,7 +1161,7 @@ pub fn build_format_modal_lines(
     let max_tracks_allowed = if is_48_tpi { 42 } else { 84 };
     let last_track_idx = target_tracks.saturating_sub(1);
 
-    vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled("  ⚠️  LOW-LEVEL MFM FORMATTING & TRACK SYNTHESIZER", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
         ]),
@@ -1180,18 +1180,24 @@ pub fn build_format_modal_lines(
             Span::styled(preset_label.to_string(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
-            Span::styled("  Current Target: ", gray),
-            Span::styled(format!("Track {:02}, Head {} (Bitrate: {} kbps)", track, head, bitrate), cyan),
+            Span::styled("  [", gray),
+            Span::styled("+/- or [ ]", accent_bold),
+            Span::styled("] Target Track  : ", white),
+            Span::styled(format!("Track {:02}", track), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled("  |  [", gray),
+            Span::styled("H", accent_bold),
+            Span::styled("] Head : ", white),
+            Span::styled(format!("Head {}", head), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  (Bitrate: {} kbps)", bitrate), cyan),
         ]),
-        Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", gray)),
-        Line::from(""),
         Line::from(vec![
             Span::styled("  [", gray),
-            Span::styled("+ / -", accent_bold),
+            Span::styled("PgUp/PgDn", accent_bold),
             Span::styled("] Target Tracks : ", white),
             Span::styled(format!("{}", target_tracks), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
             Span::styled(format!(" (Range: 00..{:02} | Standard: {}, Max: {})", last_track_idx, standard_tracks, max_tracks_allowed), cyan),
         ]),
+        Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", gray)),
         Line::from(vec![
             Span::styled("  [", gray),
             Span::styled("V", accent_bold),
@@ -1212,34 +1218,62 @@ pub fn build_format_modal_lines(
                 cyan,
             ),
         ]),
-        Line::from(""),
-        Line::from(vec![
+    ];
+
+    if let Some(confirm) = pending_confirm {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", Style::default().fg(Color::Yellow))));
+        lines.push(Line::from(vec![
+            Span::styled("  ⚠️  ", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+            Span::styled(confirm.prompt_string(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("     Press ", gray),
+            Span::styled("Y", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(" to confirm & execute, or ", gray),
+            Span::styled("N / Enter / Esc", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),
+            Span::styled(" to cancel", gray),
+        ]));
+        lines.push(Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", Style::default().fg(Color::Yellow))));
+    } else {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
             Span::styled("  [", gray),
             Span::styled("T", accent_bold),
             Span::styled("] Format Current ", white),
             Span::styled("T", accent_bold),
             Span::styled(format!("rack only (Track {:02}, Head {})", track, head), white),
-        ]),
-        Line::from(vec![
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  [", gray),
+            Span::styled("R", accent_bold),
+            Span::styled("] Format Track ", white),
+            Span::styled("R", accent_bold),
+            Span::styled(format!("ange     (Tracks {:02}..{:02}, Dual-Head)", range.start, range.end), white),
+        ]));
+        lines.push(Line::from(vec![
             Span::styled("  [", gray),
             Span::styled("D", accent_bold),
             Span::styled("] Format Entire ", white),
             Span::styled("D", accent_bold),
-            Span::styled(format!("isk (Tracks 00..{:02}, Dual-Head)", last_track_idx), white),
-        ]),
-        Line::from(""),
-        Line::from(vec![
+            Span::styled(format!("isk     (Tracks 00..{:02}, Dual-Head)", last_track_idx), white),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
             Span::styled("  [", gray),
             Span::styled("Esc", red_bold),
             Span::styled("] Cancel & Return", white),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", gray)),
-        Line::from(vec![
-            Span::styled("  Hardware Protection: ", gray),
-            Span::styled("Write-Protect pin 28 is checked before writing. Read-after-write auto-verifies CRC.", Style::default().fg(Color::LightCyan)),
-        ]),
-    ]
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("  ────────────────────────────────────────────────────────────────────────", gray)));
+    lines.push(Line::from(vec![
+        Span::styled("  Hardware Protection: ", gray),
+        Span::styled("Write-Protect pin 28 is checked before writing. Read-after-write auto-verifies CRC.", Style::default().fg(Color::LightCyan)),
+    ]));
+
+    lines
 }
 
 /// Renders an interactive centered overlay format confirmation modal dialog
@@ -1257,9 +1291,11 @@ pub fn render_format_modal(
     target_tracks: u8,
     is_48_tpi: bool,
     format_verify: bool,
+    range: TrackRange,
+    pending_confirm: Option<&PendingConfirmation>,
 ) {
     let modal_width = (area.width.saturating_sub(2)).clamp(84, 88).min(area.width);
-    let modal_height = (area.height.saturating_sub(2)).clamp(23, 25).min(area.height);
+    let modal_height = (area.height.saturating_sub(2)).clamp(24, 26).min(area.height);
     let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(x, y, modal_width, modal_height);
@@ -1284,6 +1320,8 @@ pub fn render_format_modal(
         target_tracks,
         is_48_tpi,
         format_verify,
+        range,
+        pending_confirm,
     ))
     .block(block)
     .alignment(ratatui::layout::Alignment::Left);
@@ -1298,6 +1336,8 @@ pub fn build_erase_modal_lines(
     preset_label: &str,
     target_tracks: u8,
     is_48_tpi: bool,
+    range: TrackRange,
+    pending_confirm: Option<&PendingConfirmation>,
 ) -> Vec<Line<'static>> {
     let accent_bold = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
     let red_bold = Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD);
@@ -1309,14 +1349,24 @@ pub fn build_erase_modal_lines(
     let max_tracks_allowed = if is_48_tpi { 42 } else { 84 };
     let last_track_idx = target_tracks.saturating_sub(1);
 
-    vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled("Target Preset : ", gray),
             Span::styled(preset_label.to_string(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
             Span::styled("[", gray),
-            Span::styled("+ / -", accent_bold),
+            Span::styled("+/- or [ ]", accent_bold),
+            Span::styled("] Target Track  : ", white),
+            Span::styled(format!("Track {:02}", track), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled("  |  [", gray),
+            Span::styled("H", accent_bold),
+            Span::styled("] Head : ", white),
+            Span::styled(format!("Head {}", head), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled("[", gray),
+            Span::styled("PgUp/PgDn", accent_bold),
             Span::styled("] Target Tracks : ", white),
             Span::styled(format!("{}", target_tracks), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
             Span::styled(format!(" (Range: 00..{:02} | Standard: {}, Max: {})", last_track_idx, standard_tracks, max_tracks_allowed), cyan),
@@ -1325,27 +1375,55 @@ pub fn build_erase_modal_lines(
         Line::from(vec![
             Span::styled("⚠️  WARNING: This will permanently wipe all magnetic flux on target!", red_bold),
         ]),
-        Line::from(""),
-        Line::from(vec![
+    ];
+
+    if let Some(confirm) = pending_confirm {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("────────────────────────────────────────────────────────────────────────────", Style::default().fg(Color::Yellow))));
+        lines.push(Line::from(vec![
+            Span::styled("⚠️  ", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),
+            Span::styled(confirm.prompt_string(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("   Press ", gray),
+            Span::styled("Y", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(" to confirm & execute, or ", gray),
+            Span::styled("N / Enter / Esc", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),
+            Span::styled(" to cancel", gray),
+        ]));
+        lines.push(Line::from(Span::styled("────────────────────────────────────────────────────────────────────────────", Style::default().fg(Color::Yellow))));
+    } else {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
             Span::styled("[", gray),
             Span::styled("T", accent_bold),
             Span::styled("] Erase Current ", white),
             Span::styled("T", accent_bold),
             Span::styled(format!("rack only  (Track {:02}, Head {})", track, head), white),
-        ]),
-        Line::from(vec![
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("[", gray),
+            Span::styled("R", accent_bold),
+            Span::styled("] Erase Track ", white),
+            Span::styled("R", accent_bold),
+            Span::styled(format!("ange     (Tracks {:02}..{:02}, Dual-Head)", range.start, range.end), white),
+        ]));
+        lines.push(Line::from(vec![
             Span::styled("[", gray),
             Span::styled("D", accent_bold),
             Span::styled("] Erase Entire ", white),
             Span::styled("D", accent_bold),
             Span::styled(format!("isk         (Tracks 00..{:02}, Dual-Head)", last_track_idx), white),
-        ]),
-        Line::from(vec![
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
             Span::styled("[", gray),
             Span::styled("Esc", red_bold),
             Span::styled("] Cancel & Return", white),
-        ]),
-    ]
+        ]));
+    }
+
+    lines
 }
 
 /// Renders an interactive centered overlay DC erase confirmation modal dialog
@@ -1358,9 +1436,11 @@ pub fn render_erase_modal(
     preset_label: &str,
     target_tracks: u8,
     is_48_tpi: bool,
+    range: TrackRange,
+    pending_confirm: Option<&PendingConfirmation>,
 ) {
     let modal_width = (area.width.saturating_sub(2)).clamp(78, 84).min(area.width);
-    let modal_height = (area.height.saturating_sub(2)).clamp(13, 15).min(area.height);
+    let modal_height = (area.height.saturating_sub(2)).clamp(15, 18).min(area.height);
     let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(x, y, modal_width, modal_height);
@@ -1380,10 +1460,153 @@ pub fn render_erase_modal(
         preset_label,
         target_tracks,
         is_48_tpi,
+        range,
+        pending_confirm,
     ))
     .block(block)
     .alignment(ratatui::layout::Alignment::Left);
 
+    f.render_widget(paragraph, modal_area);
+}
+
+/// Renders an interactive custom track range editor modal dialog
+#[allow(clippy::too_many_arguments)]
+pub fn render_range_edit_modal(
+    f: &mut Frame,
+    area: Rect,
+    kind: RangeModalKind,
+    start_str: &str,
+    end_str: &str,
+    active_field: RangeField,
+    max_tracks: u8,
+    error_msg: Option<&str>,
+) {
+    let modal_width = 68.min(area.width.saturating_sub(2));
+    let modal_height = 15.min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
+    let modal_area = Rect::new(x, y, modal_width, modal_height);
+
+    f.render_widget(Clear, modal_area);
+
+    let (title, title_col, bg_col) = match kind {
+        RangeModalKind::Format => (
+            " 🔢 Set Custom Track Range (Format) ",
+            Color::LightGreen,
+            Color::Rgb(20, 15, 30),
+        ),
+        RangeModalKind::Erase => (
+            " 🔢 Set Custom Track Range (DC Erase) ",
+            Color::LightRed,
+            Color::Rgb(25, 15, 20),
+        ),
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .title(title)
+        .title_style(Style::default().fg(title_col).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(bg_col));
+
+    let accent_bold = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let white = Style::default().fg(Color::White);
+    let gray = Style::default().fg(Color::DarkGray);
+    let cyan = Style::default().fg(Color::Cyan);
+
+    let start_active = active_field == RangeField::Start;
+    let end_active = active_field == RangeField::End;
+
+    let start_style = if start_active {
+        Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+    };
+
+    let end_style = if end_active {
+        Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+    };
+
+    let max_idx = max_tracks.saturating_sub(1);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(" Enter track bounds (00 to ", gray),
+            Span::styled(format!("{:02}", max_idx), cyan),
+            Span::styled(") for batch operation:", gray),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            if start_active {
+                Span::styled(" ► Start Track : [ ", accent_bold)
+            } else {
+                Span::styled("   Start Track : [ ", white)
+            },
+            Span::styled(format!("{:>2}", if start_str.is_empty() { "_" } else { start_str }), start_style),
+            Span::styled(" ]", if start_active { accent_bold } else { white }),
+            Span::styled(format!("  (Minimum: 00, Maximum: {:02})", max_idx), gray),
+        ]),
+        Line::from(vec![
+            if end_active {
+                Span::styled(" ► End Track   : [ ", accent_bold)
+            } else {
+                Span::styled("   End Track   : [ ", white)
+            },
+            Span::styled(format!("{:>2}", if end_str.is_empty() { "_" } else { end_str }), end_style),
+            Span::styled(" ]", if end_active { accent_bold } else { white }),
+            Span::styled(format!("  (Must be >= Start Track and <= {:02})", max_idx), gray),
+        ]),
+        Line::from(""),
+    ];
+
+    if let Some(err) = error_msg {
+        lines.push(Line::from(Span::styled(
+            format!(" ⚠️  {}", err),
+            Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        let s_val = start_str.parse::<u8>().ok();
+        let e_val = end_str.parse::<u8>().ok();
+        if let (Some(s), Some(e)) = (s_val, e_val) {
+            if s <= e && e < max_tracks {
+                let count = e - s + 1;
+                lines.push(Line::from(vec![
+                    Span::styled(" Total: ", gray),
+                    Span::styled(format!("{} tracks", count), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!(" (Tracks {:02}..{:02}, Dual-Head = {} passes)", s, e, (count as usize) * 2), cyan),
+                ]));
+            } else {
+                lines.push(Line::from(Span::styled(" Please specify a valid range", gray)));
+            }
+        } else {
+            lines.push(Line::from(Span::styled(" Please specify numeric bounds", gray)));
+        }
+    }
+
+    lines.push(Line::from(Span::styled(" ────────────────────────────────────────────────────────────", gray)));
+    lines.push(Line::from(vec![
+        Span::styled(" [", gray),
+        Span::styled("Tab", accent_bold),
+        Span::styled("] Switch Field   [", gray),
+        Span::styled("+/- or ↑/↓", accent_bold),
+        Span::styled("] Inc/Dec   [", gray),
+        Span::styled("0-9", accent_bold),
+        Span::styled("] Edit   [", gray),
+        Span::styled("Bksp", accent_bold),
+        Span::styled("] Clear", gray),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" [", gray),
+        Span::styled("Enter", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+        Span::styled("] Validate & Start      [", gray),
+        Span::styled("Esc", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),
+        Span::styled("] Cancel & Back", gray),
+    ]));
+
+    let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, modal_area);
 }
 

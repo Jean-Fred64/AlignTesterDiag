@@ -1,4 +1,4 @@
-use crate::hw::{BusType, DiskFormat, DisplayMode, DriveStatus, HwActivity, PresetProfile, StepMode};
+use crate::hw::{BusType, DiskFormat, DisplayMode, DriveStatus, HwActivity, PresetProfile, StepMode, TrackRange};
 
 /// Three-state head selection mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -23,6 +23,69 @@ impl HeadSelection {
             HeadSelection::Head0 => "0",
             HeadSelection::Head1 => "1",
             HeadSelection::Both => "BOTH (0+1)",
+        }
+    }
+}
+
+/// Active field in custom track range editor
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RangeField {
+    #[default]
+    Start,
+    End,
+}
+
+/// Target modal type that triggered the range editor
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeModalKind {
+    Format,
+    Erase,
+}
+
+/// Explicit user confirmation state before running destructive format/erase operations
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingConfirmation {
+    FormatTrack { track: u8, head: u8, verify: bool },
+    FormatDisk { range: TrackRange, verify: bool },
+    FormatRange { range: TrackRange, verify: bool },
+    EraseTrack { track: u8, head: u8 },
+    EraseDisk { range: TrackRange },
+    EraseRange { range: TrackRange },
+}
+
+impl PendingConfirmation {
+    pub fn prompt_string(&self) -> String {
+        match self {
+            PendingConfirmation::FormatTrack { track, head, .. } => {
+                format!("Confirm Format Track {:02} (Head {})? [y/N]", track, head)
+            }
+            PendingConfirmation::FormatDisk { range, .. } => {
+                format!(
+                    "Confirm FULL DISK Format (00..{:02}, Dual-Head)? [y/N]",
+                    range.end
+                )
+            }
+            PendingConfirmation::FormatRange { range, .. } => {
+                format!(
+                    "Confirm Format Range {:02}..{:02} (Dual-Head)? [y/N]",
+                    range.start, range.end
+                )
+            }
+            PendingConfirmation::EraseTrack { track, head } => {
+                format!("Confirm Erase Track {:02} (Head {})? [y/N]", track, head)
+            }
+            PendingConfirmation::EraseDisk { range } => {
+                format!(
+                    "Confirm FULL DISK Erase (00..{:02}, Dual-Head)? [y/N]",
+                    range.end
+                )
+            }
+            PendingConfirmation::EraseRange { range } => {
+                format!(
+                    "Confirm Erase Range {:02}..{:02} (Dual-Head)? [y/N]",
+                    range.start, range.end
+                )
+            }
         }
     }
 }
@@ -161,11 +224,11 @@ pub enum Action {
     CloseFormatModal,
     ToggleFormatVerify,
     FormatTrack { track: u8, head: u8, verify: bool },
-    FormatDisk { tracks: u8, verify: bool },
+    FormatDisk { range: TrackRange, verify: bool },
     OpenEraseModal,
     CloseEraseModal,
     EraseTrack { track: u8, head: u8 },
-    EraseDisk { tracks: u8 },
+    EraseDisk { range: TrackRange },
 }
 
 /// Application state wrapper
@@ -183,8 +246,16 @@ pub struct App {
     pub show_format_modal: bool,
     pub format_verify: bool,
     pub format_target_tracks: u8,
+    pub format_range: TrackRange,
     pub show_erase_modal: bool,
     pub erase_target_tracks: u8,
+    pub erase_range: TrackRange,
+    pub show_range_modal: Option<RangeModalKind>,
+    pub range_edit_field: RangeField,
+    pub range_input_start: String,
+    pub range_input_end: String,
+    pub range_error_msg: Option<String>,
+    pub pending_confirmation: Option<PendingConfirmation>,
     pub disk_format: DiskFormat,
     pub bus_type: BusType,
     pub step_mode: StepMode,
@@ -235,6 +306,11 @@ impl App {
         } else {
             80
         };
+        let default_range = if preset.is_48_tpi() || step_mode == StepMode::Double {
+            TrackRange::new(0, 39)
+        } else {
+            preset.default_track_range()
+        };
         Self {
             status,
             motor_on: false,
@@ -249,8 +325,16 @@ impl App {
             show_format_modal: false,
             format_verify: true,
             format_target_tracks: default_tracks,
+            format_range: default_range,
             show_erase_modal: false,
             erase_target_tracks: default_tracks,
+            erase_range: default_range,
+            show_range_modal: None,
+            range_edit_field: RangeField::Start,
+            range_input_start: String::new(),
+            range_input_end: String::new(),
+            range_error_msg: None,
+            pending_confirmation: None,
             disk_format: preset.format_profile(),
             bus_type,
             step_mode,
@@ -274,6 +358,34 @@ impl App {
         self.format_verify = !self.format_verify;
     }
 
+    pub fn default_track_range(&self) -> TrackRange {
+        if self.is_48_tpi() {
+            TrackRange::new(0, 39)
+        } else {
+            self.preset.default_track_range()
+        }
+    }
+
+    pub fn set_format_range(&mut self, start: u8, end: u8) -> bool {
+        let range = TrackRange::new(start, end);
+        if range.is_valid(self.max_format_tracks()) {
+            self.format_range = range;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_erase_range(&mut self, start: u8, end: u8) -> bool {
+        let range = TrackRange::new(start, end);
+        if range.is_valid(self.max_erase_tracks()) {
+            self.erase_range = range;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn default_format_tracks(&self) -> u8 {
         if self.is_48_tpi() {
             40
@@ -288,6 +400,10 @@ impl App {
         } else {
             84
         }
+    }
+
+    pub fn max_tracks(&self) -> u8 {
+        self.max_format_tracks()
     }
 
     pub fn increment_format_tracks(&mut self) {
@@ -324,21 +440,168 @@ impl App {
         }
     }
 
+    pub fn step_track_up(&mut self) -> u8 {
+        let max = self.step_mode.max_logical_tracks();
+        let next = self.status.track.saturating_add(1).min(max);
+        self.status.track = next;
+        self.status.target_track = next;
+        next
+    }
+
+    pub fn step_track_down(&mut self) -> u8 {
+        let prev = self.status.track.saturating_sub(1);
+        self.status.track = prev;
+        self.status.target_track = prev;
+        prev
+    }
+
+    pub fn open_range_modal(&mut self, kind: RangeModalKind) {
+        self.show_format_modal = false;
+        self.show_erase_modal = false;
+        self.show_range_modal = Some(kind);
+        self.range_edit_field = RangeField::Start;
+        self.range_error_msg = None;
+        match kind {
+            RangeModalKind::Format => {
+                self.range_input_start = format!("{}", self.format_range.start);
+                self.range_input_end = format!("{}", self.format_range.end);
+            }
+            RangeModalKind::Erase => {
+                self.range_input_start = format!("{}", self.erase_range.start);
+                self.range_input_end = format!("{}", self.erase_range.end);
+            }
+        }
+    }
+
+    pub fn close_range_modal(&mut self, return_to_parent: bool) {
+        let kind = self.show_range_modal;
+        self.show_range_modal = None;
+        self.range_error_msg = None;
+        if return_to_parent {
+            match kind {
+                Some(RangeModalKind::Format) => self.show_format_modal = true,
+                Some(RangeModalKind::Erase) => self.show_erase_modal = true,
+                None => {}
+            }
+        }
+    }
+
+    pub fn toggle_range_field(&mut self) {
+        self.range_edit_field = match self.range_edit_field {
+            RangeField::Start => RangeField::End,
+            RangeField::End => RangeField::Start,
+        };
+        self.range_error_msg = None;
+    }
+
+    pub fn increment_active_range_field(&mut self) {
+        let max_val = self.max_format_tracks().saturating_sub(1);
+        let target = match self.range_edit_field {
+            RangeField::Start => &mut self.range_input_start,
+            RangeField::End => &mut self.range_input_end,
+        };
+        let current: u8 = target.parse().unwrap_or(0);
+        let next = current.saturating_add(1).min(max_val);
+        *target = format!("{}", next);
+        self.range_error_msg = None;
+    }
+
+    pub fn decrement_active_range_field(&mut self) {
+        let target = match self.range_edit_field {
+            RangeField::Start => &mut self.range_input_start,
+            RangeField::End => &mut self.range_input_end,
+        };
+        let current: u8 = target.parse().unwrap_or(0);
+        let prev = current.saturating_sub(1);
+        *target = format!("{}", prev);
+        self.range_error_msg = None;
+    }
+
+    pub fn range_input_push_digit(&mut self, c: char) {
+        let target = match self.range_edit_field {
+            RangeField::Start => &mut self.range_input_start,
+            RangeField::End => &mut self.range_input_end,
+        };
+        if target.len() < 2 {
+            target.push(c);
+            self.range_error_msg = None;
+        }
+    }
+
+    pub fn range_input_backspace(&mut self) {
+        let target = match self.range_edit_field {
+            RangeField::Start => &mut self.range_input_start,
+            RangeField::End => &mut self.range_input_end,
+        };
+        target.pop();
+        self.range_error_msg = None;
+    }
+
+    pub fn validate_and_apply_range(&mut self) -> Result<(TrackRange, RangeModalKind), String> {
+        let kind = self
+            .show_range_modal
+            .ok_or_else(|| "No range modal active".to_string())?;
+        let start: u8 = self
+            .range_input_start
+            .parse()
+            .map_err(|_| "Start track is not a valid number".to_string())?;
+        let end: u8 = self
+            .range_input_end
+            .parse()
+            .map_err(|_| "End track is not a valid number".to_string())?;
+        let max_limit = self.max_format_tracks();
+
+        if start > end {
+            return Err(format!(
+                "Start track ({}) cannot exceed End track ({})",
+                start, end
+            ));
+        }
+        if end >= max_limit {
+            return Err(format!(
+                "End track ({}) exceeds max allowed ({})",
+                end,
+                max_limit.saturating_sub(1)
+            ));
+        }
+
+        let range = TrackRange::new(start, end);
+        match kind {
+            RangeModalKind::Format => self.format_range = range,
+            RangeModalKind::Erase => self.erase_range = range,
+        }
+        self.show_range_modal = None;
+        self.range_error_msg = None;
+        Ok((range, kind))
+    }
+
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
     }
 
     pub fn toggle_format_modal(&mut self) {
         self.show_format_modal = !self.show_format_modal;
-        if self.show_format_modal && (self.format_target_tracks == 0 || self.format_target_tracks > self.max_format_tracks()) {
-            self.format_target_tracks = self.default_format_tracks();
+        self.pending_confirmation = None;
+        if self.show_format_modal {
+            if self.format_target_tracks == 0 || self.format_target_tracks > self.max_format_tracks() {
+                self.format_target_tracks = self.default_format_tracks();
+            }
+            if !self.format_range.is_valid(self.max_format_tracks()) {
+                self.format_range = self.default_track_range();
+            }
         }
     }
 
     pub fn toggle_erase_modal(&mut self) {
         self.show_erase_modal = !self.show_erase_modal;
-        if self.show_erase_modal && (self.erase_target_tracks == 0 || self.erase_target_tracks > self.max_erase_tracks()) {
-            self.erase_target_tracks = self.default_erase_tracks();
+        self.pending_confirmation = None;
+        if self.show_erase_modal {
+            if self.erase_target_tracks == 0 || self.erase_target_tracks > self.max_erase_tracks() {
+                self.erase_target_tracks = self.default_erase_tracks();
+            }
+            if !self.erase_range.is_valid(self.max_erase_tracks()) {
+                self.erase_range = self.default_track_range();
+            }
         }
     }
 
@@ -399,6 +662,11 @@ impl App {
     pub fn toggle_head(&mut self) {
         self.head_selection = self.head_selection.toggle_next();
         self.status.head_select = self.head_selection;
+        self.status.head = match self.head_selection {
+            HeadSelection::Head0 => 0,
+            HeadSelection::Head1 => 1,
+            HeadSelection::Both => 0,
+        };
     }
 
     pub fn toggle_drive_unit(&mut self) {
@@ -473,6 +741,8 @@ impl App {
         self.status.target_track = self.status.target_track.min(self.step_mode.max_logical_tracks());
         self.format_target_tracks = self.default_format_tracks();
         self.erase_target_tracks = self.default_erase_tracks();
+        self.format_range = self.default_track_range();
+        self.erase_range = self.default_track_range();
     }
 
     pub fn set_step_mode(&mut self, mode: StepMode) {
@@ -482,6 +752,8 @@ impl App {
         self.status.target_track = self.status.target_track.min(self.step_mode.max_logical_tracks());
         self.format_target_tracks = self.default_format_tracks();
         self.erase_target_tracks = self.default_erase_tracks();
+        self.format_range = self.default_track_range();
+        self.erase_range = self.default_track_range();
     }
 
     pub fn step_mode(&self) -> StepMode {
@@ -501,6 +773,8 @@ impl App {
         self.status.density = self.status.bitrate == 500;
         self.format_target_tracks = self.default_format_tracks();
         self.erase_target_tracks = self.default_erase_tracks();
+        self.format_range = self.default_track_range();
+        self.erase_range = self.default_track_range();
     }
 
     pub fn cycle_preset(&mut self) {
@@ -1358,10 +1632,35 @@ mod tests {
         assert_eq!(app.status.mode, DisplayMode::Erase);
         assert_eq!(app.status.activity, HwActivity::Erasing);
 
-        app.handle_action(Action::EraseDisk { tracks: 40 });
+        app.handle_action(Action::EraseDisk { range: TrackRange::new(0, 39) });
         assert!(!app.show_erase_modal);
         assert_eq!(app.status.mode, DisplayMode::Erase);
         assert_eq!(app.status.activity, HwActivity::Erasing);
+    }
+
+    #[test]
+    fn test_app_track_ranges() {
+        let mut app = App::with_full_preset_config(0, BusType::IbmPc, StepMode::Single, PresetProfile::Pc35Hd);
+        assert_eq!(app.format_range, TrackRange::new(0, 79));
+        assert_eq!(app.erase_range, TrackRange::new(0, 79));
+
+        // Valid ranges
+        assert!(app.set_format_range(0, 40));
+        assert_eq!(app.format_range, TrackRange::new(0, 40));
+
+        assert!(app.set_erase_range(10, 20));
+        assert_eq!(app.erase_range, TrackRange::new(10, 20));
+
+        // Invalid ranges
+        assert!(!app.set_format_range(50, 40)); // start > end
+        assert!(!app.set_format_range(0, 84));  // end >= max_tracks (84)
+
+        // Changing preset to 48 TPI adjusts range
+        app.apply_preset(PresetProfile::Pc525Dd);
+        assert_eq!(app.format_range, TrackRange::new(0, 39));
+        assert_eq!(app.erase_range, TrackRange::new(0, 39));
+        assert!(app.set_format_range(0, 41));
+        assert!(!app.set_format_range(0, 42)); // max 42
     }
 }
 
