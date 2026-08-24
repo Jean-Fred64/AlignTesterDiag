@@ -360,7 +360,12 @@ impl PresetProfile {
     pub fn target_rpm(&self) -> f64 {
         match self {
             PresetProfile::Pc525Hd | PresetProfile::Pc525DdOnHd => 360.0,
-            _ => 300.0,
+            PresetProfile::Pc35Hd
+            | PresetProfile::Pc35Dd
+            | PresetProfile::Pc525Dd
+            | PresetProfile::Amiga35Dd
+            | PresetProfile::Atari35Dd
+            | PresetProfile::Cpc30Data => 300.0,
         }
     }
 
@@ -368,7 +373,12 @@ impl PresetProfile {
     pub fn default_bus(&self) -> BusType {
         match self {
             PresetProfile::Amiga35Dd | PresetProfile::Cpc30Data => BusType::Shugart,
-            _ => BusType::IbmPc,
+            PresetProfile::Pc35Hd
+            | PresetProfile::Pc35Dd
+            | PresetProfile::Pc525Hd
+            | PresetProfile::Pc525DdOnHd
+            | PresetProfile::Pc525Dd
+            | PresetProfile::Atari35Dd => BusType::IbmPc,
         }
     }
 
@@ -376,7 +386,13 @@ impl PresetProfile {
     pub fn default_step(&self) -> StepMode {
         match self {
             PresetProfile::Pc525DdOnHd => StepMode::Double,
-            _ => StepMode::Single,
+            PresetProfile::Pc35Hd
+            | PresetProfile::Pc35Dd
+            | PresetProfile::Pc525Hd
+            | PresetProfile::Pc525Dd
+            | PresetProfile::Amiga35Dd
+            | PresetProfile::Atari35Dd
+            | PresetProfile::Cpc30Data => StepMode::Single,
         }
     }
 

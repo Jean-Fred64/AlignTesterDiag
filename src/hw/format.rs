@@ -443,8 +443,8 @@ impl MfmTrackEncoder {
                 odd_labels[i] = label[i] & 0x5555_5555;
                 Self::push_u32_bits(bits, even_labels[i]);
             }
-            for i in 0..4 {
-                Self::push_u32_bits(bits, odd_labels[i]);
+            for &odd in &odd_labels {
+                Self::push_u32_bits(bits, odd);
             }
 
             // 4. Header Checksum: XOR over info + labels masked to 0x55555555

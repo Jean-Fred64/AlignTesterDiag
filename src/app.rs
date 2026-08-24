@@ -1021,10 +1021,12 @@ mod tests {
         assert_eq!(app.stream_spinner_idx, 0); // Rotates back to 0
 
         // Simulate sector packet arrival via handle_hw_message
-        let mut status = DriveStatus::default();
-        status.activity = HwActivity::ReadingAnalyzing;
-        status.mode = DisplayMode::Analyze;
-        status.sector_log.push("T:00 H:0 Rate:500k MFM [ ■ ■ ■ ] (3/3 OK)".into());
+        let status = DriveStatus {
+            activity: HwActivity::ReadingAnalyzing,
+            mode: DisplayMode::Analyze,
+            sector_log: vec!["T:00 H:0 Rate:500k MFM [ ■ ■ ■ ] (3/3 OK)".into()],
+            ..Default::default()
+        };
 
         app.handle_hw_message(status);
         assert_eq!(app.stream_spinner_idx, 1);
@@ -1290,11 +1292,13 @@ mod tests {
         assert_eq!(app.status.bitrate, 250);
 
         // Verify handle_hw_message syncs preset
-        let mut new_status = DriveStatus::default();
-        new_status.preset = PresetProfile::Cpc30Data;
-        new_status.bus_type = BusType::Shugart;
-        new_status.step_mode = StepMode::Single;
-        new_status.bitrate = 250;
+        let new_status = DriveStatus {
+            preset: PresetProfile::Cpc30Data,
+            bus_type: BusType::Shugart,
+            step_mode: StepMode::Single,
+            bitrate: 250,
+            ..Default::default()
+        };
         app.handle_hw_message(new_status);
         assert_eq!(app.preset(), PresetProfile::Cpc30Data);
         assert_eq!(app.bus_type(), BusType::Shugart);

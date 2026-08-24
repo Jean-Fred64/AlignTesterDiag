@@ -2185,8 +2185,11 @@ fn read_and_decode_track_diagnostic(
             let off_track_details = if off_track == 0 {
                 String::from("NONE (Perfect)")
             } else if wrong_cylinders.len() == 1 && on_track == 0 {
-                let (&cyl, _) = wrong_cylinders.iter().next().unwrap();
-                format!("MISALIGNED T:{:02}", cyl)
+                if let Some((&cyl, _)) = wrong_cylinders.iter().next() {
+                    format!("MISALIGNED T:{:02}", cyl)
+                } else {
+                    String::from("MISALIGNED")
+                }
             } else {
                 let mut parts = Vec::new();
                 for (cyl, cnt) in wrong_cylinders {
@@ -2713,8 +2716,11 @@ pub fn process_track_diagnostic(
         effective_diag.off_track_details = if off_track == 0 {
             String::from("NONE (Perfect)")
         } else if wrong_cylinders.len() == 1 && on_track == 0 {
-            let (&cyl, _) = wrong_cylinders.iter().next().unwrap();
-            format!("MISALIGNED T:{:02}", cyl)
+            if let Some((&cyl, _)) = wrong_cylinders.iter().next() {
+                format!("MISALIGNED T:{:02}", cyl)
+            } else {
+                String::from("MISALIGNED")
+            }
         } else {
             let mut parts = Vec::new();
             for (cyl, cnt) in wrong_cylinders {
@@ -3978,6 +3984,7 @@ pub fn handle_command(
 }
 
 /// Executes a low-level format and read-after-write verification on a single cylinder and head
+#[allow(clippy::too_many_arguments)]
 pub fn execute_format_track(
     port: &mut Box<dyn serialport::SerialPort>,
     status: &mut DriveStatus,
@@ -4681,10 +4688,8 @@ pub fn execute_erase_disk(
                 tx_status,
             );
 
-            if !ok {
-                if status.write_protect {
-                    return false;
-                }
+            if !ok && status.write_protect {
+                return false;
             }
 
             completed_passes += 1;
@@ -6341,7 +6346,7 @@ mod tests {
         // 300 kbps with slight jitter
         let jitter_300k = vec![236, 244, 356, 484, 238, 362];
         let q_jitter_300k = calculate_pll_quality(&jitter_300k, 120.0);
-        assert!(q_jitter_300k >= 85 && q_jitter_300k <= 100);
+        assert!((85..=100).contains(&q_jitter_300k));
     }
 
     #[test]
@@ -6349,11 +6354,8 @@ mod tests {
         // Construct raw Greaseweazle stream with 500 flux ticks BEFORE the index pulse,
         // then an Index pulse (opcode 1), then 72 Gap0 bytes (0x4E = 288 ticks each in DD @ 250k),
         // followed by IDAM sync (3x 0xA1 = 3x 48 bits)
-        let mut raw = Vec::new();
         // 5 flux pulses of 100 ticks before index (total 500 ticks)
-        for _ in 0..5 {
-            raw.push(100);
-        }
+        let mut raw = vec![100; 5];
         // Opcode 1: Index mark
         raw.extend_from_slice(&[0x00, 0x01, 0x02, 0x00, 0x00, 0x00]);
         // 20 flux intervals of 288 ticks (encoded as 250 + byte)
@@ -6844,8 +6846,8 @@ mod tests {
             odd_labels[i] = label[i] & 0x5555_5555;
             push_u32_to_bits(&mut bits, even_labels[i]);
         }
-        for i in 0..4 {
-            push_u32_to_bits(&mut bits, odd_labels[i]);
+        for &odd in &odd_labels {
+            push_u32_to_bits(&mut bits, odd);
         }
 
         let hdr_chk = calculate_amiga_checksum(&[
@@ -7047,18 +7049,22 @@ mod tests {
 
     #[test]
     fn test_drive_unit_bus_type_dispatch() {
-        let mut status_pc = DriveStatus::default();
-        status_pc.bus_type = BusType::IbmPc;
-        status_pc.drive_unit = 0;
+        let mut status_pc = DriveStatus {
+            bus_type: BusType::IbmPc,
+            drive_unit: 0,
+            ..Default::default()
+        };
         let max_units_pc = if status_pc.bus_type == BusType::IbmPc { 2 } else { 4 };
         status_pc.drive_unit = (status_pc.drive_unit + 1) % max_units_pc;
         assert_eq!(status_pc.drive_unit, 1);
         status_pc.drive_unit = (status_pc.drive_unit + 1) % max_units_pc;
         assert_eq!(status_pc.drive_unit, 0);
 
-        let mut status_shugart = DriveStatus::default();
-        status_shugart.bus_type = BusType::Shugart;
-        status_shugart.drive_unit = 0;
+        let mut status_shugart = DriveStatus {
+            bus_type: BusType::Shugart,
+            drive_unit: 0,
+            ..Default::default()
+        };
         let max_units_sh = if status_shugart.bus_type == BusType::IbmPc { 2 } else { 4 };
         for expected in [1, 2, 3, 0] {
             status_shugart.drive_unit = (status_shugart.drive_unit + 1) % max_units_sh;
@@ -7094,8 +7100,10 @@ mod tests {
 
     #[test]
     fn test_step_mode_physical_seek_translation() {
-        let mut status = DriveStatus::default();
-        status.step_mode = StepMode::Double;
+        let status = DriveStatus {
+            step_mode: StepMode::Double,
+            ..Default::default()
+        };
 
         // Logical track 20 -> physical cylinder 40
         let logical_track = 20u8.min(status.step_mode.max_logical_tracks());

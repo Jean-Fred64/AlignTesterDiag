@@ -1104,9 +1104,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let _ = tx_cmd.send(HwCmd::Seek(app.status.track.saturating_sub(1)));
                     }
                     KeyCode::Char(c) if c.is_ascii_digit() => {
-                        let max_trk = app.step_mode.max_logical_tracks();
-                        let track = ((c.to_digit(10).unwrap() as u8) * 10).min(max_trk);
-                        let _ = tx_cmd.send(HwCmd::Seek(track));
+                        if let Some(d) = c.to_digit(10) {
+                            let max_trk = app.step_mode.max_logical_tracks();
+                            let track = ((d as u8) * 10).min(max_trk);
+                            let _ = tx_cmd.send(HwCmd::Seek(track));
+                        }
                     }
                     KeyCode::Char('h') | KeyCode::Char('H') => {
                         let _ = tx_cmd.send(HwCmd::ToggleHead);
@@ -2577,10 +2579,10 @@ mod tests {
 
     #[test]
     fn test_build_format_progress_lines() {
-        let mut status = DriveStatus::default();
-        status.preset = PresetProfile::Pc35Hd;
-        status.mode = DisplayMode::Format;
-        status.format_progress = Some(FormatProgress {
+        let mut status = DriveStatus {
+            preset: PresetProfile::Pc35Hd,
+            mode: DisplayMode::Format,
+            format_progress: Some(FormatProgress {
             current_track: 20,
             current_head: 1,
             total_tracks: 80,
@@ -2597,7 +2599,9 @@ mod tests {
             elapsed_secs: 12.5,
             eta_secs: 36.2,
             message: "Writing flux...".to_string(),
-        });
+            }),
+            ..Default::default()
+        };
 
         let lines = build_format_progress_lines(&status);
         assert!(!lines.is_empty());
@@ -2750,10 +2754,10 @@ mod tests {
         assert_eq!(passes_42, 84);
 
         // Progression percentage calculation
-        let pct_0 = (0 as f32 / passes_80 as f32) * 100.0;
+        let pct_0 = (0_f32 / passes_80 as f32) * 100.0;
         assert_eq!(pct_0, 0.0);
 
-        let pct_half = (40 as f32 / passes_40 as f32) * 100.0;
+        let pct_half = (40_f32 / passes_40 as f32) * 100.0;
         assert_eq!(pct_half, 50.0);
 
         let pct_100 = (passes_80 as f32 / passes_80 as f32) * 100.0;

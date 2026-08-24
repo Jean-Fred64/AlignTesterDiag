@@ -1138,6 +1138,7 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
 }
 
 /// Builds the formatted confirmation and selection lines for the Low-Level Format modal dialog
+#[allow(clippy::too_many_arguments)]
 pub fn build_format_modal_lines(
     track: u8,
     head: u8,
