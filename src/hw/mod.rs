@@ -275,6 +275,7 @@ impl DriveStatus {
 #[derive(Clone, Debug, PartialEq)]
 pub enum HwCmd {
     SelectUnit(u8),
+    SelectDrive(u8),
     ToggleDriveUnit,
     SetMotor(bool),
     ToggleMotor,
@@ -3748,7 +3749,7 @@ pub fn handle_command(
             );
             let _ = tx_status.send(status.clone());
         }
-        HwCmd::SelectUnit(unit) => {
+        HwCmd::SelectUnit(unit) | HwCmd::SelectDrive(unit) => {
             let max_unit = if status.bus_type == BusType::IbmPc { 1 } else { 3 };
             let target_unit = unit.min(max_unit);
             if target_unit != status.drive_unit {
@@ -3872,23 +3873,6 @@ pub fn handle_command(
             let next_preset = status.preset.next();
             status.preset = next_preset;
             status.disk_format = next_preset.format_profile();
-            let new_bus = next_preset.default_bus();
-            let bus_changed = status.bus_type != new_bus;
-            status.bus_type = new_bus;
-            if status.bus_type == BusType::IbmPc && status.drive_unit > 1 {
-                status.drive_unit = 0;
-                status.unit_id = 0;
-            }
-            if bus_changed {
-                let _ = gw_send_raw(port, &build_bus_type_packet(status.bus_type.opcode_val()), 0);
-                ensure_unit_active(
-                    port,
-                    status.bus_type,
-                    status.drive_unit,
-                    status.motor_on,
-                    status.head,
-                );
-            }
             status.step_mode = next_preset.default_step();
             status.bitrate = next_preset.target_data_rate();
             status.density = status.bitrate == 500;
@@ -3902,7 +3886,7 @@ pub fn handle_command(
             status.log_msg = format!(
                 "Preset: {} ({} | {} | {}k)",
                 next_preset.label(),
-                next_preset.default_bus().as_str(),
+                status.bus_type.as_str(),
                 next_preset.default_step().as_str(),
                 next_preset.target_data_rate()
             );
@@ -3911,23 +3895,6 @@ pub fn handle_command(
         HwCmd::SetPreset(preset) => {
             status.preset = preset;
             status.disk_format = preset.format_profile();
-            let new_bus = preset.default_bus();
-            let bus_changed = status.bus_type != new_bus;
-            status.bus_type = new_bus;
-            if status.bus_type == BusType::IbmPc && status.drive_unit > 1 {
-                status.drive_unit = 0;
-                status.unit_id = 0;
-            }
-            if bus_changed {
-                let _ = gw_send_raw(port, &build_bus_type_packet(status.bus_type.opcode_val()), 0);
-                ensure_unit_active(
-                    port,
-                    status.bus_type,
-                    status.drive_unit,
-                    status.motor_on,
-                    status.head,
-                );
-            }
             status.step_mode = preset.default_step();
             status.bitrate = preset.target_data_rate();
             status.density = status.bitrate == 500;
@@ -3941,7 +3908,7 @@ pub fn handle_command(
             status.log_msg = format!(
                 "Preset: {} ({} | {} | {}k)",
                 preset.label(),
-                preset.default_bus().as_str(),
+                status.bus_type.as_str(),
                 preset.default_step().as_str(),
                 preset.target_data_rate()
             );
@@ -4315,7 +4282,17 @@ pub fn execute_format_track(
     for &head in heads {
         while let Ok(cmd) = rx_cmd.try_recv() {
             match cmd {
-                HwCmd::Stop | HwCmd::PanicReset | HwCmd::Exit => {
+                HwCmd::Stop => {
+                    status.activity = HwActivity::Stopped;
+                    status.log_msg = String::from("Track Formatting ABORTED by user");
+                    if let Some(ref mut p) = status.format_progress {
+                        p.step = FormatStep::Idle;
+                        p.message = "Format aborted by user".to_string();
+                    }
+                    let _ = tx_status.send(status.clone());
+                    return false;
+                }
+                HwCmd::PanicReset | HwCmd::Exit => {
                     status.mode = DisplayMode::None;
                     status.activity = HwActivity::Stopped;
                     status.log_msg = String::from("Track Formatting ABORTED by user");
@@ -4469,7 +4446,17 @@ pub fn execute_format_disk(
             // Check for user abort commands
             while let Ok(cmd) = rx_cmd.try_recv() {
                 match cmd {
-                    HwCmd::Stop | HwCmd::PanicReset | HwCmd::Exit => {
+                    HwCmd::Stop => {
+                        status.activity = HwActivity::Stopped;
+                        status.log_msg = String::from("Disk Formatting ABORTED by user");
+                        if let Some(ref mut p) = status.format_progress {
+                            p.step = FormatStep::Idle;
+                            p.message = "Format aborted by user".to_string();
+                        }
+                        let _ = tx_status.send(status.clone());
+                        return false;
+                    }
+                    HwCmd::PanicReset | HwCmd::Exit => {
                         status.mode = DisplayMode::None;
                         status.activity = HwActivity::Stopped;
                         status.log_msg = String::from("Disk Formatting ABORTED by user");
@@ -4788,7 +4775,17 @@ pub fn execute_erase_track(
     for &head in heads {
         while let Ok(cmd) = rx_cmd.try_recv() {
             match cmd {
-                HwCmd::Stop | HwCmd::PanicReset | HwCmd::Exit => {
+                HwCmd::Stop => {
+                    status.activity = HwActivity::Stopped;
+                    status.log_msg = String::from("Track Erasing ABORTED by user");
+                    if let Some(ref mut p) = status.format_progress {
+                        p.step = FormatStep::Idle;
+                        p.message = "Erase aborted by user".to_string();
+                    }
+                    let _ = tx_status.send(status.clone());
+                    return false;
+                }
+                HwCmd::PanicReset | HwCmd::Exit => {
                     status.mode = DisplayMode::None;
                     status.activity = HwActivity::Stopped;
                     status.log_msg = String::from("Track Erasing ABORTED by user");
@@ -4935,7 +4932,17 @@ pub fn execute_erase_disk(
             // Check for user abort commands
             while let Ok(cmd) = rx_cmd.try_recv() {
                 match cmd {
-                    HwCmd::Stop | HwCmd::PanicReset | HwCmd::Exit => {
+                    HwCmd::Stop => {
+                        status.activity = HwActivity::Stopped;
+                        status.log_msg = String::from("Disk Erasing ABORTED by user");
+                        if let Some(ref mut p) = status.format_progress {
+                            p.step = FormatStep::Idle;
+                            p.message = "Erase aborted by user".to_string();
+                        }
+                        let _ = tx_status.send(status.clone());
+                        return false;
+                    }
+                    HwCmd::PanicReset | HwCmd::Exit => {
                         status.mode = DisplayMode::None;
                         status.activity = HwActivity::Stopped;
                         status.log_msg = String::from("Disk Erasing ABORTED by user");

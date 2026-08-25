@@ -1280,10 +1280,14 @@ pub fn build_format_modal_lines(
         ]));
         lines.push(Line::from(vec![
             Span::styled("  [", gray),
+            Span::styled("U", accent_bold),
+            Span::styled("] Unit (A:/B:)   [", white),
+            Span::styled("B", accent_bold),
+            Span::styled("] Bus (PC/Shugart)   [", white),
             Span::styled("P", accent_bold),
-            Span::styled("] Cycle ", white),
-            Span::styled("P", accent_bold),
-            Span::styled("reset Profile", white),
+            Span::styled("] Preset Profile   [", white),
+            Span::styled("H", accent_bold),
+            Span::styled("] Head", white),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  [", gray),
@@ -1464,10 +1468,14 @@ pub fn build_erase_modal_lines(
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("  [", gray),
+            Span::styled("U", accent_bold),
+            Span::styled("] Unit (A:/B:)   [", white),
+            Span::styled("B", accent_bold),
+            Span::styled("] Bus (PC/Shugart)   [", white),
             Span::styled("P", accent_bold),
-            Span::styled("] Cycle ", white),
-            Span::styled("P", accent_bold),
-            Span::styled("reset Profile", white),
+            Span::styled("] Preset Profile   [", white),
+            Span::styled("H", accent_bold),
+            Span::styled("] Head", white),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  [", gray),
@@ -1858,15 +1866,36 @@ pub fn build_format_progress_lines(status: &crate::hw::DriveStatus) -> Vec<Line<
         lines.push(Line::from(Span::styled("Initializing engine...", Style::default().fg(Color::DarkGray))));
     }
 
+    let is_finished = if let Some(ref p) = status.format_progress {
+        matches!(
+            p.step,
+            crate::hw::FormatStep::Completed | crate::hw::FormatStep::Error | crate::hw::FormatStep::Idle
+        )
+    } else {
+        false
+    };
+
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        if is_erase {
-            "Press [Esc] at any time to abort erase safely."
-        } else {
-            "Press [Esc] at any time to abort formatting safely."
-        },
-        Style::default().fg(Color::DarkGray),
-    )));
+    if is_finished {
+        lines.push(Line::from(vec![
+            Span::styled("Press ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[Enter]", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(" or ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[Esc]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(" to return to menu, ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[Q]", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),
+            Span::styled(" for Main View.", Style::default().fg(Color::DarkGray)),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled(
+            if is_erase {
+                "Press [Esc] at any time to abort erase safely."
+            } else {
+                "Press [Esc] at any time to abort formatting safely."
+            },
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
     lines
 }
 

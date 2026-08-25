@@ -1173,6 +1173,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                             KeyCode::PageDown | KeyCode::Down => {
                                 app.decrement_format_tracks();
                             }
+                            KeyCode::Char('u') | KeyCode::Char('U') => {
+                                app.handle_action(Action::ToggleDriveUnit);
+                                let _ = tx_cmd.send(HwCmd::ToggleDriveUnit);
+                            }
+                            KeyCode::Char('b') | KeyCode::Char('B') => {
+                                app.handle_action(Action::ToggleBusType);
+                                let _ = tx_cmd.send(HwCmd::SetBusType(app.bus_type));
+                            }
                             KeyCode::Char('h') | KeyCode::Char('H') => {
                                 app.toggle_head();
                                 let _ = tx_cmd.send(HwCmd::SetHeadSelection(app.head_selection));
@@ -1282,6 +1290,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                             KeyCode::PageDown | KeyCode::Down => {
                                 app.decrement_erase_tracks();
                             }
+                            KeyCode::Char('u') | KeyCode::Char('U') => {
+                                app.handle_action(Action::ToggleDriveUnit);
+                                let _ = tx_cmd.send(HwCmd::ToggleDriveUnit);
+                            }
+                            KeyCode::Char('b') | KeyCode::Char('B') => {
+                                app.handle_action(Action::ToggleBusType);
+                                let _ = tx_cmd.send(HwCmd::SetBusType(app.bus_type));
+                            }
                             KeyCode::Char('h') | KeyCode::Char('H') => {
                                 app.toggle_head();
                                 let _ = tx_cmd.send(HwCmd::SetHeadSelection(app.head_selection));
@@ -1314,6 +1330,39 @@ fn main() -> Result<(), Box<dyn Error>> {
                             _ => {}
                         }
                         continue;
+                    }
+
+                    if app.status.mode == DisplayMode::Format || app.status.mode == DisplayMode::Erase {
+                        let is_finished = if let Some(ref p) = app.status.format_progress {
+                            matches!(p.step, FormatStep::Completed | FormatStep::Error | FormatStep::Idle)
+                        } else {
+                            false
+                        };
+
+                        if is_finished {
+                            match key.code {
+                                KeyCode::Enter | KeyCode::Esc => {
+                                    let mode = app.status.mode;
+                                    app.status.mode = DisplayMode::None;
+                                    if mode == DisplayMode::Format {
+                                        app.handle_action(Action::OpenFormatModal);
+                                    } else {
+                                        app.handle_action(Action::OpenEraseModal);
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Char('q') | KeyCode::Char('Q') => {
+                                    app.status.mode = DisplayMode::None;
+                                    app.handle_action(Action::Stop);
+                                    let _ = tx_cmd.send(HwCmd::Stop);
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        } else if key.code == KeyCode::Esc {
+                            let _ = tx_cmd.send(HwCmd::Stop);
+                            continue;
+                        }
                     }
 
                     if key.code == KeyCode::Backspace
@@ -2765,13 +2814,19 @@ mod tests {
         assert!(full_text.contains("Range: 00..79 | Standard: 80, Max: 84"));
         assert!(full_text.contains("Read-After-Write Verify : ON"));
         assert!(full_text.contains("System FS Init : Blank (Raw 0xE5)"));
-        assert!(full_text.contains("Cycle Preset Profile"));
+        assert!(full_text.contains("Unit (A:/B:)"));
+        assert!(full_text.contains("Bus (PC/Shugart)"));
+        assert!(full_text.contains("Preset Profile"));
+        assert!(full_text.contains("Head"));
         assert!(full_text.contains("Format Track Range     (Tracks 00..79, Head 0 only)"));
         assert!(full_text.contains("Tracks 00..79, Head 0 only"));
         assert!(full_text.contains("Cancel & Return"));
 
-        // Check shortcut highlight formatting for [P], [T], [R], [D], [V], [S]
+        // Check shortcut highlight formatting for [U], [B], [P], [H], [T], [R], [D], [V], [S]
+        let mut found_u_shortcut = false;
+        let mut found_b_shortcut = false;
         let mut found_p_shortcut = false;
+        let mut found_h_shortcut = false;
         let mut found_t_shortcut = false;
         let mut found_r_shortcut = false;
         let mut found_d_shortcut = false;
@@ -2781,8 +2836,17 @@ mod tests {
 
         for line in &lines {
             for span in &line.spans {
+                if span.content == "U" && span.style.fg == Some(Color::Yellow) {
+                    found_u_shortcut = true;
+                }
+                if span.content == "B" && span.style.fg == Some(Color::Yellow) {
+                    found_b_shortcut = true;
+                }
                 if span.content == "P" && span.style.fg == Some(Color::Yellow) {
                     found_p_shortcut = true;
+                }
+                if span.content == "H" && span.style.fg == Some(Color::Yellow) {
+                    found_h_shortcut = true;
                 }
                 if span.content == "T" && span.style.fg == Some(Color::Yellow) {
                     found_t_shortcut = true;
@@ -2805,7 +2869,10 @@ mod tests {
             }
         }
 
+        assert!(found_u_shortcut, "Shortcut [U] and 'Unit' must be emphasized in Yellow/Bold");
+        assert!(found_b_shortcut, "Shortcut [B] and 'Bus' must be emphasized in Yellow/Bold");
         assert!(found_p_shortcut, "Shortcut [P] and 'Preset' must be emphasized in Yellow/Bold");
+        assert!(found_h_shortcut, "Shortcut [H] and 'Head' must be emphasized in Yellow/Bold");
         assert!(found_t_shortcut, "Shortcut [T] and 'Track' must be emphasized in Yellow/Bold");
         assert!(found_r_shortcut, "Shortcut [R] and 'Range' must be emphasized in Yellow/Bold");
         assert!(found_d_shortcut, "Shortcut [D] and 'Disk' must be emphasized in Yellow/Bold");
@@ -2838,13 +2905,19 @@ mod tests {
         assert!(full_text.contains("Head: Head 0"));
         assert!(full_text.contains("Target Tracks : 80 tracks"));
         assert!(full_text.contains("WARNING: This will permanently wipe all magnetic flux"));
-        assert!(full_text.contains("Cycle Preset Profile"));
+        assert!(full_text.contains("Unit (A:/B:)"));
+        assert!(full_text.contains("Bus (PC/Shugart)"));
+        assert!(full_text.contains("Preset Profile"));
+        assert!(full_text.contains("Head"));
         assert!(full_text.contains("Erase Current Track only  (Track 40, Head 0 only)"));
         assert!(full_text.contains("Erase Track Range     (Tracks 00..79, Head 0 only)"));
         assert!(full_text.contains("Erase Entire Disk         (Tracks 00..79, Head 0 only)"));
         assert!(full_text.contains("Cancel & Return"));
 
+        let mut found_u = false;
+        let mut found_b = false;
         let mut found_p = false;
+        let mut found_h = false;
         let mut found_t = false;
         let mut found_r = false;
         let mut found_d = false;
@@ -2852,8 +2925,17 @@ mod tests {
 
         for line in &lines {
             for span in &line.spans {
+                if span.content == "U" && span.style.fg == Some(Color::Yellow) {
+                    found_u = true;
+                }
+                if span.content == "B" && span.style.fg == Some(Color::Yellow) {
+                    found_b = true;
+                }
                 if span.content == "P" && span.style.fg == Some(Color::Yellow) {
                     found_p = true;
+                }
+                if span.content == "H" && span.style.fg == Some(Color::Yellow) {
+                    found_h = true;
                 }
                 if span.content == "T" && span.style.fg == Some(Color::Yellow) {
                     found_t = true;
@@ -2870,7 +2952,10 @@ mod tests {
             }
         }
 
+        assert!(found_u, "Shortcut [U] must be emphasized in Yellow/Bold");
+        assert!(found_b, "Shortcut [B] must be emphasized in Yellow/Bold");
         assert!(found_p, "Shortcut [P] must be emphasized in Yellow/Bold");
+        assert!(found_h, "Shortcut [H] must be emphasized in Yellow/Bold");
         assert!(found_t, "Shortcut [T] must be emphasized in Yellow/Bold");
         assert!(found_r, "Shortcut [R] must be emphasized in Yellow/Bold");
         assert!(found_d, "Shortcut [D] must be emphasized in Yellow/Bold");
@@ -2938,11 +3023,11 @@ mod tests {
         app.handle_action(Action::OpenEraseModal);
         assert!(app.show_erase_modal);
 
-        // Cycle preset: Pc525Dd -> Amiga35Dd (80 tracks, Shugart)
+        // Cycle preset: Pc525Dd -> Amiga35Dd (80 tracks, preserves IBM PC bus)
         app.handle_action(Action::CyclePreset);
         assert_eq!(app.preset, PresetProfile::Amiga35Dd);
         assert_eq!(app.preset.target_rpm(), 300.0);
-        assert_eq!(app.bus_type, BusType::Shugart);
+        assert_eq!(app.bus_type, BusType::IbmPc);
         assert_eq!(app.erase_target_tracks, 80);
         assert_eq!(app.erase_range, TrackRange::new(0, 79));
         assert_eq!(app.status.track, 30);
@@ -2960,11 +3045,11 @@ mod tests {
         assert_eq!(app.erase_range, TrackRange::new(0, 79));
         assert_eq!(app.status.track, 75);
 
-        // Cycle preset: Atari35Dd -> Cpc30Data (48 TPI, 40 tracks, Shugart)
+        // Cycle preset: Atari35Dd -> Cpc30Data (48 TPI, 40 tracks, preserves IBM PC bus)
         app.handle_action(Action::CyclePreset);
         assert_eq!(app.preset, PresetProfile::Cpc30Data);
         assert_eq!(app.preset.target_rpm(), 300.0);
-        assert_eq!(app.bus_type, BusType::Shugart);
+        assert_eq!(app.bus_type, BusType::IbmPc);
         assert_eq!(app.erase_target_tracks, 40);
         assert_eq!(app.erase_range, TrackRange::new(0, 39));
         // Track 75 clamped to 41
@@ -3678,6 +3763,126 @@ mod tests {
     fn test_format_timing_constants() {
         assert_eq!(crate::hw::FORMAT_HEAD_SETTLE_MS, 100);
         assert_eq!(crate::hw::FORMAT_HEAD_SWITCH_SETTLE_MS, 50);
+    }
+
+    #[test]
+    fn test_active_modal_enum_and_app_queries() {
+        let mut app = App::new();
+        assert_eq!(app.active_modal(), crate::app::ActiveModal::None);
+
+        app.handle_action(Action::OpenFormatModal);
+        assert_eq!(app.active_modal(), crate::app::ActiveModal::Format);
+
+        app.handle_action(Action::CloseFormatModal);
+        app.handle_action(Action::OpenEraseModal);
+        assert_eq!(app.active_modal(), crate::app::ActiveModal::Erase);
+
+        app.handle_action(Action::CloseEraseModal);
+        app.open_range_modal(crate::app::RangeModalKind::Format);
+        assert_eq!(app.active_modal(), crate::app::ActiveModal::Range(crate::app::RangeModalKind::Format));
+
+        app.show_range_modal = None;
+        app.show_help = true;
+        assert_eq!(app.active_modal(), crate::app::ActiveModal::Help);
+    }
+
+    #[test]
+    fn test_modal_unit_and_bus_shortcuts_and_decoupling() {
+        let mut app = App::with_full_preset_config(0, BusType::IbmPc, StepMode::Single, PresetProfile::Pc35Hd);
+        assert_eq!(app.drive_unit, 0);
+        assert_eq!(app.bus_type, BusType::IbmPc);
+
+        // Open Format modal
+        app.handle_action(Action::OpenFormatModal);
+        assert!(app.show_format_modal);
+
+        // Toggle unit U: Drive 0 -> Drive 1
+        app.handle_action(Action::ToggleDriveUnit);
+        assert_eq!(app.drive_unit, 1);
+        assert_eq!(app.status.drive_unit, 1);
+
+        // Toggle unit U again: Drive 1 -> Drive 0 (on IBM PC bus)
+        app.handle_action(Action::ToggleDriveUnit);
+        assert_eq!(app.drive_unit, 0);
+
+        // Toggle Bus B: IbmPc -> Shugart
+        app.handle_action(Action::ToggleBusType);
+        assert_eq!(app.bus_type, BusType::Shugart);
+        assert_eq!(app.status.bus_type, BusType::Shugart);
+
+        // On Shugart, units cycle 0..3
+        app.handle_action(Action::ToggleDriveUnit);
+        assert_eq!(app.drive_unit, 1);
+        app.handle_action(Action::ToggleDriveUnit);
+        assert_eq!(app.drive_unit, 2);
+
+        // Toggle Bus back to IbmPc: clamps unit > 1 to 0
+        app.handle_action(Action::ToggleBusType);
+        assert_eq!(app.bus_type, BusType::IbmPc);
+        assert_eq!(app.drive_unit, 0);
+
+        // Cycle preset P in modal: preserves active bus_type (IbmPc)
+        app.handle_action(Action::CyclePreset);
+        assert_eq!(app.bus_type, BusType::IbmPc);
+    }
+
+    #[test]
+    fn test_post_op_progress_lines_completed_and_aborted() {
+        let mut status = DriveStatus {
+            preset: PresetProfile::Pc35Hd,
+            mode: DisplayMode::Format,
+            format_progress: Some(FormatProgress {
+                current_track: 79,
+                current_head: 1,
+                total_tracks: 80,
+                total_heads: 2,
+                step: FormatStep::Completed,
+                completed_passes: 160,
+                total_passes: 160,
+                verification_ok: true,
+                retry_count: 0,
+                quality_pct: 100,
+                crc_errors: 0,
+                verified_sectors: 18,
+                expected_sectors: 18,
+                elapsed_secs: 65.0,
+                eta_secs: 0.0,
+                message: "Format completed successfully".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        // Completed format
+        let lines_completed = build_format_progress_lines(&status);
+        let text_completed: String = lines_completed
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text_completed.contains("Press [Enter] or [Esc] to return to menu, [Q] for Main View."));
+
+        // Aborted format (Idle / aborted)
+        if let Some(ref mut p) = status.format_progress {
+            p.step = FormatStep::Idle;
+            p.message = "Format aborted by user".to_string();
+        }
+        let lines_aborted = build_format_progress_lines(&status);
+        let text_aborted: String = lines_aborted
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text_aborted.contains("Press [Enter] or [Esc] to return to menu, [Q] for Main View."));
+
+        // Running format (in progress)
+        if let Some(ref mut p) = status.format_progress {
+            p.step = FormatStep::Writing;
+            p.message = "Writing flux...".to_string();
+        }
+        let lines_running = build_format_progress_lines(&status);
+        let text_running: String = lines_running
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text_running.contains("Press [Esc] at any time to abort formatting safely."));
     }
 }
 

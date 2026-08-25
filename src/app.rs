@@ -20,6 +20,17 @@ pub enum RangeModalKind {
     Erase,
 }
 
+/// Currently active modal dialog in the application
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActiveModal {
+    #[default]
+    None,
+    Format,
+    Erase,
+    Help,
+    Range(RangeModalKind),
+}
+
 /// Explicit user confirmation state before running destructive format/erase operations
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingConfirmation {
@@ -838,7 +849,6 @@ impl App {
     pub fn apply_preset(&mut self, preset: PresetProfile) {
         self.preset = preset;
         self.disk_format = preset.format_profile();
-        self.set_bus_type(preset.default_bus());
         self.set_step_mode(preset.default_step());
         self.status.preset = preset;
         self.status.disk_format = self.disk_format;
@@ -862,6 +872,20 @@ impl App {
 
     pub fn preset(&self) -> PresetProfile {
         self.preset
+    }
+
+    pub fn active_modal(&self) -> ActiveModal {
+        if let Some(kind) = self.show_range_modal {
+            ActiveModal::Range(kind)
+        } else if self.show_format_modal {
+            ActiveModal::Format
+        } else if self.show_erase_modal {
+            ActiveModal::Erase
+        } else if self.show_help {
+            ActiveModal::Help
+        } else {
+            ActiveModal::None
+        }
     }
 
     pub fn handle_action(&mut self, action: Action) {
@@ -1622,10 +1646,10 @@ mod tests {
         assert_eq!(app.step_mode(), StepMode::Single);
         assert_eq!(app.status.bitrate, 500);
 
-        // Apply Amiga preset
+        // Apply Amiga preset (preserves bus_type)
         app.handle_action(Action::SetPreset(PresetProfile::Amiga35Dd));
         assert_eq!(app.preset(), PresetProfile::Amiga35Dd);
-        assert_eq!(app.bus_type(), BusType::Shugart);
+        assert_eq!(app.bus_type(), BusType::IbmPc);
         assert_eq!(app.step_mode(), StepMode::Single);
         assert_eq!(app.status.bitrate, 250);
         assert_eq!(app.disk_format(), DiskFormat::AmigaDos);
