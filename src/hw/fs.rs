@@ -77,14 +77,14 @@ pub fn generate_sector_payload(
     }
 
     match preset {
-        PresetProfile::Pc35Hd => generate_pc_dos_payload(preset, cyl, head, sector_id, out),
-        PresetProfile::Pc35Dd => generate_pc_dos_payload(preset, cyl, head, sector_id, out),
-        PresetProfile::Pc525Hd => generate_pc_dos_payload(preset, cyl, head, sector_id, out),
+        PresetProfile::Pc35Hd => generate_pc_dos_fs(preset, cyl, head, sector_id, out),
+        PresetProfile::Pc35Dd => generate_pc_dos_fs(preset, cyl, head, sector_id, out),
+        PresetProfile::Pc525Hd => generate_pc_dos_fs(preset, cyl, head, sector_id, out),
         PresetProfile::Pc525DdOnHd | PresetProfile::Pc525Dd => {
-            generate_pc_dos_payload(preset, cyl, head, sector_id, out)
+            generate_pc_dos_fs(preset, cyl, head, sector_id, out)
         }
-        PresetProfile::Atari35Dd => generate_atari_tos_payload(cyl, head, sector_id, out),
-        PresetProfile::Amiga35Dd => generate_amiga_payload(cyl, head, sector_id, out),
+        PresetProfile::Atari35Dd => generate_atari_tos_fs(cyl, head, sector_id, out),
+        PresetProfile::Amiga35Dd => generate_amiga_fs(cyl, head, sector_id, out),
         PresetProfile::Cpc30Data => {
             // CP/M Data Catalogue is standard 0xE5
             out.fill(0xE5);
@@ -107,6 +107,7 @@ struct DosGeometry {
     secs_per_fat: u16,
     secs_per_track: u16,
     num_heads: u16,
+    vol_label: &'static [u8; 11],
 }
 
 impl DosGeometry {
@@ -123,6 +124,7 @@ impl DosGeometry {
                 secs_per_fat: 9,
                 secs_per_track: 18,
                 num_heads: 2,
+                vol_label: b"144M       ",
             },
             PresetProfile::Pc35Dd => Self {
                 bytes_per_sec: 512,
@@ -135,6 +137,7 @@ impl DosGeometry {
                 secs_per_fat: 3,
                 secs_per_track: 9,
                 num_heads: 2,
+                vol_label: b"720K       ",
             },
             PresetProfile::Pc525Hd => Self {
                 bytes_per_sec: 512,
@@ -147,6 +150,7 @@ impl DosGeometry {
                 secs_per_fat: 7,
                 secs_per_track: 15,
                 num_heads: 2,
+                vol_label: b"12M        ",
             },
             PresetProfile::Pc525DdOnHd | PresetProfile::Pc525Dd => Self {
                 bytes_per_sec: 512,
@@ -159,6 +163,7 @@ impl DosGeometry {
                 secs_per_fat: 2,
                 secs_per_track: 9,
                 num_heads: 2,
+                vol_label: b"360K       ",
             },
             _ => Self {
                 bytes_per_sec: 512,
@@ -171,6 +176,7 @@ impl DosGeometry {
                 secs_per_fat: 9,
                 secs_per_track: 18,
                 num_heads: 2,
+                vol_label: b"NO NAME    ",
             },
         }
     }
@@ -187,7 +193,7 @@ fn chs_to_lba(cyl: u8, head: u8, sec_id: u8, secs_per_track: u16, num_heads: u16
     (c * num_heads + h) * secs_per_track + s
 }
 
-fn generate_pc_dos_payload(
+pub fn generate_pc_dos_fs(
     preset: PresetProfile,
     cyl: u8,
     head: u8,
@@ -207,47 +213,47 @@ fn generate_pc_dos_payload(
     if lba == 0 {
         // Sector 0: DOS Boot Sector (BPB)
         out.fill(0x00);
-        // Jump instruction: EB 3C 90 (JMP SHORT 0x3C; NOP)
+        // Jump instruction: EB 3C 90 (JMP SHORT 0x3C; NOP) [0x00..0x02]
         out[0] = 0xEB;
         out[1] = 0x3C;
         out[2] = 0x90;
-        // OEM Name: "MSDOS5.0"
+        // OEM Name: "MSDOS5.0" [0x03..0x0A] (8 bytes)
         out[3..11].copy_from_slice(b"MSDOS5.0");
-        // Bytes per sector
+        // Bytes per sector [0x0B..0x0C] (512 -> 0x00, 0x02)
         out[11..13].copy_from_slice(&geom.bytes_per_sec.to_le_bytes());
-        // Sectors per cluster
+        // Sectors per cluster [0x0D] (2)
         out[13] = geom.secs_per_cluster;
-        // Reserved sectors
+        // Reserved sectors [0x0E..0x0F] (1 -> 0x01, 0x00)
         out[14..16].copy_from_slice(&geom.reserved_secs.to_le_bytes());
-        // Number of FATs
+        // Number of FATs [0x10] (2)
         out[16] = geom.num_fats;
-        // Root entries
+        // Root entries [0x11..0x12] (112 -> 0x70, 0x00)
         out[17..19].copy_from_slice(&geom.root_entries.to_le_bytes());
-        // Total sectors (16-bit)
+        // Total sectors 16-bit [0x13..0x14] (1440 -> 0xA0, 0x05)
         out[19..21].copy_from_slice(&geom.total_secs.to_le_bytes());
-        // Media Descriptor
+        // Media Descriptor [0x15] (0xF9)
         out[21] = geom.media_desc;
-        // Sectors per FAT
+        // Sectors per FAT [0x16..0x17] (3 -> 0x03, 0x00)
         out[22..24].copy_from_slice(&geom.secs_per_fat.to_le_bytes());
-        // Sectors per track
+        // Sectors per track [0x18..0x19] (9 -> 0x09, 0x00)
         out[24..26].copy_from_slice(&geom.secs_per_track.to_le_bytes());
-        // Number of heads
+        // Number of heads [0x1A..0x1B] (2 -> 0x02, 0x00)
         out[26..28].copy_from_slice(&geom.num_heads.to_le_bytes());
-        // Hidden sectors (32-bit = 0)
+        // Hidden sectors 32-bit [0x1C..0x1F] (0 -> 0x00, 0x00, 0x00, 0x00)
         out[28..32].copy_from_slice(&0u32.to_le_bytes());
-        // Total sectors 32-bit (0 when 16-bit total_secs != 0)
+        // Total sectors 32-bit [0x20..0x23] (0 -> 0x00, 0x00, 0x00, 0x00)
         out[32..36].copy_from_slice(&0u32.to_le_bytes());
-        // Physical drive number (0x00 = Floppy A:)
+        // Physical drive number [0x24] (0x00 = Floppy A:)
         out[36] = 0x00;
-        // Reserved / Current head (0x00)
+        // Reserved / Current head [0x25] (0x00)
         out[37] = 0x00;
-        // Extended Boot Signature (0x29)
+        // Extended Boot Signature [0x26] (0x29)
         out[38] = 0x29;
-        // Volume Serial ID (e.g. 0x24111985)
-        out[39..43].copy_from_slice(&0x24111985u32.to_le_bytes());
-        // Volume Label: "NO NAME    " (11 bytes)
-        out[43..54].copy_from_slice(b"NO NAME    ");
-        // File System Type: "FAT12   " (8 bytes)
+        // Volume Serial ID [0x27..0x2A] (0x12, 0x34, 0x56, 0x78)
+        out[39..43].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+        // Volume Label [0x2B..0x35] (11 bytes)
+        out[43..54].copy_from_slice(geom.vol_label);
+        // File System Type [0x36..0x3D] (8 bytes: "FAT12   ")
         out[54..62].copy_from_slice(b"FAT12   ");
 
         // Standard boot code message
@@ -255,7 +261,7 @@ fn generate_pc_dos_payload(
         let offset = 62;
         out[offset..offset + msg.len()].copy_from_slice(msg);
 
-        // Boot Sector Signature (0x55, 0xAA) at 510..512
+        // Boot Sector Signature [0x1FE..0x1FF] (0x55, 0xAA)
         out[510] = 0x55;
         out[511] = 0xAA;
     } else if lba >= fat1_start && lba < fat1_end {
@@ -288,7 +294,7 @@ fn generate_pc_dos_payload(
 // Atari ST TOS FAT12 Generator
 // ============================================================================
 
-fn generate_atari_tos_payload(cyl: u8, head: u8, sector_id: u8, out: &mut [u8; 512]) {
+pub fn generate_atari_tos_fs(cyl: u8, head: u8, sector_id: u8, out: &mut [u8; 512]) {
     // Atari ST 720K standard geometry: 2 heads, 9 sectors/track, 80 tracks, 5 sectors/FAT, 112 root entries
     let secs_per_track = 9u16;
     let num_heads = 2u16;
@@ -412,7 +418,7 @@ pub fn compute_amiga_block_checksum(block: &[u8; 512], chk_offset_lw: usize) -> 
     0u32.wrapping_sub(sum)
 }
 
-fn generate_amiga_payload(cyl: u8, head: u8, sector_id: u8, out: &mut [u8; 512]) {
+pub fn generate_amiga_fs(cyl: u8, head: u8, sector_id: u8, out: &mut [u8; 512]) {
     // Amiga 880K DD geometry: 80 tracks, 2 heads, 11 sectors/track (sectors 0..10)
     let block_num = ((cyl as u32) * 2 + (head as u32)) * 11 + (sector_id as u32);
 
@@ -534,6 +540,8 @@ mod tests {
         // Boot Signature = 0x55, 0xAA
         assert_eq!(buf[510], 0x55);
         assert_eq!(buf[511], 0xAA);
+        // Offsets 0x2B..0x35 (BS_VolLab): b"144M       " (11 bytes)
+        assert_eq!(&buf[0x2B..=0x35], b"144M       ");
 
         // Check FAT1 start at Sector 2 (LBA 1)
         let mut fat_buf = [0u8; 512];
@@ -542,6 +550,93 @@ mod tests {
         assert_eq!(fat_buf[1], 0xFF);
         assert_eq!(fat_buf[2], 0xFF);
         assert_eq!(fat_buf[3], 0x00);
+    }
+
+    #[test]
+    fn test_dos_bpb_and_fat12_generation_pc35dd() {
+        let mut buf = [0u8; 512];
+        generate_sector_payload(PresetProfile::Pc35Dd, 0, 0, 1, FsInitMode::OsReady, &mut buf);
+
+        // Offsets 0x00..0x02 (BS_jmpBoot): 0xEB, 0x3C, 0x90
+        assert_eq!(&buf[0x00..=0x02], &[0xEB, 0x3C, 0x90]);
+        // Offsets 0x03..0x0A (BS_OEMName): b"MSDOS5.0"
+        assert_eq!(&buf[0x03..=0x0A], b"MSDOS5.0");
+        // Offsets 0x0B..0x0C (BPB_BytsPerSec): 512 (0x00, 0x02)
+        assert_eq!(u16::from_le_bytes([buf[0x0B], buf[0x0C]]), 512);
+        // Offset 0x0D (BPB_SecPerClus): 2
+        assert_eq!(buf[0x0D], 2);
+        // Offsets 0x0E..0x0F (BPB_RsvdSecCnt): 1 (0x01, 0x00)
+        assert_eq!(u16::from_le_bytes([buf[0x0E], buf[0x0F]]), 1);
+        // Offset 0x10 (BPB_NumFATs): 2
+        assert_eq!(buf[0x10], 2);
+        // Offsets 0x11..0x12 (BPB_RootEntCnt): 112 (0x70, 0x00)
+        assert_eq!(u16::from_le_bytes([buf[0x11], buf[0x12]]), 112);
+        // Offsets 0x13..0x14 (BPB_TotSec16): 1440 (0xA0, 0x05)
+        assert_eq!(u16::from_le_bytes([buf[0x13], buf[0x14]]), 1440);
+        // Offset 0x15 (BPB_Media): 0xF9
+        assert_eq!(buf[0x15], 0xF9);
+        // Offsets 0x16..0x17 (BPB_FATSz16): 3 (0x03, 0x00)
+        assert_eq!(u16::from_le_bytes([buf[0x16], buf[0x17]]), 3);
+        // Offsets 0x18..0x19 (BPB_SecPerTrk): 9 (0x09, 0x00)
+        assert_eq!(u16::from_le_bytes([buf[0x18], buf[0x19]]), 9);
+        // Offsets 0x1A..0x1B (BPB_NumHeads): 2 (0x02, 0x00)
+        assert_eq!(u16::from_le_bytes([buf[0x1A], buf[0x1B]]), 2);
+        // Offsets 0x1C..0x1F (BPB_HiddSec): 0 (0x00, 0x00, 0x00, 0x00)
+        assert_eq!(u32::from_le_bytes([buf[0x1C], buf[0x1D], buf[0x1E], buf[0x1F]]), 0);
+        // Offsets 0x20..0x23 (BPB_TotSec32): 0 (0x00, 0x00, 0x00, 0x00)
+        assert_eq!(u32::from_le_bytes([buf[0x20], buf[0x21], buf[0x22], buf[0x23]]), 0);
+        // Offset 0x24 (BS_DrvNum): 0x00
+        assert_eq!(buf[0x24], 0x00);
+        // Offset 0x25 (BS_Reserved1): 0x00
+        assert_eq!(buf[0x25], 0x00);
+        // Offset 0x26 (BS_BootSig): 0x29
+        assert_eq!(buf[0x26], 0x29);
+        // Offsets 0x27..0x2A (BS_VolID): [0x12, 0x34, 0x56, 0x78]
+        assert_eq!(&buf[0x27..=0x2A], &[0x12, 0x34, 0x56, 0x78]);
+        // Offsets 0x2B..0x35 (BS_VolLab): b"720K       " (11 bytes)
+        assert_eq!(&buf[0x2B..=0x35], b"720K       ");
+        // Offsets 0x36..0x3D (BS_FilSysType): b"FAT12   " (8 bytes)
+        assert_eq!(&buf[0x36..=0x3D], b"FAT12   ");
+        // Offsets 0x1FE..0x1FF: Signature 0x55, 0xAA
+        assert_eq!(buf[0x1FE], 0x55);
+        assert_eq!(buf[0x1FF], 0xAA);
+
+        // Check FAT1 start at Sector 2 (LBA 1) -> starts with 0xF9, 0xFF, 0xFF
+        let mut fat1_buf = [0u8; 512];
+        generate_sector_payload(PresetProfile::Pc35Dd, 0, 0, 2, FsInitMode::OsReady, &mut fat1_buf);
+        assert_eq!(fat1_buf[0], 0xF9);
+        assert_eq!(fat1_buf[1], 0xFF);
+        assert_eq!(fat1_buf[2], 0xFF);
+        assert_eq!(fat1_buf[3], 0x00);
+
+        // Check FAT2 start at Sector 5 (LBA 4, since reserved=1, fat1_size=3 -> fat2 starts at lba 4)
+        let mut fat2_buf = [0u8; 512];
+        generate_sector_payload(PresetProfile::Pc35Dd, 0, 0, 5, FsInitMode::OsReady, &mut fat2_buf);
+        assert_eq!(fat2_buf[0], 0xF9);
+        assert_eq!(fat2_buf[1], 0xFF);
+        assert_eq!(fat2_buf[2], 0xFF);
+        assert_eq!(fat2_buf[3], 0x00);
+    }
+
+    #[test]
+    fn test_dos_bpb_generation_pc525() {
+        // 5.25" HD (1.2 MB)
+        let mut buf_hd = [0u8; 512];
+        generate_sector_payload(PresetProfile::Pc525Hd, 0, 0, 1, FsInitMode::OsReady, &mut buf_hd);
+        assert_eq!(&buf_hd[0x2B..=0x35], b"12M        ");
+        assert_eq!(buf_hd[0x15], 0xF9);
+
+        // 5.25" DD (360 KB)
+        let mut buf_dd = [0u8; 512];
+        generate_sector_payload(PresetProfile::Pc525Dd, 0, 0, 1, FsInitMode::OsReady, &mut buf_dd);
+        assert_eq!(&buf_dd[0x2B..=0x35], b"360K       ");
+        assert_eq!(buf_dd[0x15], 0xFD);
+
+        // 5.25" DD on HD (360 KB)
+        let mut buf_dd_on_hd = [0u8; 512];
+        generate_sector_payload(PresetProfile::Pc525DdOnHd, 0, 0, 1, FsInitMode::OsReady, &mut buf_dd_on_hd);
+        assert_eq!(&buf_dd_on_hd[0x2B..=0x35], b"360K       ");
+        assert_eq!(buf_dd_on_hd[0x15], 0xFD);
     }
 
     #[test]

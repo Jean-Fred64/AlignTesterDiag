@@ -449,7 +449,7 @@ Low-Level Format (CMD_WRITE_FLUX)
 ```
 
 1. **IBM PC DOS FAT12 Generation:**
-   - **Cylinder 0, Head 0, Sector 1 (LBA 0):** Full BIOS Parameter Block (BPB) with OEM `MSDOS5.0`, jump instruction `EB 3C 90`, geometry headers, media descriptor, volume ID, label `NO NAME    `, file system type `FAT12   `, and standard boot message terminated by `0x55AA`.
+   - **Cylinder 0, Head 0, Sector 1 (LBA 0):** Full BIOS Parameter Block (BPB) with OEM `MSDOS5.0`, jump instruction `EB 3C 90`, geometry headers, media descriptor, volume ID, format-specific volume label (`144M       `, `720K       `, `12M        `, `360K       `), file system type `FAT12   `, and standard boot message terminated by `0x55AA`.
    - **Media Descriptors:** `0xF0` for 1.44M 3.5" HD, `0xF9` for 720K 3.5" DD & 1.2M 5.25" HD, `0xFD` for 360K 5.25" DD.
    - **FAT 1 & FAT 2 Tables:** Pre-initialized with media descriptor byte and cluster 0/1 end-of-chain markers (`[media_desc, 0xFF, 0xFF]`).
    - **Root Directory:** Initialized clean with 0x00 entries.
