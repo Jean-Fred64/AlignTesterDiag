@@ -282,8 +282,13 @@ pub fn generate_pc_dos_fs(
             out[2] = 0xFF;
         }
     } else if lba >= root_start && lba < root_end {
-        // Root Directory (Clean / Empty entries = 0x00)
+        // Root Directory
         out.fill(0x00);
+        if lba == root_start {
+            // First 32-byte directory entry is the Volume Label (0x08 = ATTR_VOLUME_ID)
+            out[0..11].copy_from_slice(geom.vol_label);
+            out[11] = 0x08;
+        }
     } else {
         // Data sectors: clean 0x00 for OS-Ready format
         out.fill(0x00);
@@ -729,6 +734,57 @@ mod tests {
             bmp_sum = bmp_sum.wrapping_add(lw);
         }
         assert_eq!(bmp_sum, 0, "Amiga BitmapBlock longwords sum must be 0");
+    }
+
+    #[test]
+    fn test_dos_root_dir_volume_label_pc35dd() {
+        // For Pc35Dd (720K):
+        // reserved_secs = 1, num_fats = 2, secs_per_fat = 3
+        // root_dir_lba = 1 + (2 * 3) = LBA 7
+        // CHS mapping for LBA 7 (9 sec/track, 2 heads):
+        // Cyl = 0, Head = 0, Sector = 8 (index 7: (0 * 2 + 0) * 9 + (8 - 1) = 7)
+        let mut root_buf = [0u8; 512];
+        generate_sector_payload(PresetProfile::Pc35Dd, 0, 0, 8, FsInitMode::OsReady, &mut root_buf);
+
+        // First 11 bytes: Volume Label "720K       "
+        assert_eq!(&root_buf[0..11], b"720K       ");
+        // Byte 11: Attribute ATTR_VOLUME_ID (0x08)
+        assert_eq!(root_buf[11], 0x08);
+        // Bytes 12..32 must be 0x00
+        assert_eq!(&root_buf[12..32], &[0u8; 20]);
+        // Remainder of sector should be 0x00
+        assert!(root_buf[32..].iter().all(|&b| b == 0x00));
+
+        // Prior sector (LBA 6: Cyl 0, Head 0, Sec 7) should NOT have volume label
+        let mut prev_buf = [0u8; 512];
+        generate_sector_payload(PresetProfile::Pc35Dd, 0, 0, 7, FsInitMode::OsReady, &mut prev_buf);
+        assert_ne!(&prev_buf[0..11], b"720K       ");
+
+        // Subsequent root directory sector (LBA 8: Cyl 0, Head 0, Sec 9) should be empty
+        let mut next_buf = [0u8; 512];
+        generate_sector_payload(PresetProfile::Pc35Dd, 0, 0, 9, FsInitMode::OsReady, &mut next_buf);
+        assert!(next_buf.iter().all(|&b| b == 0x00));
+    }
+
+    #[test]
+    fn test_dos_root_dir_volume_label_all_presets() {
+        // Pc35Hd (1.44M): LBA 19 -> Cyl 0, Head 1, Sec 2 ((0 * 2 + 1) * 18 + 1 = 19)
+        let mut buf_144 = [0u8; 512];
+        generate_sector_payload(PresetProfile::Pc35Hd, 0, 1, 2, FsInitMode::OsReady, &mut buf_144);
+        assert_eq!(&buf_144[0..11], b"144M       ");
+        assert_eq!(buf_144[11], 0x08);
+
+        // Pc525Hd (1.2M): LBA 15 -> Cyl 0, Head 1, Sec 1 ((0 * 2 + 1) * 15 + 0 = 15)
+        let mut buf_12m = [0u8; 512];
+        generate_sector_payload(PresetProfile::Pc525Hd, 0, 1, 1, FsInitMode::OsReady, &mut buf_12m);
+        assert_eq!(&buf_12m[0..11], b"12M        ");
+        assert_eq!(buf_12m[11], 0x08);
+
+        // Pc525Dd (360K): LBA 5 -> Cyl 0, Head 0, Sec 6 ((0 * 2 + 0) * 9 + 5 = 5)
+        let mut buf_360k = [0u8; 512];
+        generate_sector_payload(PresetProfile::Pc525Dd, 0, 0, 6, FsInitMode::OsReady, &mut buf_360k);
+        assert_eq!(&buf_360k[0..11], b"360K       ");
+        assert_eq!(buf_360k[11], 0x08);
     }
 
     #[test]
