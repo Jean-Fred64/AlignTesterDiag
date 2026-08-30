@@ -1,21 +1,29 @@
 # 💾 AlignTesterDiag 🛠️
 
 [![Rust](https://img.shields.io/badge/rust-2021%20edition-orange.svg?logo=rust)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/version-v0.2.0--alpha-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-v1.0.0-blue.svg)]()
 [![TUI](https://img.shields.io/badge/ui-Ratatui%20%2B%20Crossterm-blue.svg)](https://ratatui.rs)
 [![Hardware](https://img.shields.io/badge/hardware-Greaseweazle%20v4-green.svg)](https://github.com/keirf/greaseweazle)
 [![Architecture](https://img.shields.io/badge/concurrency-100%25%20Non--Blocking-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 
-**AlignTesterDiag** is a high-performance, non-blocking, modern terminal user interface (TUI) diagnostics and calibration suite for floppy disk drives. Interfacing directly with a **Greaseweazle USB flux controller**, it bridges Dave Dunfield's classic **ImageDisk (`IMD.C`)** diagnostic methodologies with modern sub-microsecond magnetic flux DPLL decoding and real-time audio-visual feedback.
+**AlignTesterDiag** is a high-performance, non-blocking, modern terminal user interface (TUI) diagnostics, formatting, and calibration suite for floppy disk drives. Interfacing directly with a **Greaseweazle USB flux controller**, it bridges Dave Dunfield's classic **ImageDisk (`IMD.C`)** diagnostic methodologies with modern sub-microsecond magnetic flux DPLL decoding, native multi-system retro hardware synthesis (IBM PC, Commodore Amiga Paula, Atari ST, Amstrad CPC), and real-time audio-visual feedback.
 
 ---
 
 ## 🌟 Key Highlights
 
-- ⚡ **100% Non-Blocking Architecture (~60 Hz TUI):** Strict decoupling between the interactive Ratatui/Crossterm rendering loop, the USB hardware acquisition worker thread, and a dedicated real-time audio thread via lock-free `crossbeam-channel` queues. 64 KB extended serial block buffers eliminate micro-blocking system calls and USB CDC latency. 171 automated unit tests with strict Clippy compliance (`cargo clippy -- -D warnings`).
+- ⚡ **100% Non-Blocking Architecture (~60 Hz TUI):** Strict decoupling between the interactive Ratatui/Crossterm rendering loop, the USB hardware acquisition worker thread, and a dedicated real-time audio thread via lock-free `crossbeam-channel` queues. 64 KB extended serial block buffers eliminate micro-blocking system calls and USB CDC latency. **198 automated unit tests** with strict Clippy compliance (`cargo clippy -- -D warnings`).
+- 🦁 **Native Commodore Amiga Paula Engine & Asynchronous Stream Synthesis:**
+  - **Asynchronous Continuous Track Writing (`cue_at_index = false`):** Paula hardware writes tracks continuously as a circular MFM stream as soon as requested, without waiting for the physical index hole (`cue_at_index = false` for AmigaDOS vs. `cue_at_index = true` for index-aligned PC / Atari / CPC formats).
+  - **Clean Paula Encoding (No Artificial Lead-In):** Exact Amiga track layout without artificial zero padding, generating 11 consecutive sectors with double sync words `0x44894489`, header info, 16-byte OS label, 32-bit XOR header checksum, 512-byte payload split into 128 even longwords + 128 odd longwords, 32-bit XOR data checksum, and 1 byte of MFM inter-sector gap (`0x00`).
+  - **Seamless Over-Write Splice Loop (~108,000 MFM bits):** Encodes $\approx 1.08$ to $1.13$ revolutions ($\approx 216\text{ ms}$ @ 250 kbps) ensuring complete track erasure and a clean magnetic splice loop across drive RPM variations (295–305 RPM).
+  - **100% Hardware Validation:** Tested and validated on physical Commodore Amiga 500 hardware running Amiga Test Kit (`........... (11/11 okay)`).
 - 💾 **High-Precision Low-Level Format Engine & MFM Synthesizer (`CMD_WRITE_FLUX`):**
-  - **Ultra-Fast Formatter Pipeline (~35s Fast / ~70s Full Verify):** Direct index-synchronized flux emission with optional 1-revolution instant DPLL read-after-write verification per track (toggled with <kbd>V</kbd> in format modal).
+  - **Ultra-Fast Formatter Pipeline (~35s Fast / ~70s Full Verify):** Direct flux emission with optional 1-revolution instant DPLL read-after-write verification per track (toggled with <kbd>V</kbd> in format modal).
+  - **24H Precision Progress Statistics:** Real-time timestamped tracking during multi-track operations:
+    - *In Progress:* `Start: HH:MM:SS | Now: HH:MM:SS | Est. End: HH:MM:SS`
+    - *Completed:* `Completed Successfully | Total Duration: HH:MM:SS`
   - **OS-Ready Filesystem Initialization Mode (<kbd>S</kbd>):** Instant injection of valid boot sectors, file allocation structures, and root directories tailored to the active profile:
     - **PC DOS FAT12:** Valid BPB standard (OEM `MSDOS5.0`), FAT1 & FAT2 tables with Media Descriptors (`0xF0` for 1.44M HD, `0xF9` for 720K DD / 1.2M 5.25" HD, `0xFD` for 360K DD), clean root directory, and `0x55AA` boot signature.
     - **Atari ST TOS:** Standard BPB with valid 16-bit word boot sector checksum (`sum == 0x1234`).
@@ -29,23 +37,25 @@
   - **Explicit Confirmation Safety Lock (`[y/N]`):** All destructive operations require explicit user confirmation (<kbd>Y</kbd> to confirm, <kbd>N</kbd> / <kbd>Enter</kbd> / <kbd>Esc</kbd> to cancel, with `N` as default).
   - **72 MHz Pulse Timing:** Translates synthesized MFM bitstreams into cycle-accurate 72 MHz interval ticks ($2T, 3T, 4T$).
   - **Write Pre-Compensation:** Applies $\pm 125\text{ ns}$ ($\approx 9$ ticks @ 72 MHz) timing shifts on inner tracks ($> 40$) to counteract magnetic peak shift.
-  - **Hardware Index Cueing:** Synchronizes flux emission to the physical index pulse (`cue_at_index = 1`) with controlled splice overlap.
   - **Read-After-Write Verification:** Automatically reads back each formatted track, verifies 100% expected sector presence, 0 CRC errors, and $Q \ge 85\%$ quality with up to 2 automatic retries.
   - **Dynamic Track Override:** Interactive track adjustment supporting standard 40/80 tracks up to 42/84 tracks with physical cylinder tracking.
   - **Write-Protect Guard:** Hardware Pin 28 (`WPROT`) validation before any carriage movement or flux emission.
 - 🧲 **Hardware Low-Level DC Erase Engine (`CMD_ERASE_FLUX`):**
   - **Continuous Magnetic Neutralization:** Asserts raw continuous write gate without flux transitions for $\ge 1.1$ revolutions after index pulse to permanently wipe and degauss magnetic tracks.
-  - **Interactive Erase Modal (<kbd>E</kbd>):** Single-track (<kbd>T</kbd>), custom track range (<kbd>R</kbd>), or full-disk (<kbd>D</kbd>) DC erasure with tri-state head targeting (<kbd>H</kbd>), preset cycling (<kbd>P</kbd>), and interactive track count bounds (40/42 for 48 TPI, 80/84 for 96/135 TPI).
-  - **Integrated Navigation & Range Editing:** Track adjustment (<kbd>+</kbd>/<kbd>-</kbd>, <kbd>[</kbd>/<kbd>]</kbd>, arrows, mouse wheel), head toggle (<kbd>H</kbd>), and custom range editor (<kbd>R</kbd>).
-  - **Explicit Confirmation Safety Lock (`[y/N]`):** Prompts for explicit confirmation before activating the erase gate (<kbd>Y</kbd> to proceed, <kbd>N</kbd> / <kbd>Enter</kbd> / <kbd>Esc</kbd> to cancel).
-  - **Hardware Write-Protect Safety:** Proactively queries Pin 28 before seeking or activating write gate.
-- 🕹️ **Multi-System Retro Platform Support (IBM PC, Amiga, Atari ST, Amstrad CPC):**
-  - **Amiga (Paula MFM):** Décodage bit-level *even/odd*, checksums 32-bit XOR, 11 secteurs/piste en DD (880 Ko) et 22 secteurs en HD (1.76 Mo).
-  - **Atari ST (WD1772):** Support des formats étendus 9, 10 et 11 secteurs (jusqu'à 880 Ko) et pistes 80 à 82.
-  - **Amstrad CPC (µPD765 / 3"):** Formats DATA (`0xC1..0xC9`), SYSTEM (`0x41..0x49`) et CPM.
+  - **Interactive Erase Modal (<kbd>E</kbd>):** Single-track (<kbd>T</kbd>), custom track range (<kbd>R</kbd>), or full-disk (<kbd>D</kbd>) DC erasure with tri-state head targeting (<kbd>H</kbd>), preset cycling (<kbd>P</kbd>), 24H timing stats, and interactive track count bounds (40/42 for 48 TPI, 80/84 for 96/135 TPI).
+- 🕹️ **Multi-System Retro Platform Diagnostics:**
+  - **Amiga (Paula MFM):** Bit-level *even/odd* decoding, 32-bit XOR checksums, strict 11-sector DD ribbon `[ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (11/11 OK)`, and multi-revolution CRC repair.
+  - **Atari ST (WD1772):** Support for 9, 10, and 11 sector layouts (up to 880 KB) and extended tracks (80 to 82).
+  - **Amstrad CPC (µPD765 / 3"):** DATA (`0xC1..0xC9`), SYSTEM (`0x41..0x49`), and CP/M formats.
+  - **IBM PC (NEC µPD765 / Intel 82077AA):** 720K DD, 1.44M HD, 360K DD, and 1.2M HD formats.
+- ⏱️ **72 MHz Multi-Mode Spindle Tachometer & Live RPM Centering Gauge:**
+  - **Hardware Pin 8 Index Measurement:** Direct hardware timing via inter-index flux summation.
+  - **Software DPLL Sync Fallback:** Reconstructed spindle speed from MFM sync pulse intervals for unindexed drives or missing index pulses.
+  - **Dual Mode & Differential ($\Delta\text{RPM}$):** Real-time side-by-side comparison of HW Index and SW Sync.
+  - **Contextual <kbd>I</kbd> Key:** Toggles tachometer measurement modes in Live RPM (<kbd>L</kbd>), or toggles track details in standard views.
+  - **Visual Jitter Gauge:** 10-revolution rolling average, peak-to-peak jitter ($\Delta\text{RPM}$, $\pm\Delta\%$), and 21-character visual centering gauge (300.0 RPM / 360.0 RPM).
 - 🎯 **Real-Time Mechanical Alignment Radar:** Continuous on-track vs. off-track sector validation with live percentage gauge calculation, detecting misaligned head carriages, tracking errors, and invalid track IDs.
 - 🔊 **Dynamic Pitch Acoustic Variometer:** Auditory feedback inspired by glider variometers. Continuously modulates multi-tier audio frequency (**1500 Hz – 2200 Hz** for nominal alignment $\ge 95\%$, **600 Hz – 1400 Hz** for marginal tracking $70\text{--}94\%$, **250 Hz – 500 Hz** continuous tone for severe misalignment $< 70\%$), with instantaneous **180 Hz pulsed warning buzz** on cross-track mismatch and **150 Hz hum** on zero decoded sectors.
-- ⏱️ **72 MHz Spindle Tachometer & Live RPM Jitter Gauge:** Sub-microsecond revolution interval timing extracted directly from hardware index pulses. Computes instant RPM, 10-revolution rolling average, peak-to-peak jitter ($\Delta\text{RPM}$, $\pm\Delta\%$), and displays a 21-character visual centering gauge. Nominal target speeds: **360.0 RPM** for 5.25" HD formats (`Pc525Hd`, `Pc525DdOnHd`) and **300.0 RPM** for 3.5" and 5.25" DD native formats.
 - 🔄 **Dual-Head ("Both" Mode) Acquisition:** Alternating Head 0 & Head 1 acquisition with automated cross-track divergence detection ($T_{\text{H0}} \ne T_{\text{H1}}$) and consolidated dual-head health scoring.
 - 🔌 **Universal Drive Support (26-Pin FFC & 34-Pin Shugart/PC):** Motor-gated seek with 15 ms electronic wake-up delay (`STEPPER_WAKEUP_DELAY_MS`) to eliminate stepper motor driver lockups on slim laptop mechanisms (e.g. TEAC FD-05HG). Dynamic drive unit selection (`A:`/`B:` for IBM PC, `DS0`..`DS3` for Shugart).
 - 📊 **Standard & Verbose Live Stream Views:** Color-coded segmented ribbon blocks representing sector-by-sector IDAM/DAM integrity, Gap0 timing in microseconds, phosphor decay animation, and interleave ratio.
@@ -86,11 +96,11 @@
 ### 1. Prerequisites
 - **Rust Toolchain:** Stable Rust (2021 edition or newer) & Cargo ([rustup.rs](https://rustup.rs)).
 - **Hardware:** Greaseweazle v4 (or compatible v4.1 hardware) connected via USB to a 3.5" or 5.25" floppy drive.
-- **Reference Diskette:** A known-good, formatted 3.5" (720K DD / 1.44M HD) or 5.25" (360K DD / 1.2M HD) floppy diskette.
+- **Reference Diskette:** A known-good, formatted 3.5" (720K DD / 1.44M HD / 880K Amiga) or 5.25" (360K DD / 1.2M HD) floppy diskette.
 
 ### 2. Build from Source
 ```bash
-git clone https://github.com/your-username/AlignTesterDiag.git
+git clone https://github.com/Jean-Fred64/AlignTesterDiag.git
 cd AlignTesterDiag
 cargo build --release
 ```
@@ -127,6 +137,7 @@ cargo run --release -- --shugart --drive 0
 | <kbd>E</kbd> | **Erase Modal** | Open Low-Level Hardware DC Erase Modal (`[T]` Track, `[R]` Range, `[D]` Disk, `[Esc]` Cancel) |
 | <kbd>F</kbd> | **Format Modal** | Open Low-Level Track & Disk Formatter Modal (`[T]` Track, `[R]` Range, `[D]` Disk, `[S]` FS Mode, `[V]` Verify, `[Esc]` Cancel) |
 | <kbd>L</kbd> | **Live RPM** | Live RPM tachometer & jitter stability test |
+| <kbd>I</kbd> | **Index / RPM Mode Toggle** | Contextual: Cycle RPM measurement mode in Live RPM (`HW Pin 8` ➔ `SW Sync` ➔ `Dual`), or toggle track info in standard view |
 | <kbd>P</kbd> | **Preset (Hardware & Format)** | Cycle unified hardware & format presets (`Pc35Hd` ➔ `Pc35Dd` ➔ `Pc525Hd` ➔ `Pc525DdOnHd` ➔ `Pc525Dd` ➔ `Amiga35Dd` ➔ `Atari35Dd` ➔ `Cpc30Data`), atomically configuring bus, stepping rate, DPLL clock & nominal bitrate |
 | <kbd>S</kbd> | **Toggle Step Rate** | Toggle Single (1:1) / Double (2:1) step mode (48/96 TPI, for reading 40-track media on 80-track drives) |
 | <kbd>T</kbd> | **Toggle Bus Type** | Switch interface bus mode: `IBM PC (0x01)` ➔ `Shugart (0x02)` (auto-resets unit to 0 when entering PC mode from DS2/DS3) |
@@ -242,7 +253,7 @@ AlignTesterDiag/
 
 ## 📄 License & Credits
 
-- Copyright (C) 2026 Mr JeAn-FReD 🇫🇷
+- Copyright (C) 2026 MonSieur JeAn-FReD 🇫🇷
+- **Author:** MonSieur JeAn-FReD (`https://github.com/Jean-Fred64`)
 - **Heritage:** Inspired by Dave Dunfield's **ImageDisk (`IMD`)** and Keir Fraser's **Greaseweazle**.
 - **License:** Distributed under the terms of the [GNU General Public License v3.0 (GPL-3.0)](LICENSE).
-

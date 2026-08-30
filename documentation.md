@@ -1,6 +1,6 @@
-# 💾 AlignTesterDiag v0.2.0-alpha — Comprehensive Technical Documentation & Architecture Manual
+# 💾 AlignTesterDiag v1.0.0 — Comprehensive Technical Documentation & Architecture Manual
 
-Welcome to the definitive technical documentation for **AlignTesterDiag**, an ultra-responsive, non-blocking terminal user interface (TUI) diagnostics and calibration platform for floppy disk drives connected via the **Greaseweazle USB flux controller**.
+Welcome to the definitive technical documentation for **AlignTesterDiag**, an ultra-responsive, non-blocking terminal user interface (TUI) diagnostics, formatting, and calibration platform for floppy disk drives connected via the **Greaseweazle USB flux controller**.
 
 ---
 
@@ -22,8 +22,7 @@ Welcome to the definitive technical documentation for **AlignTesterDiag**, an ul
 
 ## 1. System Architecture & Concurrency Model
 
-AlignTesterDiag is engineered around a **100% non-blocking, multi-threaded architecture** designed to maintain a consistent ~60 Hz terminal rendering framerate while continuously capturing raw flux transitions over USB and synthesizing pitch-modulated audio feedback.
-
+AlignTesterDiag is engineered around a **100% non-blocking, multi-threaded architecture** designed to maintain a consistent ~60 Hz terminal rendering framerate while continuously capturing raw flux transitions over USB, decoding multi-system retro disk layouts, and synthesizing pitch-modulated audio feedback.
 
 ### 1.1 Concurrency Topology
 The application executes across three decoupled OS threads:
@@ -35,8 +34,8 @@ The application executes across three decoupled OS threads:
    - Translates key presses into strongly-typed `HwCmd` messages sent to `tx_cmd`.
 2. **Hardware I/O & Decoding Thread (`src/hw/mod.rs`):**
    - Owns the USB CDC serial connection to the Greaseweazle hardware (`serialport`).
-   - Manages drive selection, motor power sequencing, track seeking, and raw flux stream captures.
-   - Executes the software Digital Phase-Locked Loop (DPLL) and MFM sector decoding pipeline.
+   - Manages drive selection, motor power sequencing, track seeking, low-level formatting, hardware erasing, and raw flux stream captures.
+   - Executes the software Digital Phase-Locked Loop (DPLL) and MFM sector decoding pipeline (IBM PC, Amiga Paula, Atari ST, Amstrad CPC).
    - Publishes periodic `DriveStatus` snapshots via `tx_status`.
    - Dispatches `AudioEvent` notifications to the audio thread via `tx_audio`.
 3. **Real-Time Sound Worker Thread (`src/audio.rs`):**
@@ -53,6 +52,7 @@ pub enum HwCmd {
     SetMotor(bool),
     ToggleMotor,
     MeasureRpm,
+    CycleRpmMode,
     Seek(u8),
     RecalibrateSeek,
     ZeroTrack,
@@ -66,8 +66,8 @@ pub enum HwCmd {
     ToggleBeep,
     SetVerbose(bool),
     SetBeep(bool),
-    FormatTrack { track: u8, head_sel: HeadSelection, verify: bool, fs_mode: FsInitMode },
-    FormatDisk { range: TrackRange, head_sel: HeadSelection, verify: bool, fs_mode: FsInitMode },
+    FormatTrack { track: u8, head_sel: HeadSelection, verify: bool, fs_mode: FsInitMode, preset: PresetProfile },
+    FormatDisk { range: TrackRange, head_sel: HeadSelection, verify: bool, fs_mode: FsInitMode, preset: PresetProfile },
     EraseTrack { track: u8, head_sel: HeadSelection },
     EraseDisk { range: TrackRange, head_sel: HeadSelection },
     Stop,
@@ -153,7 +153,7 @@ All commands follow the Greaseweazle frame format: `[CMD_OPCODE, FRAME_LENGTH, A
 | `0x02` | `CMD_SEEK` | `[0x02, 0x03, cyl]` | 0 bytes | Step head carriage to logical cylinder (`0` to `83`) |
 | `0x03` | `CMD_HEAD` | `[0x03, 0x03, head]` | 0 bytes | Select physical head (`0` = Lower / Side 0, `1` = Upper / Side 1) |
 | `0x07` | `CMD_READ_FLUX` | `[0x07, 0x08, 0x00, 0x00, 0x00, 0x00, rev_low, rev_high]` | Stream | Stream raw magnetic flux transition timings (64 KB extended reception buffer) |
-| `0x08` | `CMD_WRITE_FLUX` | `[0x08, 0x04, cue_at_index, terminate_at_index]` | Status ACK | Write raw magnetic flux stream synchronized to index pulse |
+| `0x08` | `CMD_WRITE_FLUX` | `[0x08, 0x04, cue_at_index, terminate_at_index]` | Status ACK | Write raw flux stream (`cue_at_index = 0` for AmigaDOS, `cue_at_index = 1` for PC/Atari/CPC) |
 | `0x11` | `CMD_ERASE_FLUX` | `[0x11, 0x06, ticks_le_u32]` | Status ACK | Assert continuous neutral write gate without flux transitions for specified sample ticks ($\ge 1.1$ revs) |
 | `0x14` | `CMD_GET_PIN` | `[0x14, 0x03, pin_num]` | 1 byte | Read logic level of physical connector pin |
 
@@ -245,158 +245,80 @@ $$\text{Clock}_{\text{nom}} = \frac{72{,}000{,}000}{2 \times \text{Bitrate (bps)
 Phase adjustment ($\alpha$) and period adjustment ($\beta = 0.05$) adapt the clock window on every valid flux pulse:
 $$\text{Clock} \leftarrow \text{Clock} + \Delta\text{Ticks} \times \beta$$
 
-### 4.3 Automated Density Detection
-By evaluating average flux transition intervals across the initial revolution, the engine classifies disk density automatically:
+### 4.3 Automated Density & Format Recognition
+By evaluating average flux transition intervals and sync patterns across the initial revolution, the engine classifies media density and formatting automatically:
 - **Average Cell $\le 240$ ticks:** High Density (HD, 500 kbps, 18 sectors/track @ 300 RPM).
-- **Average Cell $> 240$ ticks:** Double Density (DD, 250 kbps, 9 sectors/track @ 300 RPM).
-
-### 4.4 MFM Address Marks & CRC-16 CCITT
-MFM encoding uses clock bits to separate data bits. Special synchronization words violate standard MFM clock rules to create unique framing markers.
-
-```text
-MFM Sync Word: 0x4489 (Decodes to 0xA1 with missing clock transition between bits 4 and 5)
-```
-
-| Marker | Sync Sequence | Mark Byte | Description |
-|:---|:---|:---:|:---|
-| `IAM` | `0xC2C2C2` | `0xFC` | **Index Address Mark:** Marks the start of track flux. |
-| `IDAM` | `0xA1A1A1` (`0x448944894489`) | `0xFE` | **ID Address Mark:** Precedes cylinder, head, sector, size code header. |
-| `DAM` | `0xA1A1A1` (`0x448944894489`) | `0xFB` | **Data Address Mark:** Precedes 512-byte sector data payload. |
-| `DDAM` | `0xA1A1A1` (`0x448944894489`) | `0xF8` | **Deleted Data Address Mark:** Marks sector as deleted/bad. |
-
-#### CRC-16 CCITT Calculation
-Both sector headers and data payloads are validated using the standard CCITT polynomial:
-
-$$P(x) = x^{16} + x^{12} + x^5 + 1 \quad (\text{Polynomial: } \mathtt{0x1021}, \text{ Initial Seed: } \mathtt{0xFFFF})$$
-
-The calculation includes the three `0xA1` sync bytes:
-```rust
-fn crc16_ccitt(data: &[u8]) -> u16 {
-    let mut crc: u16 = 0xFFFF;
-    for &b in data {
-        crc ^= (b as u16) << 8;
-        for _ in 0..8 {
-            if (crc & 0x8000) != 0 {
-                crc = (crc << 1) ^ 0x1021;
-            } else {
-                crc <<= 1;
-            }
-        }
-    }
-    crc
-}
-```
+- **Average Cell $> 240$ ticks:** Double Density (DD, 250 kbps, 9 sectors/track IBM/Atari, 11 sectors/track Amiga @ 300 RPM, or 300 kbps 360K @ 360 RPM).
 
 ---
 
 ## 5. Real-Time Alignment Diagnostic Engine
 
-The diagnostic engine continuously measures head positioning accuracy relative to the magnetic track centerline, identifying track slippage, misaligned head carriages, and azimuth errors.
+AlignTesterDiag performs continuous on-track vs. off-track sector validation to diagnose head alignment, radial track drift, and azimuth tilt.
 
-### 5.1 Alignment Metric Calculation
-Alignment quality is calculated from the ratio of successfully decoded sectors matching the target cylinder vs. expected sectors:
+### 5.1 Alignment Score Calculation
+Alignment quality is expressed as the percentage of valid sectors found on the target cylinder ($C_{\text{target}}$) without CRC errors:
 
-$$\text{Mechanical Alignment (\%)} = \left( \frac{\sum \text{Valid Sectors on Target Track}}{\text{Total Expected Sectors}} \right) \times 100$$
+$$\text{Score} = \left( \frac{\text{On-Track Valid Sectors}}{\text{Total Expected Sectors}} \right) \times 100\%$$
 
-- **≥ 95% (Green):** Nominal factory alignment.
-- **70% – 94% (Yellow):** Degraded alignment / marginal tracking.
-- **< 70% (Red):** Severe mechanical misalignment or corrupt track.
+- **100.0% (Green):** Nominal radial alignment. All expected sectors match the physical cylinder.
+- **70.0% – 99.9% (Yellow):** Marginal tracking or minor head azimuth deviation.
+- **< 70.0% (Red):** Severe head misalignment, off-track seeking error, or magnetic media degradation.
 
-### 5.2 Single-Head vs. Dual-Head ("Both" Mode) Operation
-Users can toggle head acquisition mode using the <kbd>H</kbd> key:
-
-1. **Head 0 / Head 1 Modes:** Continuously samples the selected physical head, displaying a sliding history stream of the latest 12–13 revolution passes.
-2. **"Both" Mode (Dual-Head Consolidated):** Alternates head selection on every revolution pass (`Head 0` $\leftrightarrow$ `Head 1`), presenting a dedicated **2-line persistent display**:
-   - **Line 1:** Head 0 status ribbon and metrics.
-   - **Line 2:** Head 1 status ribbon and metrics.
-   - An active cursor pointer (`► `) indicates which head is currently being sampled.
-
-### 5.3 Cross-Track Divergence Detection
-When operating in "Both" mode, if Head 0 reads Track $N$ while Head 1 reads Track $N \pm 1$ (due to physical carriage skew or split head alignment), the engine immediately triggers:
-- Diagnostic Flag: `MISMATCH: Track X on Head 0, Track Y on Head 1`
-- Alignment penalty: Alignment score is reduced to $50\%$ or lower.
-- Orange/Red ribbon highlighting on misaligned segments.
-- Immediate **180 Hz pulsed warning buzz** from the audio variometer.
+### 5.2 Multi-System Sector Decoding & Ribbon Rendering
+- **IBM PC / Atari ST (ISO MFM):** Synchronizes on altered sync words `0xA1*` (`0x4489`). Evaluates IDAM headers (`Cyl, Head, Sector, Size`) and DAM payloads with CCITT CRC-16.
+- **Commodore Amiga (Paula MFM):** Decodes raw 32-bit sync words `0x44894489`, deinterleaves split *even/odd* longwords, and validates 32-bit XOR header/data checksums. Renders a strict 11-block DD ribbon: `[ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (11/11 OK)`. In case of multi-revolution acquisition, automatically performs cross-revolution sector de-duplication and CRC repair.
+- **Amstrad CPC (µPD765):** Detects DATA format (`0xC1`–`0xC9`) and SYSTEM format (`0x41`–`0x49`) sector IDs.
 
 ---
 
 ## 6. Acoustic Variometer & Alignment Radar
 
-To allow technicians to align floppy drive head carriages without constantly looking at the screen, AlignTesterDiag includes a real-time **Multi-Tier Acoustic Variometer** inspired by soaring flight instrumentation.
+Inspired by aeronautical glider variometers, AlignTesterDiag incorporates a real-time **Dynamic Pitch Acoustic Variometer** providing instantaneous auditory feedback on head carriage alignment.
 
-### 6.1 Multi-Tier Dynamic Frequency Modulation
-The acoustic engine dynamically calculates pitch across three continuous quality tiers ($Q\%$):
+### 6.1 Frequency Tier Mapping
 
-$$\text{Pitch}(Q\%) = \begin{cases}
-1500 + \left(\frac{Q\% - 95}{5}\right) \times 700 \text{ Hz} & \text{for } 95\% \le Q\% \le 100\% \text{ (Nominal Factory Alignment)} \\[6pt]
-600 + \left(\frac{Q\% - 70}{24}\right) \times 800 \text{ Hz} & \text{for } 70\% \le Q\% \le 94\% \text{ (Marginal Tracking)} \\[6pt]
-250 + \left(\frac{Q\%}{69}\right) \times 250 \text{ Hz} & \text{for } Q\% < 70\% \text{ (Severe Misalignment — never silenced)}
+$$\text{Frequency} = \begin{cases}
+1500\text{ Hz} + \left(\frac{\text{Score} - 95}{5}\right) \times 700\text{ Hz} & \text{if Score} \ge 95\% \quad (1500\text{--}2200\text{ Hz, High Clear Tone}) \\
+600\text{ Hz} + \left(\frac{\text{Score} - 70}{25}\right) \times 800\text{ Hz} & \text{if } 70\% \le \text{Score} < 95\% \quad (600\text{--}1400\text{ Hz, Medium Tone}) \\
+250\text{ Hz} + \left(\frac{\text{Score}}{70}\right) \times 250\text{ Hz} & \text{if } 0 < \text{Score} < 70\% \quad (250\text{--}500\text{ Hz, Low Continuous Drone}) \\
+150\text{ Hz} \text{ (40 ms warning hum)} & \text{if Score} = 0\% \text{ (No Decoded Sectors)}
 \end{cases}$$
 
-```text
- 100% Quality ──> 2200 Hz (C#7)  ──┐
-  95% Quality ──> 1500 Hz (G6)   ──┴─ [Tier 1: Nominal Factory Alignment]
-  94% Quality ──> 1400 Hz (F6)   ──┐
-  70% Quality ──>  600 Hz (D5)   ──┴─ [Tier 2: Marginal Tracking]
-  69% Quality ──>  500 Hz (B4)   ──┐
-   0% Quality ──>  250 Hz (B3)   ──┴─ [Tier 3: Severe Misalignment (Continuous Low Tone)]
-```
-
-### 6.2 Sonic Signature Mapping
-
-| Audio Event | Frequency / Pattern | Duration | Acoustic Profile & Trigger Condition |
-|:---|:---:|:---:|:---|
-| **Nominal Alignment** | `1500 Hz – 2200 Hz` | `40 ms` | High clean tone. Dynamic pitch tracking signal quality $95\% \le Q\% \le 100\%$. |
-| **Marginal Tracking** | `600 Hz – 1400 Hz` | `40 ms` | Medium tone. Dynamic pitch tracking signal quality $70\% \le Q\% \le 94\%$. |
-| **Severe Misalignment** | `250 Hz – 500 Hz` | `40 ms` | Low continuous tone ($Q\% < 70\%$). Never muted, providing non-zero auditory guidance. |
-| **Track Mismatch** | `180 Hz` pulsed buzz | `2x 50 ms` (15 ms gap) | Low dissonant alarm. Triggered on cross-track divergence ($T_{\text{H0}} \ne T_{\text{H1}}$) or carriage off-target ($T_{\text{read}} \ne T_{\text{target}}$). |
-| **Zero Decoded Sectors** | `150 Hz` | `40 ms` | Low-frequency warning hum. Triggered when zero valid sectors or IDAM headers are detected. |
-Inspired by glider variometers, the real-time sound thread (`src/audio.rs`) synthesizes continuous pitch-modulated auditory feedback to guide head alignment adjustments without looking at the screen:
-
-- **Nominal Alignment ($\ge 95\%$):** Clean high-frequency tone ($1500\text{ Hz} \le f \le 2200\text{ Hz}$).
-- **Marginal Tracking ($70\text{--}94\%$):** Medium-frequency tone ($600\text{ Hz} \le f \le 1400\text{ Hz}$).
-- **Severe Misalignment ($< 70\%$):** Low continuous tone ($250\text{ Hz} \le f \le 500\text{ Hz}$).
-- **Cross-Track Mismatch:** Instantaneous double-pulsed 180 Hz warning buzz ($2 \times 50\text{ ms}$).
-- **Zero Decoded Sectors:** 150 Hz warning hum (40 ms).
+### 6.2 Track Divergence & Mismatch Alert
+When reading a cylinder where decoded sectors belong to a different physical track ($C_{\text{decoded}} \ne C_{\text{target}}$), the variometer immediately emits a **180 Hz pulsed warning buzz (2x 50 ms)** to alert the technician of stepper slippage or severe track offset.
 
 ---
 
 ## 7. High-Precision Spindle Tachometer & Live RPM Jitter Engine
 
-Accessed via the <kbd>L</kbd> key, the Spindle Tachometer measures disk rotational speed directly from hardware index pulses at **72 MHz sub-microsecond resolution**.
+Accessed via the <kbd>L</kbd> key, the Spindle Tachometer measures rotational velocity using 72 MHz timer captures with sub-microsecond precision.
 
-### 7.1 Mathematical Model & Jitter Calculation
-The controller captures timer ticks between successive index pulses:
+### 7.1 Multi-Mode Measurement & Contextual 'I' Key
+The tachometer supports three distinct measurement topologies toggled via the <kbd>I</kbd> key (`CycleRpmMode`):
+1. **Hardware Pin 8 Index Mode (`HW Index`):** Measures the time interval between consecutive hardware index pulses on Pin 8 via inter-index flux summation.
+2. **Targeted PLL Software Sync Mode (`SW Sync`):** Reconstructs instantaneous rotational speed from decoded MFM sync pulse intervals (`0x4489`) when the physical index sensor is disconnected or for soft-sectored drives.
+3. **Dual Mode & Differential ($\Delta\text{RPM}$):** Concurrently captures both HW Index and SW Sync, displaying both values along with the real-time differential drift:
+   $$\Delta\text{RPM} = |\text{RPM}_{\text{HW}} - \text{RPM}_{\text{SW}}|$$
 
-$$\text{Revolution Period } (ms) = \frac{\Delta\text{Ticks}}{72{,}000}$$
+### 7.2 Spindle Speed Mathematics & Centering Gauge
+$$\text{RPM}_{\text{inst}} = \frac{60 \times 72{,}000{,}000}{\text{Total Revolution Ticks}}$$
 
-$$\text{Instant RPM} = \frac{60{,}000}{\text{Revolution Period } (ms)}$$
+A 10-revolution rolling window computes the smoothed average $\overline{\text{RPM}}$ and peak-to-peak jitter ($\Delta\text{RPM}_{\text{P-P}}$):
 
-To filter high-frequency motor flutter without concealing mechanical drift, AlignTesterDiag computes:
-- **Rolling Average ($\text{Avg RPM}$):** 10-revolution sliding window average.
-- **Peak-to-Peak Speed Jitter ($\Delta\text{RPM}$):** $(\text{Max RPM} - \text{Min RPM}) / 2$.
-- **Percentage Jitter ($\pm\Delta\%$):** $\left( \frac{\text{Max RPM} - \text{Min RPM}}{2 \times \text{Avg RPM}} \right) \times 100$.
+$$\Delta\text{RPM} = \text{RPM}_{\max} - \text{RPM}_{\min}, \quad \text{Jitter \%} = \pm \left( \frac{\Delta\text{RPM}}{2 \times \overline{\text{RPM}}} \right) \times 100\%$$
 
-### 7.2 21-Character Visual Centering Gauge & Nominal RPM Targets
-
-Nominal spindle speeds by drive type & preset:
-- **360.0 RPM:** 5.25" High Density formats (`Pc525Hd` 1.2M and `Pc525DdOnHd` 360K DD on HD drive).
-- **300.0 RPM:** All 3.5" formats (PC 720K/1.44M, Amiga 880K, Atari 720K), 3.0" CPC, and native 5.25" DD drives (`Pc525Dd`).
-
+The UI renders a **21-character dynamic centering gauge**:
 ```text
-[----|----▼----|----]  <-- Nominal Target (300.0 / 360.0 RPM +/- 0.5% - Light Green)
-[----|---▼|----|----]  <-- Moderate Drift (-1.0% - Yellow)
-[▼---|----|----|----]  <-- Severe Under-speed (< -1.5% - Red)
-[----|----|----|---▼]  <-- Severe Over-speed (> +1.5% - Red)
+RPM: 300.0 RPM  Jitter: ±0.03%  [---------|---------]  (Nominal: 300.0 RPM)
 ```
 
-### 7.3 Motor Health Classification Matrix
-
-| Jitter Range ($\pm\Delta\%$) | Rating | Health Assessment |
-|:---|:---:|:---|
-| $\le \pm 0.20\%$ | `★★★★★` | **EXCELLENT STABILITY:** Direct-drive quartz-locked precision. |
-| $\le \pm 0.50\%$ | `★★★★☆` | **GOOD STABILITY:** Nominal belt-drive performance. |
-| $\le \pm 1.00\%$ | `★★★☆☆` | **ACCEPTABLE STABILITY:** Usable; minor spindle belt wear or dry bearings. |
+| Jitter Range | Visual Rating | Diagnosis |
+|:---:|:---:|:---|
+| $\le \pm 0.10\%$ | `★★★★★` | **EXCELLENT:** Direct-drive quartz-locked spindle; zero mechanical slip. |
+| $\le \pm 0.25\%$ | `★★★★☆` | **GOOD:** Normal belt-driven drive in healthy operational condition. |
+| $\le \pm 0.50\%$ | `★★★☆☆` | **ACCEPTABLE:** Minor belt stretch or slight bearing friction. |
+| $\le \pm 1.00\%$ | `★★☆☆☆` | **MARGINAL:** Worn drive belt or dirty spindle pulley needing service. |
 | $> \pm 1.00\%$ | `★☆☆☆☆` | **UNSTABLE MOTOR SPEED:** Defective drive belt, failing motor controller, or excessive friction. |
 
 ---
@@ -421,7 +343,23 @@ Accessed via the <kbd>F</kbd> key, the Low-Level Format Engine enables bit-accur
    - **AmigaDOS DD (880K):** 11 sectors/track (512B, split even/odd Paula, 0x4489 sync, 32-bit XOR checksum, 250 kbps).
    - **Atari ST & Amstrad CPC Data:** 9 sectors/track (512B, 250 kbps).
 
-### 8.2 72 MHz Flux Translation & Write Pre-Compensation
+### 8.2 Paula Asynchronous Continuous Stream Writing (`src/hw/format.rs`, `src/hw/mod.rs`)
+
+The Commodore Amiga Paula disk controller uses a unique architecture compared to Western Digital (WD177x) or NEC (µPD765) floppy controllers:
+- **Asynchronous Un-Indexed Writing (`cue_at_index = false`):** Paula does not synchronize track writes to the physical index hole. AlignTesterDiag sets `cue_at_index = false` in `CMD_WRITE_FLUX`, initiating flux emission immediately upon command.
+- **Clean Track Layout (No Artificial Lead-In):** The track begins immediately with the first sector's sync words (`0x44894489`), eliminating artificial leading zero gaps that could misalign sector spacing.
+- **Split Even/Odd MFM Architecture:**
+  1. Sync: 2 raw words `0x44894489` (32 MFM bits).
+  2. Info: 32-bit word `[0xFF, track_num, sec_id, 11 - sec_id]` split into 32 even bits + 32 odd bits.
+  3. Label: 16 bytes (4 longwords) split into even and odd arrays.
+  4. Header Checksum: 32-bit XOR checksum over Info and Label longwords masked to `0x55555555`.
+  5. Data Field: 512 bytes (128 longwords) split into 128 even longwords followed by 128 odd longwords.
+  6. Data Checksum: 32-bit XOR checksum over all 128 data longwords.
+  7. Inter-Sector Gap: 1 byte of 0x00 MFM (16 bits / 2 bytes MFM `0xAAAA`).
+- **Over-Write Splice Loop (~108,000 MFM Bits):** The synthesizer continuously repeats consecutive sectors (0..10) until reaching at least 108,000 MFM bits ($\approx 1.08$ to $1.13$ revolutions / $\approx 216\text{ ms}$). This guarantees that previous magnetic flux is completely overwritten and creates a seamless splice loop across physical spindle speed variations (295–305 RPM).
+- **Physical Hardware Validation:** Verified 100% on real Commodore Amiga 500 hardware under Amiga Test Kit (`........... (11/11 okay)`).
+
+### 8.3 72 MHz Flux Translation & Write Pre-Compensation
 
 1. **Cycle-Accurate Timings:**
    - $500\text{ kbps} \implies 1T = 72\text{ ticks}, 2T = 144\text{ ticks}, 3T = 216\text{ ticks}, 4T = 288\text{ ticks}$.
@@ -434,7 +372,7 @@ Accessed via the <kbd>F</kbd> key, the Low-Level Format Engine enables bit-accur
      * $\ge 3T$ followed by $2T \implies$ shifted **LATE** ($+9\text{ ticks}$ on $\ge 3T$, $-9\text{ ticks}$ on $2T$).
      * Symmetrical intervals ($2T-2T$ or $\ge 3T - \ge 3T$) have zero pre-compensation shift.
 
-### 8.3 Filesystem Payload Synthesizer & OS-Ready Mode (`src/hw/fs.rs`)
+### 8.4 Filesystem Payload Synthesizer & OS-Ready Mode (`src/hw/fs.rs`)
 
 When formatting in **OS-Ready mode** (toggled with <kbd>S</kbd> in `FormatModal`), the synthesizer injects valid logical filesystem structures into the raw MFM track payload:
 
@@ -466,22 +404,17 @@ Low-Level Format (CMD_WRITE_FLUX)
 4. **Amstrad CPC AMSDOS / CP/M:**
    - CP/M Data Catalogue initialized on Track 0 (sectors `0xC1..0xC4` filled with standard `0xE5` empty directory entries).
 
-### 8.4 Tri-State Head Targeting & Pass Projections
+### 8.5 24H Timestamped Progress Statistics
 
-The formatter and eraser feature a dedicated tri-state head selector toggled via <kbd>H</kbd> (`Both (Dual-Head)` ➔ `Head 0 only` ➔ `Head 1 only` ➔ `Both`):
-- **Single Track (<kbd>T</kbd>):** Formats/erases Head 0, Head 1, or both heads on the targeted cylinder.
-- **Custom Range (<kbd>R</kbd>):** Iterates through `start..=end` cylinders on selected heads.
-- **Full Disk (<kbd>D</kbd>):** Formats/erases cylinders `00..max` on selected heads.
-- **Dynamic Pass Formula:**
-  $$\text{Total Passes} = (\text{End} - \text{Start} + 1) \times \text{Heads Count}$$
-  Where $\text{Heads Count} = 2$ for `Both`, or $1$ for `Head 0` / `Head 1`.
-
-### 8.5 Interactive Modal Controls & Preset Cycling
-
-- **Preset Cycling (<kbd>P</kbd>):** Cycles active profile directly inside `FormatModal` and `EraseModal`, automatically re-configuring nominal bitrate, target RPM (300/360), standard track limits (40/80), and clamping cylinder targets.
-- **Dynamic Track Count Override:** Interactive track adjustment supporting standard 40/80 tracks up to 42/84 tracks with physical cylinder tracking (<kbd>PgUp</kbd>/<kbd>PgDn</kbd> or <kbd>↑</kbd>/<kbd>↓</kbd>).
-- **Read-After-Write Verify Toggle (<kbd>V</kbd>):** Switches between fast format (~35s for 80 tracks dual-head) and verified format (~70s with 1-revolution instant DPLL readback).
-- **Explicit Safety Confirmation Lock (`PendingConfirmation [y/N]`):** Prompts for explicit <kbd>Y</kbd> to execute and defaults to safe abort on <kbd>N</kbd>, <kbd>Enter</kbd>, or <kbd>Esc</kbd>.
+During format and erase operations, the TUI computes and displays precision 24H timestamps:
+- **In Progress:**
+  ```text
+  Timing Stats   : Start: 21:15:30 | Now: 21:16:45 | Est. End: 21:17:10
+  ```
+- **Completed:**
+  ```text
+  Timing Stats   : Completed Successfully | Total Duration: 00:01:40
+  ```
 
 ---
 
@@ -490,7 +423,7 @@ The formatter and eraser feature a dedicated tri-state head selector toggled via
 The interface is divided into three primary functional zones: Top Header, Left Control Menu, and Right Diagnostic Panel.
 
 ```text
-┌─ AlignTesterDiag v0.2.0-alpha ─────────────────────────────────────────────────────────────────── [ Port: COM3 ] ──┐
+┌─ AlignTesterDiag v1.0.0 ────────────────────────────────────────────────────────────────────────── [ Port: COM3 ] ──┐
 │ A: 500k HD    T40  H0     Flags: [-wRz-]   WP: WRITE-ENABLED     18x512  27  84         ► [READING / ANALYZING /]        │
 │  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18                                                                   │
 │ 0....+....1....+....2....+....3....+....4....+....5....+....6....+....7....+....8...                                   │
@@ -518,9 +451,9 @@ The interface is divided into three primary functional zones: Top Header, Left C
    - **Write Protect Badge:** `WP: PROTECTED` (Yellow) vs. `WP: WRITE-ENABLED` (Cyan).
    - **Track Ruler (0–83):** 84-character ruler highlighting carriage travel with solid white block.
 2. **Left Navigation Panel:** Hardware status flags, motor state, tachometer RPM, and shortcut legend.
-3. **Right Diagnostic Stream Panel:** Real-time sector ribbons (Green OK, Red CRC, Yellow DAM, Orange Misaligned, Gray Missing) and phosphor decay animation.
+3. **Right Diagnostic Stream Panel:** Real-time sector ribbons (Green OK, Red CRC, Yellow DAM, Orange Misaligned, Gray Missing) and phosphor decay animation. Strict 11-sector ribbon for Amiga DD: `[ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ] (11/11 OK)`.
 4. **Interactive Help Modal (<kbd>?</kbd> / <kbd>F1</kbd>):** Full-screen keybindings and license overlay.
-5. **Interactive Format & Erase Modals (<kbd>F</kbd> / <kbd>E</kbd>):** Parameter configuration with <kbd>S</kbd> (FS Init), <kbd>P</kbd> (Preset), <kbd>H</kbd> (Head), <kbd>V</kbd> (Verify), <kbd>T</kbd> (Track), <kbd>R</kbd> (Range), <kbd>D</kbd> (Disk).
+5. **Interactive Format & Erase Modals (<kbd>F</kbd> / <kbd>E</kbd>):** Parameter configuration with <kbd>S</kbd> (FS Init), <kbd>P</kbd> (Preset), <kbd>H</kbd> (Head), <kbd>V</kbd> (Verify), <kbd>T</kbd> (Track), <kbd>R</kbd> (Range), <kbd>D</kbd> (Disk), and 24H progress stats.
 6. **Custom Range Editor Modal (`RangeEditModal`):** Dual-field numeric editor with <kbd>Tab</kbd> switching, <kbd>H</kbd> head targeting, pass counter, and boundary validation.
 7. **Pending Confirmation Overlay (`[y/N]`):** High-visibility safety confirmation gate.
 
@@ -546,6 +479,7 @@ The interface is divided into three primary functional zones: Top Header, Left C
 | <kbd>H</kbd> / <kbd>h</kbd> | **Toggle Physical Head** | `Hardware I/O` | Cycles head selection: `Head 0` ➔ `Head 1` ➔ `Both (0+1)`. |
 | <kbd>U</kbd> / <kbd>u</kbd> | **Toggle Drive Unit Selection** | `UI` & `Hardware I/O` | Switches drive unit: `A:`/`B:` (PC) or `DS0`..`DS3` (Shugart). |
 | <kbd>L</kbd> / <kbd>l</kbd> | **Live RPM & Tachometer Test** | `Hardware I/O` & `UI` | Measures 72 MHz index intervals, RPM rolling average, and jitter gauge. |
+| <kbd>I</kbd> / <kbd>i</kbd> | **Index / RPM Mode Toggle** | `Hardware I/O` & `UI` | Contextual: In Live RPM mode, cycles measurement mode (`HW Pin 8` ➔ `SW Sync` ➔ `Dual`); in standard view, toggles track info. |
 | <kbd>M</kbd> / <kbd>m</kbd> | **Force Motor Toggle ON / OFF** | `Hardware I/O` | Manually asserts/negates spindle motor power line. |
 | <kbd>B</kbd> / <kbd>b</kbd> | **Toggle Acoustic Variometer** | `Audio` & `UI` | Toggles dynamic pitch acoustic variometer on / off. |
 | <kbd>V</kbd> / <kbd>v</kbd> | **Toggle Verbose Stream Mode** | `UI` & `Hardware I/O` | Toggles between Standard block view and Verbose timing stream. |
@@ -590,7 +524,7 @@ The interface is divided into three primary functional zones: Top Header, Left C
 
 ## 10. Automated Test & Verification Suite
 
-AlignTesterDiag includes an exhaustive **171-test automated unit test suite** built directly into Cargo (100% success rate), maintaining strict zero-warning Clippy compliance (`cargo clippy -- -D warnings`).
+AlignTesterDiag includes an exhaustive **198-test automated unit test suite** built directly into Cargo (100% success rate), maintaining strict zero-warning Clippy compliance (`cargo clippy -- -D warnings`).
 
 ### 10.1 Automated Unit Test Harness
 Run the full test suite using Cargo:
@@ -598,10 +532,13 @@ Run the full test suite using Cargo:
 cargo test
 ```
 
-The 171 unit tests provide complete coverage across all subsystems:
+The 198 unit tests provide complete coverage across all subsystems:
+- **Amiga Paula Engine & Asynchronous Stream Writing:** Asynchronous continuous writing (`cue_at_index = false`), split even/odd MFM encoding & decoding, 32-bit XOR checksums, 11-sector track stream synthesis, ~1.08 rev over-write loop, multi-revolution de-duplication and CRC repair, and TUI 11-sector ribbon rendering (`src/hw/format.rs`, `src/hw/mod.rs`, `src/ui.rs`).
 - **Filesystem Synthesizer & OS-Ready Generation:** Valid DOS BPB generation (OEM `MSDOS5.0`, 1.44M/720K/1.2M/360K media descriptors `0xF0`/`0xF9`/`0xFD`, FAT tables, boot signature `0x55AA`), Atari ST TOS BPB and 16-bit boot checksum verification (`sum == 0x1234`), Commodore Amiga OFS Bootblock checksum calculation (32-bit circular carry), RootBlock at block 880 (hash table & checksum), BitmapBlock at block 881 (allocation map & checksum), and CP/M catalogue layout (`src/hw/fs.rs`).
-- **Low-Level MFM Synthesizer & Flux Timing:** MFM track synthesis, altered sync drops `0xA1*` -> `0x4489`, CRC16-CCITT static table validation, 72 MHz pulse timing translation for 250k/300k/500k, write pre-compensation ($\pm 125\text{ ns}$ on tracks $> 40$), Greaseweazle RLE flux decoding roundtrip, and Amiga Paula even/odd encoding & decoding roundtrips (`src/hw/format.rs`).
+- **Low-Level MFM Synthesizer & Flux Timing:** MFM track synthesis, altered sync drops `0xA1*` -> `0x4489`, CRC16-CCITT static table validation, 72 MHz pulse timing translation for 250k/300k/500k, write pre-compensation ($\pm 125\text{ ns}$ on tracks $> 40$), and Greaseweazle RLE flux decoding roundtrip (`src/hw/format.rs`).
 - **Hardware DC Erase Engine (`CMD_ERASE_FLUX`):** 6-byte packet builders, write-protect Pin 28 pre-checks, and multi-track erase loop execution (`src/hw/protocol.rs`, `src/hw/mod.rs`).
+- **24H Precision Timing & Progress Statistics:** Duration formatting, start/now/estimated end computation for running operations, and completed duration rendering (`src/ui.rs`, `src/hw/mod.rs`).
+- **Multi-Mode Spindle Tachometer:** Hardware Pin 8 Index measurement, Software PLL sync fallback, Dual differential mode ($\Delta\text{RPM}$), and contextual <kbd>I</kbd> key handling (`src/hw/mod.rs`, `src/app.rs`, `src/ui.rs`, `src/main.rs`).
 - **Tri-State Head Selection & Pass Projections:** `HeadSelection` cycling (`Both` ➔ `Head 0` ➔ `Head 1` ➔ `Both`), dynamic pass projection calculation (`total_passes = range.count() * heads.len()`), and modal rendering (`src/hw/protocol.rs`, `src/app.rs`, `src/ui.rs`, `src/main.rs`).
 - **Confirmation Prompts & Safety Lock:** `PendingConfirmation` formatting, prompt string generation with OS-Ready tags, and safe default abort (`src/app.rs`, `src/main.rs`).
 - **Range Editor Modal Lifecycle:** `RangeEditModal` field navigation via `Tab`, numeric parsing, boundary clamping, and error validation (`src/app.rs`, `src/main.rs`).
@@ -610,8 +547,6 @@ The 171 unit tests provide complete coverage across all subsystems:
 - **Step Rate Translation:** Single 1:1 and Double 2:1 mode clamping and physical cylinder mapping (`src/hw/protocol.rs`, `src/hw/mod.rs`, `src/app.rs`, `src/main.rs`).
 - **DPLL Phase Decoding & Jitter Tolerance:** Adaptive tolerance ($\pm 25\%$ DD, $\pm 10\%$ HD), noise filtering (< 1.5 µs), 300 kbps decoding for 360K on HD drives, and frequency tracking (`src/hw/mod.rs`).
 - **Acoustic Variometer Evaluation:** Pitch tiers ($1500\text{--}2200\text{ Hz}$, $600\text{--}1400\text{ Hz}$, $250\text{--}500\text{ Hz}$) and mismatch tone (180 Hz) (`src/audio.rs`).
-- **Spindle Tachometer:** Sub-microsecond interval conversion, rolling average windowing, and jitter computation (`src/hw/mod.rs`).
-- **Multi-System Retro Decoders:** Amiga Paula even/odd bit deinterleaving & 32-bit XOR checksums, Atari ST 9/10/11 sectors, Amstrad CPC DATA/SYSTEM sector ID formats (`src/hw/mod.rs`, `src/app.rs`, `src/ui.rs`).
 - **UI Rendering & Ribbon Visuals:** Segmented ribbon coloring, TrueColor phosphor decay interpolation, spinner animation, zero-allocation ruler line, and modal styling (`src/ui.rs`).
 
 ---
@@ -621,12 +556,15 @@ The 171 unit tests provide complete coverage across all subsystems:
 ```text
 AlignTesterDiag Roadmap
 ├── ✅ Phase 1: Core TUI, Greaseweazle Driver, DPLL Engine & Audio Variometer
-├── 🔄 Phase 2: Mechanical Diagnostics (Endurance Seek, Random Seek, Head Cleaning)
+├── ✅ Phase 2: High-Precision Spindle Tachometer & Multi-Mode Jitter Gauge
 ├── ✅ Phase 3: High-Precision Low-Level MFM Formatter & Synthesizer (CMD_WRITE_FLUX)
 │   ├── ✅ Low-Level Track & Disk Flux Synthesis & Verification
 │   ├── ✅ OS-Ready Filesystem Initialization (DOS FAT12, Atari ST TOS, AmigaDOS OFS, CP/M)
 │   └── ✅ Tri-State Head Targeting (Both / Head 0 / Head 1)
-└── ✅ Phase 4: Retro Multi-System Encodings (Atari ST, Amiga Paula, Amstrad CPC)
+├── ✅ Phase 4: Retro Multi-System Encodings (Atari ST, Amiga Paula, Amstrad CPC)
+│   ├── ✅ Native Amiga Paula Asynchronous Stream Writing & 11-Sector DD Synthesis
+│   └── ✅ 100% Real Hardware Validation on Commodore Amiga 500 (Amiga Test Kit)
+└── 🔄 Phase 5: Advanced Mechanical Endurance & Stepper Sweep Diagnostics
 ```
 
 <details>
@@ -642,8 +580,10 @@ AlignTesterDiag Roadmap
 
 - **Amiga Sync Word:** `0x44894489` repeated twice.
 - **Split Even/Odd MFM Decoding & Encoding:** Paula writes data by splitting bytes into even and odd bit arrays across the track buffer.
+- **Asynchronous Continuous Write:** Immediate un-indexed write (`cue_at_index = false`) matching Paula hardware.
 - **AmigaDOS Geometry:** 11 sectors/track (512 bytes/sector, 880 KB DD / 1.76 MB HD).
 - **Filesystem Structures:** BootBlock 0 & 1 with circular carry checksum, RootBlock (880), and BitmapBlock (881).
+- **Hardware Validation:** Tested on real Amiga 500 (`........... (11/11 okay)`).
 </details>
 
 <details>
@@ -652,14 +592,6 @@ AlignTesterDiag Roadmap
 - **CPC Sector Numbering:** Data format sectors `0xC1`–`0xC9`, System format sectors `0x41`–`0x49`.
 - **3-Inch Drive Geometry:** 40 tracks single/double-sided reversible.
 - **Signal Handling:** Proper interpretation of the physical `READY` line on Panasonic/Matsushita mechanisms (EME-156 / EME-216).
-</details>
-
-<details>
-<summary>💾 <b>4. Interactive Low-Level Formatter (Key <kbd>F</kbd>)</b></summary>
-
-- Full track MFM pattern synthesis (`IAM 0xC2`, `IDAM 0xA1`, `DAM 0xFB`).
-- Configurable fill bytes (`0xE5`, `0xF6`, `0x00`), magnetic gaps ($Gap_1$, $Gap_2$, $Gap_3$, $Gap_4$), interleave ratios (1:1, 1:2, 1:3), and cylinder skew.
-- Bulk erase mode without flux transitions for complete disk degaussing.
 </details>
 
 ---
@@ -693,7 +625,7 @@ AlignTesterDiag/
 
 ## 📄 License & Credits
 
-- Copyright (C) 2026 Mr JeAn-FReD 🇫🇷
+- Copyright (C) 2026 MonSieur JeAn-FReD 🇫🇷
+- **Author:** MonSieur JeAn-FReD (`https://github.com/Jean-Fred64`)
 - **Heritage:** Inspired by Dave Dunfield's **ImageDisk (`IMD`)** and Keir Fraser's **Greaseweazle**.
 - **License:** Distributed under the terms of the [GNU General Public License v3.0 (GPL-3.0)](LICENSE).
-

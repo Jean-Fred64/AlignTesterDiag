@@ -1,34 +1,46 @@
 ======================================================================
   AlignTesterDiag - Floppy Drive Alignment & Diagnostic Tool
-  Version: 0.2.0-alpha (Windows x64)
+  Version: 1.0.0 (Windows x64) - First Stable Release
   Author: MonSieur JeAn-FReD
+  Repository: https://github.com/Jean-Fred64/AlignTesterDiag
 ======================================================================
 
 PREREQUISITES & HARDWARE
 ----------------------------------------------------------------------
 1. Greaseweazle v4 or v4.1 hardware connected via USB.
 2. 3.5", 5.25", or 26-pin slim laptop floppy drive properly cabled and powered.
-3. A known-good, formatted standard test diskette (720K DD or 1.44M HD).
+3. A known-good, formatted test diskette (720K DD, 1.44M HD, 880K Amiga, 360K/1.2M PC).
 4. Recommended terminal: Windows Terminal, PowerShell, or standard cmd.exe.
 
 --------------------------------------------------------------------------------
 1. OVERVIEW
 --------------------------------------------------------------------------------
 AlignTesterDiag is a high-performance, non-blocking, modern terminal user
-interface (TUI) diagnostics and calibration platform for floppy disk drives.
+interface (TUI) diagnostics, formatting, and calibration platform for floppy disk drives.
 Interfacing directly with a Greaseweazle USB flux controller, it provides:
 - Real-time MFM sector decoding via software DPLL.
+- Native Commodore Amiga Paula Engine with asynchronous continuous track writing
+  (cue_at_index = false), clean un-padded track synthesis (11 sectors, 0x44894489 sync,
+  split even/odd, 32-bit XOR checksum), and over-write splice loop (~108,000 MFM bits).
+  100% hardware validated on physical Amiga 500 under Amiga Test Kit.
 - High-precision low-level format engine (CMD_WRITE_FLUX) with OS-Ready filesystem
   initialization (DOS FAT12, Atari ST TOS, AmigaDOS OFS, CP/M AMSDOS).
+- 24H precision progress statistics for format and erase operations
+  (Start / Now / Est. End / Total Duration).
 - Hardware DC Erase engine (CMD_ERASE_FLUX) for bulk magnetic track neutralization.
 - Tri-state head targeting (Both / Head 0 / Head 1) across format and erase modes.
 - Live mechanical alignment percentage radar.
 - Glider-inspired dynamic acoustic variometer with multi-tier pitch modulation.
-- Sub-microsecond 72 MHz spindle tachometer with RPM jitter & centering gauge
-  (360.0 RPM nominal for 5.25" HD formats, 300.0 RPM for 3.5" & 5.25" DD).
+- Sub-microsecond 72 MHz spindle tachometer with Multi-Mode measurement:
+  * HW Index Pin 8 measurement (inter-index flux summation)
+  * Targeted PLL Software Sync fallback (MFM sync pulse pattern reconstruction)
+  * Dual mode with live differential (Delta RPM)
+  * Centering gauge (300.0 RPM for 3.5" & 5.25" DD, 360.0 RPM for 5.25" HD).
 - Multi-system retro support: IBM PC, Amiga DOS, Atari ST, Amstrad CPC.
 - Universal bus mode support: IBM PC (Drive A:/B:) & Shugart (DS0..DS3).
+- 198 automated unit tests (100% pass rate) and strict Clippy zero-warning compliance.
 
+--------------------------------------------------------------------------------
 2. QUICK START
 --------------------------------------------------------------------------------
 A. Pre-compiled Windows Binary:
@@ -106,15 +118,18 @@ F                    Format Modal     : Low-Level Track & Disk Format with dynam
                                          [P] Preset, [H] Head, [V] Verify, [T] Track,
                                          [R] Range, [D] Disk, [y/N] safety lock
 L                    Live RPM         : 72 MHz spindle tachometer & jitter stability
+I                    Index / RPM Mode : In Live RPM mode, cycle measurement mode
+                                         (HW Pin 8 <-> SW Sync <-> Dual Differential);
+                                         in standard view, toggle track details
 P                    Preset Profile   : Cycle hardware & format presets (PC, Amiga, Atari, CPC)
 S                    Step Rate        : Toggle Single (1:1) / Double (2:1) step mode (48/96 TPI)
 T                    Toggle Bus Type  : Switch bus mode: IBM PC (0x01) <-> Shugart (0x02)
-                                        (auto-resets unit to 0 when entering PC mode from DS2/DS3)
+                                         (auto-resets unit to 0 when entering PC mode from DS2/DS3)
 B                    Audio Radar      : Toggle dynamic pitch acoustic variometer ON/OFF
 H                    Toggle Head      : Cycle head: Head 0 -> Head 1 -> BOTH (0+1)
 U                    Toggle Drive     : In IBM PC mode : Drive 0 (A:) <-> Drive 1 (B:)
-                                        In Shugart mode: Unit 0 (DS0) -> Unit 1 (DS1) ->
-                                                         Unit 2 (DS2) -> Unit 3 (DS3)
+                                         In Shugart mode: Unit 0 (DS0) -> Unit 1 (DS1) ->
+                                                          Unit 2 (DS2) -> Unit 3 (DS3)
 M                    Toggle Motor     : Manually assert/negate spindle motor power
 V                    Toggle Verbose   : Switch Standard / Verbose history stream
 R                    Recalibrate      : Recalibrate carriage to Track 0 and return
@@ -156,7 +171,7 @@ MODAL & RANGE NAVIGATION:
 --------------------------------------------------------------------------------
 6. AUTOMATED TEST SUITE
 --------------------------------------------------------------------------------
-AlignTesterDiag features an automated test suite with 171 unit tests (100% pass rate)
+AlignTesterDiag features an automated test suite with 198 unit tests (100% pass rate)
 and strict Clippy zero-warning compliance.
 Run with:
   cargo test
