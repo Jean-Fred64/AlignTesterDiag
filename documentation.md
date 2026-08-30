@@ -601,24 +601,22 @@ AlignTesterDiag Roadmap
 ```text
 AlignTesterDiag/
 ├── Cargo.toml                 # Manifest & dependencies (ratatui, crossterm, serialport, crossbeam-channel)
+├── Cargo.lock                 # Deterministic dependency lockfile
+├── LICENSE                    # GNU General Public License v3.0 (GPL-3.0)
 ├── README.md                  # Quick start guide, keybindings reference & showcase
 ├── README.txt                 # Plain-text distribution notes & cheat sheet
 ├── documentation.md           # Complete unified technical specification & manual
-├── src/
-│   ├── main.rs                # Application entrypoint, CLI argument parser, main event loop
-│   ├── app.rs                 # State management, Action dispatcher, Dual-head metrics consolidation
-│   ├── audio.rs               # Real-time sound worker thread, dynamic pitch calculation, platform beeps
-│   ├── ui.rs                  # TUI components, styled ribbon spans, centering gauges, track ruler
-│   └── hw/
-│       ├── mod.rs             # Greaseweazle USB communication, DPLL, MFM decoding, hardware timings
-│       ├── format.rs          # Low-level MFM track synthesis, CRC-16 table, pulse timing & format engine
-│       ├── fs.rs              # OS-Ready filesystem payload synthesizer (DOS FAT12, Atari TOS, Amiga OFS, CP/M)
-│       └── protocol.rs        # Greaseweazle binary protocol opcodes, ACK codes, packet builders
-└── export/
-    ├── README.md              # Distribution showcase & quick reference
-    ├── README.txt             # Plain-text distribution notes & cheat sheet
-    ├── documentation.md       # Complete unified technical specification & manual
-    └── Medias/                # Asset & screenshot directory
+├── Medias/                    # Showcase screenshots and visual assets
+└── src/
+    ├── main.rs                # Application entrypoint, CLI argument parser, main event loop
+    ├── app.rs                 # State management, Action dispatcher, Dual-head metrics consolidation
+    ├── audio.rs               # Real-time sound worker thread, dynamic pitch calculation, platform beeps
+    ├── ui.rs                  # TUI components, styled ribbon spans, centering gauges, track ruler
+    └── hw/
+        ├── mod.rs             # Greaseweazle USB communication, DPLL, MFM decoding, hardware timings
+        ├── format.rs          # Low-level MFM track synthesis, CRC-16 table, pulse timing & format engine
+        ├── fs.rs              # OS-Ready filesystem payload synthesizer (DOS FAT12, Atari TOS, Amiga OFS, CP/M)
+        └── protocol.rs        # Greaseweazle binary protocol opcodes, ACK codes, packet builders
 ```
 
 ---
