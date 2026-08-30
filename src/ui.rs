@@ -182,6 +182,99 @@ pub fn build_rpm_metric_spans(meas: &crate::hw::RpmMeasurement, target_rpm: f64)
     ]
 }
 
+/// Builds styled spans for labeled RPM metric lines (e.g. in Dual or specific modes)
+pub fn build_labeled_rpm_metric_spans(
+    label: &str,
+    meas: &crate::hw::RpmMeasurement,
+    target_rpm: f64,
+) -> Vec<Span<'static>> {
+    let target = if target_rpm > 0.0 { target_rpm } else { 300.0 };
+    let dev_pct = if target > 0.0 {
+        ((meas.instant_rpm - target) / target) * 100.0
+    } else {
+        0.0
+    };
+
+    let rpm_color = if dev_pct.abs() <= 0.5 {
+        Color::LightGreen
+    } else if dev_pct.abs() <= 1.5 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+
+    let jitter_color = if meas.jitter_pct <= 0.20 {
+        Color::LightGreen
+    } else if meas.jitter_pct <= 0.50 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+
+    vec![
+        Span::styled(format!("{}: ", label), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{:.1} RPM ", meas.instant_rpm),
+            Style::default().fg(rpm_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "(Avg: {:.1} | Min: {:.1} | Max: {:.1} | Jitter: ",
+                meas.avg_rpm, meas.min_rpm, meas.max_rpm
+            ),
+            Style::default().fg(Color::LightCyan),
+        ),
+        Span::styled(
+            format!("±{:.2}%", meas.jitter_pct),
+            Style::default().fg(jitter_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(")", Style::default().fg(Color::LightCyan)),
+    ]
+}
+
+/// Builds styled spans for the active RPM Measurement Mode indicator and shortcut guide
+pub fn build_rpm_mode_spans(mode: crate::hw::RpmMode) -> Vec<Span<'static>> {
+    vec![
+        Span::styled("► Measurement Mode       : ", Style::default().fg(Color::White)),
+        Span::styled(
+            format!("[{}] ", mode.as_str()),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "(Press [I] to cycle Auto / HW Index / SW Sync / Dual)",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]
+}
+
+/// Builds styled spans for Dual Mode speed differential between HW mechanical index and SW magnetic sync
+pub fn build_rpm_dual_differential_spans(
+    hw_meas: &crate::hw::RpmMeasurement,
+    sw_meas: &crate::hw::RpmMeasurement,
+) -> Vec<Span<'static>> {
+    let diff = hw_meas.instant_rpm - sw_meas.instant_rpm;
+    let sign = if diff >= 0.0 { "+" } else { "" };
+    let diff_pct = if sw_meas.instant_rpm > 0.0 {
+        (diff / sw_meas.instant_rpm) * 100.0
+    } else {
+        0.0
+    };
+    let diff_color = if diff.abs() <= 0.5 {
+        Color::LightGreen
+    } else if diff.abs() <= 1.5 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+    vec![
+        Span::styled("► Speed Differential (Δ)  : ", Style::default().fg(Color::White)),
+        Span::styled(
+            format!("Δ = {}{:.1} RPM ({}{:.2}% mechanical vs magnetic)", sign, diff, sign, diff_pct),
+            Style::default().fg(diff_color).add_modifier(Modifier::BOLD),
+        ),
+    ]
+}
+
 /// Builds a 21-character visual centering gauge: `[----|----▼----|----]`
 /// - Green (`Color::LightGreen`) if deviation <= ±0.5%
 /// - Yellow (`Color::Yellow`) if deviation <= ±1.5%
@@ -1086,7 +1179,7 @@ pub fn build_help_modal_lines() -> Vec<Line<'static>> {
         shortcut_row("Backspace", "PANIC RESET (Instant motor cut & hardware re-init)"),
         shortcut_row("F", "Format (Low-level track format)"),
         shortcut_row("H", "Toggle Head (Head 0 -> Head 1 -> Both 0+1)"),
-        shortcut_row("I", "Track Image (Capture raw MFM flux stream)"),
+        shortcut_row("I", "Track Image / Cycle RPM Mode (Auto -> HW Index -> SW Sync -> Dual in RPM test)"),
         shortcut_row("L", "Live RPM (High-precision continuous tachometer test)"),
         shortcut_row("M", "Toggle Motor (Spindle motor ON / OFF)"),
         shortcut_row("P", "Preset Hardware & Format (3.5\" HD/DD, 5.25\" HD/DD/DD@HD, Amiga, Atari, CPC)"),

@@ -1,6 +1,6 @@
 use crate::hw::{
-    BusType, DiskFormat, DisplayMode, DriveStatus, FsInitMode, HwActivity, PresetProfile, StepMode,
-    TrackRange,
+    BusType, DiskFormat, DisplayMode, DriveStatus, FsInitMode, HwActivity, PresetProfile, RpmMode,
+    StepMode, TrackRange,
 };
 
 pub use crate::hw::HeadSelection;
@@ -267,6 +267,9 @@ pub enum Action {
     Stop,
     ToggleMotor,
     SetMotor(bool),
+    CycleRpmMode,
+    SetRpmMode(RpmMode),
+    ToggleTrackImage,
     PanicReset,
     CycleDiskFormat,
     SetDiskFormat(DiskFormat),
@@ -902,6 +905,21 @@ impl App {
             Action::ToggleFormatVerify => self.toggle_format_verify(),
             Action::ToggleFormatFsMode => self.toggle_format_fs_mode(),
             Action::SetFormatFsMode(mode) => self.set_format_fs_mode(mode),
+            Action::CycleRpmMode => {
+                self.status.rpm_mode = self.status.rpm_mode.cycle();
+                self.status.rpm_measure.clear();
+                self.status.rpm_measure_sw.clear();
+                self.status.log_msg = format!("RPM Mode: [{}]", self.status.rpm_mode.as_str());
+            }
+            Action::SetRpmMode(mode) => {
+                self.status.rpm_mode = mode;
+                self.status.rpm_measure.clear();
+                self.status.rpm_measure_sw.clear();
+                self.status.log_msg = format!("RPM Mode: [{}]", self.status.rpm_mode.as_str());
+            }
+            Action::ToggleTrackImage => {
+                self.status.log_msg = String::from("Track Image toggle");
+            }
             Action::OpenFormatModal => {
                 self.show_format_modal = true;
                 if self.format_target_tracks == 0 || self.format_target_tracks > self.max_format_tracks() {
@@ -1005,6 +1023,7 @@ impl App {
                 self.status.rpm = 0;
                 self.status.rpm_display = String::from("--- RPM");
                 self.status.rpm_measure.clear();
+                self.status.rpm_measure_sw.clear();
                 self.status.index = false;
                 self.status.sectors.clear();
                 self.status.sectors_known = false;

@@ -31,8 +31,9 @@ use crossbeam_channel::unbounded;
 pub use app::*;
 pub use audio::*;
 pub use hw::{
-    get_status_expected_sector_ids, hw_thread, BusType, DiskFormat, DisplayMode, DriveStatus,
-    FormatProgress, FormatStep, HeadSelection, HwActivity, HwCmd, PresetProfile, StepMode, TrackRange,
+    decode_gw_flux_with_index, get_status_expected_sector_ids, hw_thread, BusType, DiskFormat,
+    DisplayMode, DriveStatus, FormatProgress, FormatStep, HeadSelection, HwActivity, HwCmd,
+    PresetProfile, RpmMode, StepMode, TrackRange,
 };
 pub use ui::*;
 
@@ -467,7 +468,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Line::from(" Backspace = Panic Reset"),
                 Line::from(" F = Format"),
                 Line::from(" H = Head 0/1/Both"),
-                Line::from(" I = track Image"),
+                Line::from(if status.mode == DisplayMode::RpmMeasure {
+                    " I = Cycle RPM Mode"
+                } else {
+                    " I = track Image"
+                }),
                 Line::from(" L = Live RPM test"),
                 Line::from(" M = Motor on/off"),
                 Line::from(" P = Preset / Profile"),
@@ -506,9 +511,46 @@ fn main() -> Result<(), Box<dyn Error>> {
                         Style::default().fg(Color::LightCyan),
                     )));
                     right_lines.push(Line::from(""));
+                    right_lines.push(Line::from(build_rpm_mode_spans(status.rpm_mode)));
+                    right_lines.push(Line::from(""));
 
-                    if status.rpm_measure.sample_count > 0 {
-                        let target_rpm = status.preset.target_rpm();
+                    let target_rpm = status.preset.target_rpm();
+
+                    if status.rpm_mode == RpmMode::Dual {
+                        if status.rpm_measure.sample_count > 0 || status.rpm_measure_sw.sample_count > 0 {
+                            right_lines.push(Line::from(build_labeled_rpm_metric_spans(
+                                "HW Index (Pin 8)",
+                                &status.rpm_measure,
+                                target_rpm,
+                            )));
+                            right_lines.push(Line::from(build_labeled_rpm_metric_spans(
+                                "SW Sync (MFM)   ",
+                                &status.rpm_measure_sw,
+                                target_rpm,
+                            )));
+                            if status.rpm_measure.sample_count > 0 && status.rpm_measure_sw.sample_count > 0 {
+                                right_lines.push(Line::from(build_rpm_dual_differential_spans(
+                                    &status.rpm_measure,
+                                    &status.rpm_measure_sw,
+                                )));
+                            }
+                            let instant_rpm = if status.rpm_measure.sample_count > 0 {
+                                status.rpm_measure.instant_rpm
+                            } else {
+                                status.rpm_measure_sw.instant_rpm
+                            };
+                            right_lines.push(build_rpm_gauge_line(instant_rpm, target_rpm));
+                            right_lines.push(Line::from(""));
+                        } else {
+                            right_lines.push(Line::from(Span::styled(
+                                "► Capturing simultaneous hardware index and MFM sync pulses at 72 MHz...",
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            )));
+                            right_lines.push(Line::from(""));
+                        }
+                    } else if status.rpm_measure.sample_count > 0 {
                         let instant_rpm = status.rpm_measure.instant_rpm;
                         let diff = instant_rpm - target_rpm;
                         let sign = if diff >= 0.0 { "+" } else { "" };
@@ -596,8 +638,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                             ),
                         ]));
                     } else {
+                        let waiting_msg = match status.rpm_mode {
+                            RpmMode::HwIndex => "► Capturing hardware index pulses (Pin 8) at 72 MHz sample clock...",
+                            RpmMode::SwSync => "► Recovering MFM address mark synchronization from magnetic bitstream...",
+                            _ => "► Capturing rotation pulses at 72 MHz sample clock...",
+                        };
                         right_lines.push(Line::from(Span::styled(
-                            "► Capturing hardware index pulses at 72 MHz sample clock...",
+                            waiting_msg,
                             Style::default()
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD),
@@ -1405,6 +1452,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         KeyCode::Char('h') | KeyCode::Char('H') => {
                             app.toggle_head();
                             let _ = tx_cmd.send(HwCmd::ToggleHead);
+                        }
+                        KeyCode::Char('i') | KeyCode::Char('I') => {
+                            if app.status.mode == DisplayMode::RpmMeasure {
+                                app.handle_action(Action::CycleRpmMode);
+                                let _ = tx_cmd.send(HwCmd::CycleRpmMode);
+                            } else {
+                                app.handle_action(Action::ToggleTrackImage);
+                            }
                         }
                         KeyCode::Char('l') | KeyCode::Char('L') => {
                             let _ = tx_cmd.send(HwCmd::MeasureRpm);
@@ -3883,6 +3938,101 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
         assert!(text_running.contains("Press [Esc] at any time to abort formatting safely."));
+    }
+
+    #[test]
+    fn test_i_key_multiplexing_and_rpm_mode_cycling() {
+        let mut app = App::new();
+        assert_eq!(app.status.rpm_mode, RpmMode::Auto);
+
+        // 1. In default DisplayMode (None), I triggers Track Image (ToggleTrackImage)
+        assert_eq!(app.status.mode, DisplayMode::None);
+        app.handle_action(Action::ToggleTrackImage);
+        assert_eq!(app.status.log_msg, "Track Image toggle");
+        assert_eq!(app.status.rpm_mode, RpmMode::Auto); // Unchanged
+
+        // 2. In DisplayMode::RpmMeasure, I cycles RPM mode: Auto -> HW Index -> SW Sync -> Dual -> Auto
+        app.status.mode = DisplayMode::RpmMeasure;
+        app.handle_action(Action::CycleRpmMode);
+        assert_eq!(app.status.rpm_mode, RpmMode::HwIndex);
+        assert_eq!(app.status.rpm_mode.as_str(), "HW Index");
+
+        app.handle_action(Action::CycleRpmMode);
+        assert_eq!(app.status.rpm_mode, RpmMode::SwSync);
+        assert_eq!(app.status.rpm_mode.as_str(), "SW Sync");
+
+        app.handle_action(Action::CycleRpmMode);
+        assert_eq!(app.status.rpm_mode, RpmMode::Dual);
+        assert_eq!(app.status.rpm_mode.as_str(), "Dual");
+
+        app.handle_action(Action::CycleRpmMode);
+        assert_eq!(app.status.rpm_mode, RpmMode::Auto);
+        assert_eq!(app.status.rpm_mode.as_str(), "Auto");
+
+        // 3. In other DisplayMode (e.g. Analyze), I key is again Track Image
+        app.status.mode = DisplayMode::Analyze;
+        app.handle_action(Action::ToggleTrackImage);
+        assert_eq!(app.status.log_msg, "Track Image toggle");
+        assert_eq!(app.status.rpm_mode, RpmMode::Auto);
+    }
+
+    #[test]
+    fn test_rpm_dual_mode_differential_and_spans() {
+        let mut hw_meas = hw::RpmMeasurement::new();
+        hw_meas.record_sample(300.2, 14_390_406);
+
+        let mut sw_meas = hw::RpmMeasurement::new();
+        sw_meas.record_sample(299.8, 14_409_606);
+
+        // Labeled spans
+        let hw_spans = build_labeled_rpm_metric_spans("HW Index (Pin 8)", &hw_meas, 300.0);
+        let hw_text: String = hw_spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(hw_text.contains("HW Index (Pin 8): 300.2 RPM"));
+
+        let sw_spans = build_labeled_rpm_metric_spans("SW Sync (MFM)   ", &sw_meas, 300.0);
+        let sw_text: String = sw_spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(sw_text.contains("SW Sync (MFM)   : 299.8 RPM"));
+
+        // Dual differential spans
+        let diff_spans = build_rpm_dual_differential_spans(&hw_meas, &sw_meas);
+        let diff_text: String = diff_spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(diff_text.contains("Δ = +0.4 RPM"));
+
+        // Mode spans
+        let mode_spans = build_rpm_mode_spans(RpmMode::Dual);
+        let mode_text: String = mode_spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(mode_text.contains("[Dual]"));
+        assert!(mode_text.contains("Press [I] to cycle"));
+    }
+
+    #[test]
+    fn test_greaseweazle_v4_opcode_28bit_decoding() {
+        // Test FLUXOP_INDEX (1) + FLUXOP_SPACE (2) + FLUXOP_ASTABLE (3)
+        // b0=0x02, b1=0x00, b2=0x00, b3=0x00 -> ((0x02>>1)&0x7F) = 1
+        // b0=0x82, b1=0x02, b2=0x00, b3=0x00 -> 0x41 | (1<<7) = 65 | 128 = 193
+        let raw = vec![
+            0x00, 0x01, 0x02, 0x00, 0x00, 0x00, // Index 1: ts = 1
+            0x00, 0x02, 0x02, 0x00, 0x00, 0x00, // Space: +1 tick
+            0x00, 0x03, 0x02, 0x00, 0x00, 0x00, // Astable: +1 tick
+            100,                                 // Flux: 100 + 1 + 1 = 102
+            0x00, 0x01, 0x82, 0x02, 0x00, 0x00, // Index 2: ts = 193
+            0x00, 0x00,                         // End
+        ];
+
+        let decoded = decode_gw_flux_with_index(&raw);
+        assert_eq!(decoded.index_timestamps.len(), 2);
+        assert_eq!(decoded.index_timestamps[0], 1);
+        assert_eq!(decoded.index_timestamps[1], 193);
+        assert_eq!(decoded.flux.len(), 1);
+        assert_eq!(decoded.flux[0], 102);
+
+        // RPM calculation: 4_320_000_000 / delta
+        let delta = 14_400_000;
+        let rpm = 4_320_000_000.0 / (delta as f64);
+        assert!((rpm - 300.0).abs() < 0.001);
+
+        let period_ms = (delta as f64) / 72_000.0;
+        assert!((period_ms - 200.0).abs() < 0.001);
     }
 }
 
