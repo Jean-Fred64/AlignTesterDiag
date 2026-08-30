@@ -567,7 +567,9 @@ pub fn gw_read_flux(
     let _ = port.set_timeout(Duration::from_millis(DEFAULT_SERIAL_TIMEOUT_MS));
 
     let b_revs = revs.to_le_bytes();
-    let read_cmd = [0x07, 0x08, 0x00, 0x00, 0x00, 0x00, b_revs[0], b_revs[1]];
+    let max_ticks: u32 = 72_000_000;
+    let b_ticks = max_ticks.to_le_bytes();
+    let read_cmd = [0x07, 0x08, b_ticks[0], b_ticks[1], b_ticks[2], b_ticks[3], b_revs[0], b_revs[1]];
     port.write_all(&read_cmd)?;
     port.flush()?;
 
@@ -5396,42 +5398,47 @@ pub fn hw_thread(
                                 status.head,
                             ) {
                                 Ok(decoded_gw) => {
+                                    status.log_msg = format!("GW Read: {} flux pulses | {} HW index found", decoded_gw.flux.len(), decoded_gw.index_timestamps.len());
+
                                     let mut hw_recorded = false;
-                                    if decoded_gw.index_timestamps.len() >= 2 {
-                                        for i in 0..decoded_gw.index_timestamps.len() - 1 {
-                                            let t0 = decoded_gw.index_timestamps[i];
-                                            let t1 = decoded_gw.index_timestamps[i + 1];
-                                            let delta = (t1.wrapping_sub(t0)) & 0x0FFF_FFFF;
-                                            if delta > 0 {
-                                                let rpm_float = 4_320_000_000.0 / (delta as f64);
-                                                let rpm = rpm_float.round() as u32;
-                                                if (100..=800).contains(&rpm) {
-                                                    status.rpm = rpm;
-                                                    status.index = true;
-                                                    status.has_disk = true;
-                                                    status.rpm_measure.record_sample(rpm_float, delta);
-                                                    status.rpm_display = format!("{:.1} RPM", status.rpm_measure.instant_rpm);
-                                                    rpm_sampler.add_sample(rpm);
-                                                    hw_recorded = true;
-                                                }
+                                    if decoded_gw.index_flux_indices.len() >= 2 {
+                                        let idx0 = decoded_gw.index_flux_indices[0];
+                                        let idx1 = decoded_gw.index_flux_indices[1];
+
+                                        let delta: u32 = if idx1 > idx0 && idx1 <= decoded_gw.flux.len() {
+                                            decoded_gw.flux[idx0..idx1].iter().sum()
+                                        } else if decoded_gw.index_timestamps.len() >= 2 {
+                                            let t0 = decoded_gw.index_timestamps[0];
+                                            let t1 = decoded_gw.index_timestamps[1];
+                                            (t1.wrapping_sub(t0)) & 0x0FFF_FFFF
+                                        } else {
+                                            0
+                                        };
+
+                                        if delta > 0 {
+                                            let rpm_float = 4_320_000_000.0 / (delta as f64);
+                                            let rpm = rpm_float.round() as u32;
+                                            if (100..=800).contains(&rpm) {
+                                                status.rpm = rpm;
+                                                status.index = true;
+                                                status.has_disk = true;
+                                                status.rpm_measure.record_sample(rpm_float, delta);
+                                                status.rpm_display = format!("{:.1} RPM", status.rpm_measure.instant_rpm);
+                                                rpm_sampler.add_sample(rpm);
+                                                hw_recorded = true;
                                             }
                                         }
                                     }
 
                                     match status.rpm_mode {
                                         RpmMode::HwIndex => {
-                                            if hw_recorded {
-                                                status.log_msg = format!("RPM: {:.1} RPM (HW Index Pin 8 OK)", status.rpm_measure.instant_rpm);
-                                            } else {
+                                            if !hw_recorded {
                                                 status.rpm = 0;
                                                 status.index = false;
-                                                status.log_msg = String::from("RPM: No Index pulse detected (Pin 8)");
                                             }
                                         }
                                         RpmMode::Auto => {
-                                            if hw_recorded {
-                                                status.log_msg = format!("RPM: {:.1} RPM (HW Index Pin 8 OK)", status.rpm_measure.instant_rpm);
-                                            } else {
+                                            if !hw_recorded {
                                                 // Fallback to SW Sync PLL only if HW Index is missing (< 2 timestamps)
                                                 if let Some((rpm_u32, delta)) = calculate_rpm_from_mfm_headers_targeted(&decoded_gw.flux, status.bitrate) {
                                                     let rpm_float = 4_320_000_000.0 / (delta as f64);
@@ -5440,12 +5447,10 @@ pub fn hw_thread(
                                                     status.has_disk = true;
                                                     status.rpm_measure.record_sample(rpm_float, delta);
                                                     status.rpm_display = format!("{:.1} RPM", status.rpm_measure.instant_rpm);
-                                                    status.log_msg = format!("RPM: {:.1} RPM (MFM header sync - No index Pin 8)", status.rpm_measure.instant_rpm);
                                                     rpm_sampler.add_sample(status.rpm);
                                                 } else {
                                                     status.rpm = 0;
                                                     status.index = false;
-                                                    status.log_msg = String::from("RPM: No Index pulse detected (Pin 8 / MFM sync)");
                                                 }
                                             }
                                         }
@@ -5459,33 +5464,14 @@ pub fn hw_thread(
                                                     status.rpm_display = format!("{:.1} RPM", status.rpm_measure.instant_rpm);
                                                     rpm_sampler.add_sample(status.rpm);
                                                 }
-                                                status.log_msg = format!("RPM: {:.1} RPM (SW Sync MFM)", status.rpm_measure.instant_rpm);
                                             } else {
                                                 status.rpm = 0;
-                                                status.log_msg = String::from("RPM: No valid MFM address headers for SW Sync");
                                             }
                                         }
                                         RpmMode::Dual => {
                                             let sw_samples = extract_all_sw_sync_samples(&decoded_gw.flux, status.bitrate);
                                             for (rpm_float, delta) in sw_samples {
                                                 status.rpm_measure_sw.record_sample(rpm_float, delta);
-                                            }
-                                            if hw_recorded && status.rpm_measure_sw.sample_count > 0 {
-                                                let diff = status.rpm_measure.instant_rpm - status.rpm_measure_sw.instant_rpm;
-                                                let sign = if diff >= 0.0 { "+" } else { "" };
-                                                status.log_msg = format!(
-                                                    "Dual: HW {:.1} | SW {:.1} (Δ={}{:.1} RPM)",
-                                                    status.rpm_measure.instant_rpm,
-                                                    status.rpm_measure_sw.instant_rpm,
-                                                    sign,
-                                                    diff
-                                                );
-                                            } else if hw_recorded {
-                                                status.log_msg = format!("Dual: HW {:.1} RPM (Pin 8 OK) | Waiting SW Sync...", status.rpm_measure.instant_rpm);
-                                            } else if status.rpm_measure_sw.sample_count > 0 {
-                                                status.log_msg = format!("Dual: SW {:.1} RPM (MFM) | Waiting HW Index...", status.rpm_measure_sw.instant_rpm);
-                                            } else {
-                                                status.log_msg = String::from("Dual: Waiting for HW Index & SW Sync pulses...");
                                             }
                                         }
                                     }
