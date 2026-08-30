@@ -3139,22 +3139,23 @@ mod tests {
             preset: PresetProfile::Pc35Hd,
             mode: DisplayMode::Format,
             format_progress: Some(FormatProgress {
-            current_track: 20,
-            current_head: 1,
-            total_tracks: 80,
-            total_heads: 2,
-            step: FormatStep::Writing,
-            completed_passes: 41,
-            total_passes: 160,
-            verification_ok: true,
-            retry_count: 0,
-            quality_pct: 98,
-            crc_errors: 0,
-            verified_sectors: 18,
-            expected_sectors: 18,
-            elapsed_secs: 12.5,
-            eta_secs: 36.2,
-            message: "Writing flux...".to_string(),
+                current_track: 20,
+                current_head: 1,
+                total_tracks: 80,
+                total_heads: 2,
+                step: FormatStep::Writing,
+                completed_passes: 41,
+                total_passes: 160,
+                verification_ok: true,
+                retry_count: 0,
+                quality_pct: 98,
+                crc_errors: 0,
+                verified_sectors: 18,
+                expected_sectors: 18,
+                elapsed_secs: 12.5,
+                eta_secs: 36.2,
+                message: "Writing flux...".to_string(),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -3170,6 +3171,9 @@ mod tests {
         assert!(text.contains("Track 20 of 80 total (Phys: 20) | Head 1/1"));
         assert!(text.contains("Sectors: 18/18"));
         assert!(text.contains("(41/160 passes)"));
+        assert!(text.contains("Timing Stats   : Start: "));
+        assert!(text.contains(" | Now: "));
+        assert!(text.contains(" | Est. End: "));
 
         // Test Erase progress rendering
         status.mode = DisplayMode::Erase;
@@ -3183,6 +3187,7 @@ mod tests {
             .collect();
         assert!(erase_text.contains("LOW-LEVEL DC FLUX ERASE ENGINE"));
         assert!(erase_text.contains("ERASING FLUX"));
+        assert!(erase_text.contains("Timing Stats   : Start: "));
     }
 
     #[test]
@@ -3903,6 +3908,7 @@ mod tests {
                 elapsed_secs: 65.0,
                 eta_secs: 0.0,
                 message: "Format completed successfully".to_string(),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -3914,6 +3920,7 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
         assert!(text_completed.contains("Press [Enter] or [Esc] to return to menu, [Q] for Main View."));
+        assert!(text_completed.contains("Timing Stats   : Completed Successfully | Total Duration: 00:01:05"));
 
         // Aborted format (Idle / aborted)
         if let Some(ref mut p) = status.format_progress {
@@ -3938,6 +3945,9 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
         assert!(text_running.contains("Press [Esc] at any time to abort formatting safely."));
+        assert!(text_running.contains("Timing Stats   : Start: "));
+        assert!(text_running.contains(" | Now: "));
+        assert!(text_running.contains(" | Est. End: "));
     }
 
     #[test]
@@ -4034,6 +4044,67 @@ mod tests {
         let period_ms = (delta as f64) / 72_000.0;
         assert!((period_ms - 200.0).abs() < 0.001);
     }
+
+    #[test]
+    fn test_format_timing_stats_running_and_completed_durations() {
+        let presets = [
+            PresetProfile::Amiga35Dd,
+            PresetProfile::Pc35Hd,
+            PresetProfile::Atari35Dd,
+            PresetProfile::Cpc30Data,
+        ];
+
+        for preset in presets {
+            // 1. Running state
+            let mut status = DriveStatus {
+                preset,
+                mode: DisplayMode::Format,
+                format_progress: Some(FormatProgress {
+                    current_track: 10,
+                    current_head: 0,
+                    total_tracks: 80,
+                    total_heads: 2,
+                    step: FormatStep::Writing,
+                    completed_passes: 20,
+                    total_passes: 160,
+                    verification_ok: false,
+                    retry_count: 0,
+                    quality_pct: 100,
+                    crc_errors: 0,
+                    verified_sectors: 0,
+                    expected_sectors: 11,
+                    elapsed_secs: 15.0,
+                    eta_secs: 105.0,
+                    message: "Writing track...".to_string(),
+                    start_time: Some(std::time::SystemTime::now()),
+                }),
+                ..Default::default()
+            };
+
+            let lines_running = build_format_progress_lines(&status);
+            let text_running: String = lines_running
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+                .collect();
+            assert!(text_running.contains("Timing Stats   : Start: "));
+            assert!(text_running.contains(" | Now: "));
+            assert!(text_running.contains(" | Est. End: "));
+
+            // 2. Completed state with long duration (1 hour, 23 min, 45 sec -> 5025s)
+            if let Some(ref mut p) = status.format_progress {
+                p.step = FormatStep::Completed;
+                p.elapsed_secs = 5025.0;
+                p.eta_secs = 0.0;
+            }
+            let lines_completed = build_format_progress_lines(&status);
+            let text_completed: String = lines_completed
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+                .collect();
+            assert!(text_completed.contains("Timing Stats   : Completed Successfully | Total Duration: 01:23:45"));
+        }
+    }
 }
+
 
 

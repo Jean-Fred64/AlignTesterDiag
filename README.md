@@ -65,7 +65,7 @@
 
 ## 📸 Interface Preview
 
-![AlignTesterDiag Diagnostic Screen](Medias/AlignTesterDiag_screenshot_Analysis_v1_0_0.jpg)
+![AlignTesterDiag Diagnostic Screen](Medias\AlignTesterDiag_screenshot_Analysis_v1.0.0.jpg)
 
 *Live track stepping, density autodetection, spindle RPM monitoring, and continuous MFM sector integrity verification in real-time.*
 
