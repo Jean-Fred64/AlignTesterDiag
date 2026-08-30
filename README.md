@@ -7,14 +7,14 @@
 [![Architecture](https://img.shields.io/badge/concurrency-100%25%20Non--Blocking-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 
-**AlignTesterDiag** is a high-performance, non-blocking, modern terminal user interface (TUI) diagnostics, formatting, and calibration suite for floppy disk drives. Interfacing directly with a **Greaseweazle USB flux controller**, it bridges Dave Dunfield's classic **ImageDisk (`IMD.C`)** diagnostic methodologies with modern sub-microsecond magnetic flux DPLL decoding, native multi-system retro hardware synthesis (IBM PC, Commodore Amiga Paula, Atari ST, Amstrad CPC), and real-time audio-visual feedback.
+**AlignTesterDiag** is a high-performance, non-blocking, modern terminal user interface (TUI) diagnostics, formatting, and calibration suite for floppy disk drives. Interfacing directly with a **Greaseweazle USB flux controller**, it bridges Dave Dunfield's classic **ImageDisk (`IMD.C`)** diagnostic methodologies with modern sub-microsecond magnetic flux DPLL decoding, native multi-system retro hardware synthesis (IBM PC, Commodore Amiga, Atari ST, Amstrad CPC), and real-time audio-visual feedback.
 
 ---
 
 ## 🌟 Key Highlights
 
 - ⚡ **100% Non-Blocking Architecture (~60 Hz TUI):** Strict decoupling between the interactive Ratatui/Crossterm rendering loop, the USB hardware acquisition worker thread, and a dedicated real-time audio thread via lock-free `crossbeam-channel` queues. 64 KB extended serial block buffers eliminate micro-blocking system calls and USB CDC latency. **198 automated unit tests** with strict Clippy compliance (`cargo clippy -- -D warnings`).
-- 🦁 **Native Commodore Amiga Paula Engine & Asynchronous Stream Synthesis:**
+- 🦁 **Native Commodore Amiga Engine & Asynchronous Stream Synthesis:**
   - **Asynchronous Continuous Track Writing (`cue_at_index = false`):** Paula hardware writes tracks continuously as a circular MFM stream as soon as requested, without waiting for the physical index hole (`cue_at_index = false` for AmigaDOS vs. `cue_at_index = true` for index-aligned PC / Atari / CPC formats).
   - **Clean Paula Encoding (No Artificial Lead-In):** Exact Amiga track layout without artificial zero padding, generating 11 consecutive sectors with double sync words `0x44894489`, header info, 16-byte OS label, 32-bit XOR header checksum, 512-byte payload split into 128 even longwords + 128 odd longwords, 32-bit XOR data checksum, and 1 byte of MFM inter-sector gap (`0x00`).
   - **Seamless Over-Write Splice Loop (~108,000 MFM bits):** Encodes $\approx 1.08$ to $1.13$ revolutions ($\approx 216\text{ ms}$ @ 250 kbps) ensuring complete track erasure and a clean magnetic splice loop across drive RPM variations (295–305 RPM).

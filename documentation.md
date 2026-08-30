@@ -35,7 +35,7 @@ The application executes across three decoupled OS threads:
 2. **Hardware I/O & Decoding Thread (`src/hw/mod.rs`):**
    - Owns the USB CDC serial connection to the Greaseweazle hardware (`serialport`).
    - Manages drive selection, motor power sequencing, track seeking, low-level formatting, hardware erasing, and raw flux stream captures.
-   - Executes the software Digital Phase-Locked Loop (DPLL) and MFM sector decoding pipeline (IBM PC, Amiga Paula, Atari ST, Amstrad CPC).
+   - Executes the software Digital Phase-Locked Loop (DPLL) and MFM sector decoding pipeline (IBM PC, Amiga, Atari ST, Amstrad CPC).
    - Publishes periodic `DriveStatus` snapshots via `tx_status`.
    - Dispatches `AudioEvent` notifications to the audio thread via `tx_audio`.
 3. **Real-Time Sound Worker Thread (`src/audio.rs`):**
