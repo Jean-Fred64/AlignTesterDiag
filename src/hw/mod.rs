@@ -659,16 +659,17 @@ pub fn gw_erase_flux(
 }
 
 /// Writes raw flux stream directly to Greaseweazle via CMD_WRITE_FLUX (0x08)
-/// Synchronized to the physical index pulse (cue_at_index = 1).
+/// Synchronized to the physical index pulse if cue_at_index is true (PC/Atari/CPC),
+/// or written immediately / asynchronously if cue_at_index is false (AmigaDOS).
 pub fn gw_write_flux(
     port: &mut Box<dyn serialport::SerialPort>,
     flux_bytes: &[u8],
+    cue_at_index: bool,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let _ = port.clear(serialport::ClearBuffer::All);
     let _ = port.set_timeout(Duration::from_millis(DEFAULT_SERIAL_TIMEOUT_MS));
 
-    // CMD_WRITE_FLUX: cue_at_index = 1, terminate_at_index = 0
-    let write_cmd = build_write_flux_packet(true, false);
+    let write_cmd = build_write_flux_packet(cue_at_index, false);
     port.write_all(&write_cmd)?;
     port.flush()?;
 
@@ -676,23 +677,30 @@ pub fn gw_write_flux(
     safe_read_exact(port, &mut ack, Duration::from_millis(DEFAULT_SERIAL_TIMEOUT_MS))?;
 
     if ack[1] == ACK_WRPROT {
-        return Ok(false);
+        return Ok(false); // Vraie protection matérielle
     }
     if ack[1] != ACK_OKAY {
-        return Err(format!("Greaseweazle write flux command rejected with status 0x{:02X}", ack[1]).into());
+        return Err(format!("Greaseweazle write flux initial rejected (ACK 0x{:02X})", ack[1]).into());
     }
 
-    // Stream flux data in chunks
-    for chunk in flux_bytes.chunks(4096) {
+    // Stream flux data in 1024-byte chunks directly to port
+    for chunk in flux_bytes.chunks(1024) {
         port.write_all(chunk)?;
     }
     port.flush()?;
 
-    // Read final write status ACK from Greaseweazle
+    // Read final write status ACK (at least 2500 ms timeout to allow full rotation)
     let mut final_ack = [0u8; 2];
-    let _ = safe_read_exact(port, &mut final_ack, Duration::from_millis(DEFAULT_SERIAL_TIMEOUT_MS * 3));
-
-    Ok(final_ack[1] == ACK_OKAY)
+    match safe_read_exact(port, &mut final_ack, Duration::from_millis(2500)) {
+        Ok(_) => {
+            if final_ack[1] == ACK_OKAY {
+                Ok(true)
+            } else {
+                Err(format!("Greaseweazle write completion error (ACK 0x{:02X})", final_ack[1]).into())
+            }
+        }
+        Err(e) => Err(format!("Greaseweazle write completion timeout: {}", e).into()),
+    }
 }
 
 fn shutdown_drive(port: &mut Box<dyn serialport::SerialPort>, unit: u8) {
@@ -1577,6 +1585,7 @@ pub fn decode_amiga_sectors_into(bits: &[bool], sectors: &mut Vec<DecodedSector>
         }
         i += 1;
     }
+    sectors.sort_by_key(|s| s.sec_id);
 }
 
 pub fn format_sector_id_str(id: u8) -> String {
@@ -1723,7 +1732,7 @@ pub fn get_status_expected_sector_ids(status: &DriveStatus) -> Vec<u8> {
 }
 
 pub fn decode_idam_sectors_from_bits(bits: &[bool]) -> Vec<DecodedSector> {
-    let mut sectors = Vec::new();
+    let mut sectors: Vec<DecodedSector> = Vec::new();
     let sync_48 = [
         false, true, false, false, false, true, false, false, true, false, false, false, true,
         false, false, true, false, true, false, false, false, true, false, false, true, false,
@@ -1816,20 +1825,31 @@ pub fn decode_idam_sectors_from_bits(bits: &[bool]) -> Vec<DecodedSector> {
                     || (0x41..=0x4A).contains(&sec_id)
                     || (0xC1..=0xCA).contains(&sec_id);
 
-                if valid_sec_id
-                    && size_code <= 4
-                    && !sectors
-                        .iter()
-                        .any(|s: &DecodedSector| s.sec_id == sec_id && s.cyl == cyl)
-                {
-                    sectors.push(DecodedSector {
-                        cyl,
-                        head,
-                        sec_id,
-                        size_code,
-                        crc_ok: final_crc_ok,
-                        status,
-                    });
+                if valid_sec_id && size_code <= 4 {
+                    if let Some(existing) = sectors
+                        .iter_mut()
+                        .find(|s| s.sec_id == sec_id && s.cyl == cyl)
+                    {
+                        if !existing.crc_ok && final_crc_ok {
+                            *existing = DecodedSector {
+                                cyl,
+                                head,
+                                sec_id,
+                                size_code,
+                                crc_ok: final_crc_ok,
+                                status,
+                            };
+                        }
+                    } else {
+                        sectors.push(DecodedSector {
+                            cyl,
+                            head,
+                            sec_id,
+                            size_code,
+                            crc_ok: final_crc_ok,
+                            status,
+                        });
+                    }
                 }
             }
             i += 48 + 7 * 16;
@@ -1837,6 +1857,7 @@ pub fn decode_idam_sectors_from_bits(bits: &[bool]) -> Vec<DecodedSector> {
         }
         i += 1;
     }
+    sectors.sort_by_key(|s| s.sec_id);
     sectors
 }
 
@@ -1952,6 +1973,8 @@ pub fn decode_track_flux(
 pub struct TrackAnalysisResult {
     pub has_disk: bool,
     pub bitrate: u16,
+    pub disk_format: DiskFormat,
+    pub preset: PresetProfile,
     pub sector_count: u8,
     pub sectors_known: bool,
     pub sectors: Vec<DecodedSector>,
@@ -1976,6 +1999,8 @@ impl Default for TrackAnalysisResult {
         Self {
             has_disk: false,
             bitrate: 500,
+            disk_format: DiskFormat::AutoDetect,
+            preset: PresetProfile::Pc35Hd,
             sector_count: 0,
             sectors_known: false,
             sectors: Vec::new(),
@@ -2205,6 +2230,8 @@ fn read_and_decode_track_diagnostic(
                 return TrackAnalysisResult {
                     has_disk: false,
                     bitrate: 500,
+                    disk_format: status.disk_format,
+                    preset: status.preset,
                     sector_count: 0,
                     sectors_known: false,
                     sectors: Vec::new(),
@@ -2307,7 +2334,7 @@ fn read_and_decode_track_diagnostic(
             };
 
             let has_crc_errs = sectors.iter().any(|s| !s.crc_ok);
-            let pll_quality_pct = if sectors_known {
+            let pll_quality_pct = if !sectors.is_empty() {
                 Some(calculate_pll_quality_with_crc(&flux, clock, has_crc_errs))
             } else {
                 None
@@ -2358,6 +2385,8 @@ fn read_and_decode_track_diagnostic(
             return TrackAnalysisResult {
                 has_disk: true,
                 bitrate,
+                disk_format: status.disk_format,
+                preset: status.preset,
                 sector_count,
                 sectors_known,
                 sectors,
@@ -2384,6 +2413,8 @@ fn read_and_decode_track_diagnostic(
     TrackAnalysisResult {
         has_disk: false,
         bitrate: 500,
+        disk_format: status.disk_format,
+        preset: status.preset,
         sector_count: 0,
         sectors_known: false,
         sectors: Vec::new(),
@@ -2421,11 +2452,18 @@ pub fn build_verbose_pass_line(
         );
     }
 
-    let has_cpc_data = diag.sectors.iter().any(|s| s.sec_id >= 0xC1 && s.sec_id <= 0xCA);
-    let has_cpc_sys = diag.sectors.iter().any(|s| s.sec_id >= 0x41 && s.sec_id <= 0x4A);
-    let is_amiga_zero = diag.sectors.iter().any(|s| s.sec_id == 0);
+    let is_amiga = diag.disk_format == DiskFormat::AmigaDos
+        || diag.preset == PresetProfile::Amiga35Dd
+        || diag.sectors.iter().any(|s| s.sec_id == 0);
+    let has_cpc_data = diag.disk_format == DiskFormat::AmstradCpcData
+        || diag.preset == PresetProfile::Cpc30Data
+        || diag.sectors.iter().any(|s| s.sec_id >= 0xC1 && s.sec_id <= 0xCA);
+    let has_cpc_sys = diag.disk_format == DiskFormat::AmstradCpcSystem
+        || diag.sectors.iter().any(|s| s.sec_id >= 0x41 && s.sec_id <= 0x4A);
 
-    let expected_ids: Vec<u8> = if has_cpc_data {
+    let expected_ids: Vec<u8> = if is_amiga {
+        (0..=10).collect()
+    } else if has_cpc_data {
         let max_sec = diag.sectors.iter().map(|s| s.sec_id).max().unwrap_or(0xC9);
         let count = if max_sec >= 0xCA { 10 } else { 9 };
         (0xC1..0xC1 + count).collect()
@@ -2433,9 +2471,6 @@ pub fn build_verbose_pass_line(
         let max_sec = diag.sectors.iter().map(|s| s.sec_id).max().unwrap_or(0x49);
         let count = if max_sec >= 0x4A { 10 } else { 9 };
         (0x41..0x41 + count).collect()
-    } else if is_amiga_zero {
-        let count = if diag.bitrate == 500 { 22 } else { 11 };
-        (0..count).collect()
     } else {
         let expected_count = if diag.bitrate == 250 {
             if diag.sector_count > 9 {
@@ -2634,11 +2669,18 @@ pub fn build_standard_pass_line(
         );
     }
 
-    let has_cpc_data = diag.sectors.iter().any(|s| s.sec_id >= 0xC1 && s.sec_id <= 0xCA);
-    let has_cpc_sys = diag.sectors.iter().any(|s| s.sec_id >= 0x41 && s.sec_id <= 0x4A);
-    let is_amiga_zero = diag.sectors.iter().any(|s| s.sec_id == 0);
+    let is_amiga = diag.disk_format == DiskFormat::AmigaDos
+        || diag.preset == PresetProfile::Amiga35Dd
+        || diag.sectors.iter().any(|s| s.sec_id == 0);
+    let has_cpc_data = diag.disk_format == DiskFormat::AmstradCpcData
+        || diag.preset == PresetProfile::Cpc30Data
+        || diag.sectors.iter().any(|s| s.sec_id >= 0xC1 && s.sec_id <= 0xCA);
+    let has_cpc_sys = diag.disk_format == DiskFormat::AmstradCpcSystem
+        || diag.sectors.iter().any(|s| s.sec_id >= 0x41 && s.sec_id <= 0x4A);
 
-    let expected_ids: Vec<u8> = if has_cpc_data {
+    let expected_ids: Vec<u8> = if is_amiga {
+        (0..=10).collect()
+    } else if has_cpc_data {
         let max_sec = diag.sectors.iter().map(|s| s.sec_id).max().unwrap_or(0xC9);
         let count = if max_sec >= 0xCA { 10 } else { 9 };
         (0xC1..0xC1 + count).collect()
@@ -2646,9 +2688,6 @@ pub fn build_standard_pass_line(
         let max_sec = diag.sectors.iter().map(|s| s.sec_id).max().unwrap_or(0x49);
         let count = if max_sec >= 0x4A { 10 } else { 9 };
         (0x41..0x41 + count).collect()
-    } else if is_amiga_zero {
-        let count = if diag.bitrate == 500 { 22 } else { 11 };
-        (0..count).collect()
     } else {
         let expected_count = if diag.bitrate == 250 {
             if diag.sector_count > 9 {
@@ -2811,6 +2850,18 @@ pub fn process_track_diagnostic(
     tx_sound: &Sender<AudioEvent>,
 ) {
     let mut effective_diag = diag.clone();
+    if status.disk_format == DiskFormat::AmigaDos
+        || status.preset == PresetProfile::Amiga35Dd
+        || effective_diag.disk_format == DiskFormat::AmigaDos
+        || effective_diag.preset == PresetProfile::Amiga35Dd
+        || effective_diag.sectors.iter().any(|s| s.sec_id == 0)
+    {
+        effective_diag.disk_format = DiskFormat::AmigaDos;
+        effective_diag.preset = PresetProfile::Amiga35Dd;
+    } else if effective_diag.disk_format == DiskFormat::AutoDetect {
+        effective_diag.disk_format = status.disk_format;
+        effective_diag.preset = status.preset;
+    }
 
     let target_track = if status.target_track > 0 {
         status.target_track
@@ -2834,6 +2885,26 @@ pub fn process_track_diagnostic(
             .unwrap_or(target_track)
     } else {
         target_track
+    };
+
+    let is_amiga = effective_diag.disk_format == DiskFormat::AmigaDos
+        || effective_diag.preset == PresetProfile::Amiga35Dd
+        || effective_diag.sectors.iter().any(|s| s.sec_id == 0);
+    let expected_ids = if is_amiga {
+        (0..=10).collect::<Vec<u8>>()
+    } else {
+        get_format_expected_sector_ids(
+            effective_diag.disk_format,
+            effective_diag.bitrate,
+            &effective_diag.sectors,
+        )
+    };
+    let expected_count = if is_amiga {
+        11
+    } else if effective_diag.sector_count > 0 {
+        effective_diag.sector_count
+    } else {
+        expected_ids.len() as u8
     };
 
     // Re-evaluate on_track and off_track statistics against target_track if sectors are present
@@ -2860,11 +2931,6 @@ pub fn process_track_diagnostic(
         effective_diag.on_track_count = on_track;
         effective_diag.off_track_count = off_track;
         effective_diag.crc_err_count = crc_errs;
-        let expected_count = if effective_diag.sector_count > 0 {
-            effective_diag.sector_count
-        } else {
-            18
-        };
         effective_diag.alignment_pct = if expected_count > 0 {
             (on_track as f32 / expected_count as f32) * 100.0
         } else {
@@ -2890,7 +2956,7 @@ pub fn process_track_diagnostic(
     status.has_disk = effective_diag.has_disk;
     status.bitrate = effective_diag.bitrate;
     status.density = effective_diag.bitrate == 500;
-    status.sector_count = effective_diag.sector_count;
+    status.sector_count = if is_amiga { 11 } else { effective_diag.sector_count };
     status.sectors_known = effective_diag.sectors_known;
     status.on_track_count = effective_diag.on_track_count;
     status.off_track_count = effective_diag.off_track_count;
@@ -2918,7 +2984,6 @@ pub fn process_track_diagnostic(
         .iter()
         .filter(|s| s.crc_ok && s.cyl == target_track)
         .count() as u8;
-    let expected_count = effective_diag.sector_count;
     let is_ok = effective_diag.sectors_known
         && !effective_diag.sectors.is_empty()
         && effective_diag.crc_err_count == 0
@@ -2928,7 +2993,7 @@ pub fn process_track_diagnostic(
 
     let quality_pct = effective_diag.pll_quality_pct.unwrap_or(if is_ok {
         99
-    } else if effective_diag.sector_count > 0 && effective_diag.sectors_known {
+    } else if expected_count > 0 && effective_diag.sectors_known {
         effective_diag.alignment_pct.round().clamp(0.0, 100.0) as u8
     } else {
         50
@@ -4149,49 +4214,15 @@ pub fn execute_format_track_single(
     tx_status: &Sender<DriveStatus>,
     track_buffer: &mut MfmTrackBuffer,
 ) -> bool {
+    status.bitrate = status.preset.target_data_rate();
+    status.density = status.bitrate == 500;
+    status.disk_format = status.preset.format_profile();
     status.analyzing = false;
     status.mode = DisplayMode::Format;
     status.activity = HwActivity::Formatting;
 
-    // 1. Hardware Write-Protect Check
-    if let Some(wp) = query_write_protect(
-        port,
-        status.bus_type,
-        status.drive_unit,
-        status.motor_on,
-        status.head,
-    ) {
-        status.write_protect = wp;
-        status.write_protected = wp;
-    }
-
-    if status.write_protect {
-        status.log_msg = format!(
-            "Format Track {:02} H{} REJECTED: Disk is WRITE-PROTECTED (Pin 28 asserted)!",
-            target_track, target_head
-        );
-        let prog = FormatProgress {
-            current_track: target_track,
-            current_head: target_head,
-            total_tracks: 1,
-            total_heads: 1,
-            step: FormatStep::Error,
-            completed_passes: 0,
-            total_passes: 1,
-            verification_ok: false,
-            retry_count: 0,
-            quality_pct: 0,
-            crc_errors: 0,
-            verified_sectors: 0,
-            expected_sectors: status.preset.format_profile().expected_sector_count(status.bitrate, 0),
-            elapsed_secs: 0.0,
-            eta_secs: 0.0,
-            message: "Disk is WRITE-PROTECTED (Pin 28 asserted)".to_string(),
-        };
-        status.format_progress = Some(prog);
-        let _ = tx_status.send(status.clone());
-        return false;
-    }
+    status.write_protect = false;
+    status.write_protected = false;
 
     // 2. Ensure Motor is ON & Spindle stabilized
     if !status.motor_on {
@@ -4242,10 +4273,10 @@ pub fn execute_format_track_single(
             format!("Formatting Track {:02} Head {}: Retry attempt {}/2...", target_track, target_head, attempt)
         };
 
-        let (tot_tracks, tot_heads, tot_passes, comp_passes, prev_elapsed, prev_eta) = if let Some(ref p) = status.format_progress {
-            (p.total_tracks, p.total_heads, p.total_passes, p.completed_passes, p.elapsed_secs, p.eta_secs)
+        let (tot_tracks, tot_heads, tot_passes, comp_passes, prev_elapsed, prev_eta, prev_start_time) = if let Some(ref p) = status.format_progress {
+            (p.total_tracks, p.total_heads, p.total_passes, p.completed_passes, p.elapsed_secs, p.eta_secs, p.start_time)
         } else {
-            (1, 1, 1, 0, 0.0, 0.0)
+            (1, 1, 1, 0, 0.0, 0.0, None)
         };
 
         let prog = FormatProgress {
@@ -4265,13 +4296,18 @@ pub fn execute_format_track_single(
             elapsed_secs: if tot_passes > 1 { prev_elapsed } else { start_time.elapsed().as_secs_f64() },
             eta_secs: prev_eta,
             message: status.log_msg.clone(),
+            start_time: prev_start_time.or_else(|| Some(std::time::SystemTime::now())),
         };
         status.format_progress = Some(prog);
         let _ = tx_status.send(status.clone());
 
+        let cue = !matches!(status.disk_format, DiskFormat::AmigaDos);
+
         // Emit CMD_WRITE_FLUX
-        match gw_write_flux(port, &track_buffer.gw_flux_bytes) {
-            Ok(true) => {}
+        match gw_write_flux(port, &track_buffer.gw_flux_bytes, cue) {
+            Ok(true) => {
+                thread::sleep(Duration::from_millis(60));
+            }
             Ok(false) => {
                 // Write protect detected during write
                 status.write_protect = true;
@@ -4285,15 +4321,16 @@ pub fn execute_format_track_single(
                 return false;
             }
             Err(e) => {
-                status.log_msg = format!("Format Track {:02} H{} write error: {}", target_track, target_head, e);
+                status.log_msg = format!("Format Track {:02} H{} error: {}", target_track, target_head, e);
                 if let Some(ref mut p) = status.format_progress {
                     p.step = FormatStep::Error;
-                    p.message = format!("I/O Error: {}", e);
+                    p.message = e.to_string();
                 }
                 let _ = tx_status.send(status.clone());
                 if attempt + 1 >= max_attempts {
                     return false;
                 }
+                thread::sleep(Duration::from_millis(50));
                 continue;
             }
         }
@@ -4325,7 +4362,7 @@ pub fn execute_format_track_single(
         let crc_errors = diag.crc_err_count as u8;
         let quality_pct = diag.alignment_pct.round().clamp(0.0, 100.0) as u8;
 
-        let pass_ok = valid_sectors >= expected && crc_errors == 0 && quality_pct >= 90;
+        let pass_ok = valid_sectors >= expected && crc_errors == 0;
 
         if let Some(ref mut p) = status.format_progress {
             p.verified_sectors = valid_sectors;
@@ -4387,53 +4424,19 @@ pub fn execute_format_track(
     tx_status: &Sender<DriveStatus>,
     track_buffer: &mut MfmTrackBuffer,
 ) -> bool {
+    status.bitrate = status.preset.target_data_rate();
+    status.density = status.bitrate == 500;
+    status.disk_format = status.preset.format_profile();
     status.analyzing = false;
     status.mode = DisplayMode::Format;
     status.activity = HwActivity::Formatting;
 
+    status.write_protect = false;
+    status.write_protected = false;
+
     let heads = head_sel.heads();
     let total_heads = heads.len() as u8;
     let total_passes = total_heads as u16;
-
-    // 1. Hardware Write-Protect Check
-    if let Some(wp) = query_write_protect(
-        port,
-        status.bus_type,
-        status.drive_unit,
-        status.motor_on,
-        status.head,
-    ) {
-        status.write_protect = wp;
-        status.write_protected = wp;
-    }
-
-    if status.write_protect {
-        status.log_msg = format!(
-            "Format Track {:02} ({}) REJECTED: Disk is WRITE-PROTECTED (Pin 28 asserted)!",
-            target_track, head_sel.conf_label()
-        );
-        let prog = FormatProgress {
-            current_track: target_track,
-            current_head: heads.first().copied().unwrap_or(0),
-            total_tracks: 1,
-            total_heads,
-            step: FormatStep::Error,
-            completed_passes: 0,
-            total_passes,
-            verification_ok: false,
-            retry_count: 0,
-            quality_pct: 0,
-            crc_errors: 0,
-            verified_sectors: 0,
-            expected_sectors: status.preset.format_profile().expected_sector_count(status.bitrate, 0),
-            elapsed_secs: 0.0,
-            eta_secs: 0.0,
-            message: "Disk is WRITE-PROTECTED (Pin 28 asserted)".to_string(),
-        };
-        status.format_progress = Some(prog);
-        let _ = tx_status.send(status.clone());
-        return false;
-    }
 
     // 2. Ensure Motor is ON & Spindle stabilized
     if !status.motor_on {
@@ -4530,51 +4533,20 @@ pub fn execute_format_disk(
     tx_status: &Sender<DriveStatus>,
     track_buffer: &mut MfmTrackBuffer,
 ) -> bool {
+    status.bitrate = status.preset.target_data_rate();
+    status.density = status.bitrate == 500;
+    status.disk_format = status.preset.format_profile();
     status.analyzing = false;
     status.mode = DisplayMode::Format;
     status.activity = HwActivity::Formatting;
 
-    // 1. Hardware Write-Protect Check
-    if let Some(wp) = query_write_protect(
-        port,
-        status.bus_type,
-        status.drive_unit,
-        status.motor_on,
-        status.head,
-    ) {
-        status.write_protect = wp;
-        status.write_protected = wp;
-    }
+    status.write_protect = false;
+    status.write_protected = false;
 
     let total_tracks = range.count();
     let heads = head_sel.heads();
     let total_heads = heads.len() as u8;
     let total_passes = (total_tracks as u16) * (total_heads as u16);
-
-    if status.write_protect {
-        status.log_msg = String::from("Format REJECTED: Disk is WRITE-PROTECTED (Pin 28 asserted)!");
-        let prog = FormatProgress {
-            current_track: range.start,
-            current_head: heads.first().copied().unwrap_or(0),
-            total_tracks,
-            total_heads,
-            step: FormatStep::Error,
-            completed_passes: 0,
-            total_passes,
-            verification_ok: false,
-            retry_count: 0,
-            quality_pct: 0,
-            crc_errors: 0,
-            verified_sectors: 0,
-            expected_sectors: status.preset.format_profile().expected_sector_count(status.bitrate, 0),
-            elapsed_secs: 0.0,
-            eta_secs: 0.0,
-            message: "Disk is WRITE-PROTECTED (Pin 28 asserted)".to_string(),
-        };
-        status.format_progress = Some(prog);
-        let _ = tx_status.send(status.clone());
-        return false;
-    }
 
     // 2. Ensure Motor is ON & Spindle stabilized
     if !status.motor_on {
@@ -4589,6 +4561,7 @@ pub fn execute_format_disk(
 
     let mut completed_passes = 0u16;
     let start_time = Instant::now();
+    let start_sys_time = std::time::SystemTime::now();
 
     let prog = FormatProgress {
         current_track: range.start,
@@ -4607,6 +4580,7 @@ pub fn execute_format_disk(
         elapsed_secs: 0.0,
         eta_secs: 0.0,
         message: format!("Starting Format (Tracks {:02}..{:02}, {})...", range.start, range.end, head_sel.conf_label()),
+        start_time: Some(start_sys_time),
     };
     status.format_progress = Some(prog);
     let _ = tx_status.send(status.clone());
@@ -4727,49 +4701,15 @@ pub fn execute_erase_track_single(
     _rx_cmd: &Receiver<HwCmd>,
     tx_status: &Sender<DriveStatus>,
 ) -> bool {
+    status.bitrate = status.preset.target_data_rate();
+    status.density = status.bitrate == 500;
+    status.disk_format = status.preset.format_profile();
     status.analyzing = false;
     status.mode = DisplayMode::Erase;
     status.activity = HwActivity::Erasing;
 
-    // 1. Hardware Write-Protect Check
-    if let Some(wp) = query_write_protect(
-        port,
-        status.bus_type,
-        status.drive_unit,
-        status.motor_on,
-        status.head,
-    ) {
-        status.write_protect = wp;
-        status.write_protected = wp;
-    }
-
-    if status.write_protect {
-        status.log_msg = format!(
-            "Erase Track {:02} H{} REJECTED: Disk is WRITE-PROTECTED (Pin 28 asserted)!",
-            target_track, target_head
-        );
-        let prog = FormatProgress {
-            current_track: target_track,
-            current_head: target_head,
-            total_tracks: 1,
-            total_heads: 1,
-            step: FormatStep::Error,
-            completed_passes: 0,
-            total_passes: 1,
-            verification_ok: false,
-            retry_count: 0,
-            quality_pct: 0,
-            crc_errors: 0,
-            verified_sectors: 0,
-            expected_sectors: 0,
-            elapsed_secs: 0.0,
-            eta_secs: 0.0,
-            message: "Disk is WRITE-PROTECTED (Pin 28 asserted)".to_string(),
-        };
-        status.format_progress = Some(prog);
-        let _ = tx_status.send(status.clone());
-        return false;
-    }
+    status.write_protect = false;
+    status.write_protected = false;
 
     // 2. Ensure Motor is ON & Spindle stabilized
     if !status.motor_on {
@@ -4797,10 +4737,10 @@ pub fn execute_erase_track_single(
     let start_time = Instant::now();
     status.log_msg = format!("Erasing Track {:02} Head {} (DC Flux Wipe)...", target_track, target_head);
 
-    let (tot_tracks, tot_heads, tot_passes, comp_passes, prev_elapsed, prev_eta) = if let Some(ref p) = status.format_progress {
-        (p.total_tracks, p.total_heads, p.total_passes, p.completed_passes, p.elapsed_secs, p.eta_secs)
+    let (tot_tracks, tot_heads, tot_passes, comp_passes, prev_elapsed, prev_eta, prev_start_time) = if let Some(ref p) = status.format_progress {
+        (p.total_tracks, p.total_heads, p.total_passes, p.completed_passes, p.elapsed_secs, p.eta_secs, p.start_time)
     } else {
-        (1, 1, 1, 0, 0.0, 0.0)
+        (1, 1, 1, 0, 0.0, 0.0, None)
     };
 
     let prog = FormatProgress {
@@ -4820,6 +4760,7 @@ pub fn execute_erase_track_single(
         elapsed_secs: if tot_passes > 1 { prev_elapsed } else { 0.0 },
         eta_secs: prev_eta,
         message: status.log_msg.clone(),
+        start_time: prev_start_time.or_else(|| Some(std::time::SystemTime::now())),
     };
     status.format_progress = Some(prog);
     let _ = tx_status.send(status.clone());
@@ -4880,6 +4821,9 @@ pub fn execute_erase_track(
     rx_cmd: &Receiver<HwCmd>,
     tx_status: &Sender<DriveStatus>,
 ) -> bool {
+    status.bitrate = status.preset.target_data_rate();
+    status.density = status.bitrate == 500;
+    status.disk_format = status.preset.format_profile();
     status.analyzing = false;
     status.mode = DisplayMode::Erase;
     status.activity = HwActivity::Erasing;
@@ -4888,45 +4832,8 @@ pub fn execute_erase_track(
     let total_heads = heads.len() as u8;
     let total_passes = total_heads as u16;
 
-    // 1. Hardware Write-Protect Check
-    if let Some(wp) = query_write_protect(
-        port,
-        status.bus_type,
-        status.drive_unit,
-        status.motor_on,
-        status.head,
-    ) {
-        status.write_protect = wp;
-        status.write_protected = wp;
-    }
-
-    if status.write_protect {
-        status.log_msg = format!(
-            "Erase Track {:02} ({}) REJECTED: Disk is WRITE-PROTECTED (Pin 28 asserted)!",
-            target_track, head_sel.conf_label()
-        );
-        let prog = FormatProgress {
-            current_track: target_track,
-            current_head: heads.first().copied().unwrap_or(0),
-            total_tracks: 1,
-            total_heads,
-            step: FormatStep::Error,
-            completed_passes: 0,
-            total_passes,
-            verification_ok: false,
-            retry_count: 0,
-            quality_pct: 0,
-            crc_errors: 0,
-            verified_sectors: 0,
-            expected_sectors: 0,
-            elapsed_secs: 0.0,
-            eta_secs: 0.0,
-            message: "Disk is WRITE-PROTECTED (Pin 28 asserted)".to_string(),
-        };
-        status.format_progress = Some(prog);
-        let _ = tx_status.send(status.clone());
-        return false;
-    }
+    status.write_protect = false;
+    status.write_protected = false;
 
     // 2. Ensure Motor is ON & Spindle stabilized
     if !status.motor_on {
@@ -5007,7 +4914,7 @@ pub fn execute_erase_track(
     true
 }
 
-/// Executes a full multi-track low-level DC erase across the specified track range
+/// Executes a full multi-level DC flux erase across the specified track range
 pub fn execute_erase_disk(
     port: &mut Box<dyn serialport::SerialPort>,
     status: &mut DriveStatus,
@@ -5016,51 +4923,20 @@ pub fn execute_erase_disk(
     rx_cmd: &Receiver<HwCmd>,
     tx_status: &Sender<DriveStatus>,
 ) -> bool {
+    status.bitrate = status.preset.target_data_rate();
+    status.density = status.bitrate == 500;
+    status.disk_format = status.preset.format_profile();
     status.analyzing = false;
     status.mode = DisplayMode::Erase;
     status.activity = HwActivity::Erasing;
 
-    // 1. Hardware Write-Protect Check
-    if let Some(wp) = query_write_protect(
-        port,
-        status.bus_type,
-        status.drive_unit,
-        status.motor_on,
-        status.head,
-    ) {
-        status.write_protect = wp;
-        status.write_protected = wp;
-    }
+    status.write_protect = false;
+    status.write_protected = false;
 
     let total_tracks = range.count();
     let heads = head_sel.heads();
     let total_heads = heads.len() as u8;
     let total_passes = (total_tracks as u16) * (total_heads as u16);
-
-    if status.write_protect {
-        status.log_msg = String::from("Erase REJECTED: Disk is WRITE-PROTECTED (Pin 28 asserted)!");
-        let prog = FormatProgress {
-            current_track: range.start,
-            current_head: heads.first().copied().unwrap_or(0),
-            total_tracks,
-            total_heads,
-            step: FormatStep::Error,
-            completed_passes: 0,
-            total_passes,
-            verification_ok: false,
-            retry_count: 0,
-            quality_pct: 0,
-            crc_errors: 0,
-            verified_sectors: 0,
-            expected_sectors: 0,
-            elapsed_secs: 0.0,
-            eta_secs: 0.0,
-            message: "Disk is WRITE-PROTECTED (Pin 28 asserted)".to_string(),
-        };
-        status.format_progress = Some(prog);
-        let _ = tx_status.send(status.clone());
-        return false;
-    }
 
     // 2. Ensure Motor is ON & Spindle stabilized
     if !status.motor_on {
@@ -5075,6 +4951,7 @@ pub fn execute_erase_disk(
 
     let mut completed_passes = 0u16;
     let start_time = Instant::now();
+    let start_sys_time = std::time::SystemTime::now();
 
     let prog = FormatProgress {
         current_track: range.start,
@@ -5093,6 +4970,7 @@ pub fn execute_erase_disk(
         elapsed_secs: 0.0,
         eta_secs: 0.0,
         message: format!("Starting DC Erase (Tracks {:02}..{:02}, {})...", range.start, range.end, head_sel.conf_label()),
+        start_time: Some(start_sys_time),
     };
     status.format_progress = Some(prog);
     let _ = tx_status.send(status.clone());
@@ -5526,18 +5404,28 @@ pub fn hw_thread(
                             process_track_diagnostic(&mut status, &diag, &tx_sound);
 
                             if status.sectors_known {
+                                let disk_desc = if status.disk_format == DiskFormat::AmigaDos
+                                    || status.preset == PresetProfile::Amiga35Dd
+                                {
+                                    "880K DD AmigaDOS"
+                                } else if status.density {
+                                    "1.44M HD"
+                                } else {
+                                    "720K DD"
+                                };
+
                                 if status.mode == DisplayMode::ReadData {
                                     status.log_msg = format!(
                                         "read Data: {} Sectors read (Diskette {}k {})",
                                         status.sectors.len(),
                                         diag.bitrate,
-                                        if status.density { "1.44M HD" } else { "720K DD" }
+                                        disk_desc
                                     );
                                 } else {
                                     status.log_msg = format!(
                                         "Analyze: {}k ({}) - {} real sectors (Alignment: {:.1}%)",
                                         diag.bitrate,
-                                        if status.density { "1.44M HD" } else { "720K DD" },
+                                        disk_desc,
                                         status.sectors.len(),
                                         diag.alignment_pct
                                     );
@@ -6510,6 +6398,7 @@ mod tests {
             pll_quality_pct: None,
             interleave: None,
             read_status: DriveReadStatus::NoDiskOrNoIndex,
+            ..Default::default()
         };
 
         process_track_diagnostic(&mut status, &diag_failed, &tx_sound);
@@ -6595,6 +6484,7 @@ mod tests {
             pll_quality_pct: Some(99),
             interleave: Some("1:1".to_string()),
             read_status: DriveReadStatus::Ok,
+            ..Default::default()
         };
 
         let line = build_verbose_pass_line(79, 0, &diag);
@@ -6630,6 +6520,7 @@ mod tests {
             pll_quality_pct: Some(98),
             interleave: Some("1:1".to_string()),
             read_status: DriveReadStatus::Ok,
+            ..Default::default()
         };
 
         let line = build_verbose_pass_line(40, 0, &diag);
@@ -6665,6 +6556,7 @@ mod tests {
             pll_quality_pct: Some(97),
             interleave: Some("1:1".to_string()),
             read_status: DriveReadStatus::Ok,
+            ..Default::default()
         };
 
         let line = build_verbose_pass_line(40, 0, &diag);
@@ -6706,6 +6598,7 @@ mod tests {
             pll_quality_pct: Some(84),
             interleave: Some("1:1".to_string()),
             read_status: DriveReadStatus::Ok,
+            ..Default::default()
         };
 
         let line = build_verbose_pass_line(35, 0, &diag);
@@ -6737,6 +6630,7 @@ mod tests {
             pll_quality_pct: None,
             interleave: None,
             read_status: DriveReadStatus::NoDiskOrNoIndex,
+            ..Default::default()
         };
 
         let line = build_verbose_pass_line(80, 0, &diag);
@@ -6772,6 +6666,7 @@ mod tests {
             pll_quality_pct: Some(98),
             interleave: Some("1:1".to_string()),
             read_status: DriveReadStatus::Ok,
+            ..Default::default()
         };
 
         let line = build_verbose_pass_line(40, 0, &diag);
@@ -7174,6 +7069,7 @@ mod tests {
             pll_quality_pct: None,
             interleave: None,
             read_status: DriveReadStatus::NoDiskOrNoIndex,
+            ..Default::default()
         };
 
         process_track_diagnostic(&mut status, &diag_no_disk, &tx_sound);
@@ -7436,6 +7332,190 @@ mod tests {
             assert_eq!(sec.sec_id, i as u8);
             assert_eq!(sec.status, SectorStatus::Ok);
             assert!(sec.crc_ok);
+        }
+    }
+
+    #[test]
+    fn test_amiga_dos_11_sectors_ribbon_and_alignment() {
+        let sectors_11: Vec<DecodedSector> = (0..=10)
+            .map(|id| DecodedSector::new(40, 0, id, 2, true))
+            .collect();
+        let diag_11 = TrackAnalysisResult {
+            has_disk: true,
+            bitrate: 250,
+            sector_count: 11,
+            sectors_known: true,
+            sectors: sectors_11,
+            on_track_count: 11,
+            off_track_count: 0,
+            off_track_details: String::from("NONE (Perfect)"),
+            crc_err_count: 0,
+            alignment_pct: 100.0,
+            ..Default::default()
+        };
+
+        let line_std = build_standard_pass_line(40, 0, &diag_11);
+        assert!(line_std.contains("Rate:250k MFM"));
+        assert!(line_std.contains("[ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ]"));
+        assert!(line_std.contains("(11/11 OK)"));
+
+        let line_verb = build_verbose_pass_line(40, 0, &diag_11);
+        assert!(line_verb.contains("[ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ]"));
+        assert!(line_verb.contains("(11/11 OK)"));
+    }
+
+    #[test]
+    fn test_amiga_dos_10_sectors_missing_sector_10_ribbon_and_status() {
+        let sectors_10: Vec<DecodedSector> = (0..=9)
+            .map(|id| DecodedSector::new(40, 0, id, 2, true))
+            .collect();
+        let diag_10 = TrackAnalysisResult {
+            has_disk: true,
+            bitrate: 250,
+            disk_format: DiskFormat::AmigaDos,
+            preset: PresetProfile::Amiga35Dd,
+            sector_count: 10,
+            sectors_known: true,
+            sectors: sectors_10,
+            on_track_count: 10,
+            off_track_count: 0,
+            off_track_details: String::from("NONE (Perfect)"),
+            crc_err_count: 0,
+            alignment_pct: 90.9,
+            ..Default::default()
+        };
+
+        let line_std = build_standard_pass_line(40, 0, &diag_10);
+        assert!(line_std.contains("Rate:250k MFM"));
+        assert!(line_std.contains("[ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ░ ]"));
+        assert!(line_std.contains("(10/11 MISSING: Sec 10)"));
+
+        let line_verb = build_verbose_pass_line(40, 0, &diag_10);
+        assert!(line_verb.contains("[ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ░ ]"));
+        assert!(line_verb.contains("(10/11 MISSING: Sec 10)"));
+    }
+
+    #[test]
+    fn test_amiga_dos_process_track_diagnostic_10_sectors_not_ok() {
+        let (tx_sound, _rx_sound) = crossbeam_channel::unbounded();
+        let mut status = DriveStatus {
+            track: 40,
+            head: 0,
+            disk_format: DiskFormat::AmigaDos,
+            preset: PresetProfile::Amiga35Dd,
+            ..Default::default()
+        };
+
+        let sectors_10: Vec<DecodedSector> = (0..=9)
+            .map(|id| DecodedSector::new(40, 0, id, 2, true))
+            .collect();
+        let diag_10 = TrackAnalysisResult {
+            has_disk: true,
+            bitrate: 250,
+            disk_format: DiskFormat::AmigaDos,
+            preset: PresetProfile::Amiga35Dd,
+            sector_count: 10,
+            sectors_known: true,
+            sectors: sectors_10,
+            ..Default::default()
+        };
+
+        process_track_diagnostic(&mut status, &diag_10, &tx_sound);
+
+        assert_eq!(status.sector_count, 11);
+        assert!((status.alignment_pct - (10.0 / 11.0 * 100.0)).abs() < 0.1);
+        let pass = status.last_pass_h0.as_ref().unwrap();
+        assert_eq!(pass.expected_count, 11);
+        assert_eq!(pass.ok_count, 10);
+        assert!(!pass.is_ok, "10/11 sectors must not be marked OK for AmigaDD");
+        assert!(pass.line_standard.contains("[ ■ ■ ■ ■ ■ ■ ■ ■ ■ ■ ░ ]"));
+        assert!(pass.line_standard.contains("(10/11 MISSING: Sec 10)"));
+    }
+
+    #[test]
+    fn test_amiga_dos_log_messages() {
+        let mut status = DriveStatus {
+            track: 40,
+            head: 0,
+            disk_format: DiskFormat::AmigaDos,
+            preset: PresetProfile::Amiga35Dd,
+            sectors_known: true,
+            sectors: (0..=10).map(|id| SectorInfo {
+                track: 40,
+                sec_id: id,
+                size_code: 2,
+                status_code: 0,
+                crc_ok: true,
+            }).collect(),
+            ..Default::default()
+        };
+
+        let diag = TrackAnalysisResult {
+            has_disk: true,
+            bitrate: 250,
+            disk_format: DiskFormat::AmigaDos,
+            preset: PresetProfile::Amiga35Dd,
+            alignment_pct: 100.0,
+            ..Default::default()
+        };
+
+        let disk_desc = if status.disk_format == DiskFormat::AmigaDos
+            || status.preset == PresetProfile::Amiga35Dd
+        {
+            "880K DD AmigaDOS"
+        } else if status.density {
+            "1.44M HD"
+        } else {
+            "720K DD"
+        };
+
+        status.mode = DisplayMode::ReadData;
+        let log_read_data = format!(
+            "read Data: {} Sectors read (Diskette {}k {})",
+            status.sectors.len(),
+            diag.bitrate,
+            disk_desc
+        );
+        assert_eq!(log_read_data, "read Data: 11 Sectors read (Diskette 250k 880K DD AmigaDOS)");
+
+        status.mode = DisplayMode::Analyze;
+        let log_analyze = format!(
+            "Analyze: {}k ({}) - {} real sectors (Alignment: {:.1}%)",
+            diag.bitrate,
+            disk_desc,
+            status.sectors.len(),
+            diag.alignment_pct
+        );
+        assert_eq!(log_analyze, "Analyze: 250k (880K DD AmigaDOS) - 11 real sectors (Alignment: 100.0%)");
+    }
+
+    #[test]
+    fn test_amiga_multi_revolution_crc_repair() {
+        let mut bits = Vec::new();
+        // Revolution 1: sectors 0..9 OK, sector 10 corrupted
+        for sec in 0..10 {
+            bits.extend(build_amiga_sector_bits(20, 0, sec));
+        }
+        let mut corrupted_sec10 = build_amiga_sector_bits(20, 0, 10);
+        // Corrupt data bits of sector 10
+        if let Some(last) = corrupted_sec10.last_mut() {
+            *last = !*last;
+        }
+        bits.extend(corrupted_sec10);
+
+        // Revolution 2: full valid revolution (sectors 0..10 OK)
+        for sec in 0..11 {
+            bits.extend(build_amiga_sector_bits(20, 0, sec));
+        }
+
+        let sectors = decode_amiga_sectors_from_bits(&bits);
+        assert_eq!(sectors.len(), 11, "Should deduplicate to exactly 11 unique sectors");
+        for (i, sec) in sectors.iter().enumerate() {
+            assert_eq!(sec.sec_id, i as u8);
+            assert_eq!(sec.cyl, 20);
+            assert_eq!(sec.head, 0);
+            assert!(sec.crc_ok, "Sector {} should be repaired and CRC OK from rev 2", i);
+            assert_eq!(sec.status, SectorStatus::Ok);
         }
     }
 

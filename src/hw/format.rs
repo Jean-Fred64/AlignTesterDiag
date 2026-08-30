@@ -188,6 +188,7 @@ impl MfmTrackEncoder {
     }
 
     /// Appends a raw 32-bit word directly to the bit stream (MSB first)
+    #[allow(dead_code)]
     pub fn push_u32_bits(bits: &mut Vec<bool>, val: u32) {
         for shift in (0..32).rev() {
             bits.push(((val >> shift) & 1) != 0);
@@ -430,7 +431,143 @@ impl MfmTrackEncoder {
         }
     }
 
+    /// Splits a 32-bit longword into (even, odd) 32-bit masked words (0x55555555) for Paula MFM encoding
+    #[inline(always)]
+    pub fn split_amiga_even_odd(val: u32) -> (u32, u32) {
+        let even = (val >> 1) & 0x5555_5555;
+        let odd = val & 0x5555_5555;
+        (even, odd)
+    }
+
+    /// Encodes a 32-bit masked halfword (with 16 data bits in 0x55555555 format) into 32 MFM bits with clock bit insertion
+    #[inline(always)]
+    pub fn push_amiga_mfm_halfword(bits: &mut Vec<bool>, half: u32, last_bit: &mut bool) {
+        let mut hi_byte = 0u8;
+        let mut lo_byte = 0u8;
+        for i in 0..8 {
+            let bit_hi = ((half >> (16 + 2 * i)) & 1) as u8;
+            let bit_lo = ((half >> (2 * i)) & 1) as u8;
+            hi_byte |= bit_hi << i;
+            lo_byte |= bit_lo << i;
+        }
+        MfmTrackEncoder::push_mfm_byte(bits, hi_byte, last_bit);
+        MfmTrackEncoder::push_mfm_byte(bits, lo_byte, last_bit);
+    }
+
+    /// Encodes a 32-bit word into 64 MFM bits via its 4 big-endian bytes with clock transitions
+    #[allow(dead_code)]
+    #[inline(always)]
+    pub fn push_mfm_u32(bits: &mut Vec<bool>, val: u32, last_bit: &mut bool) {
+        for &byte in &val.to_be_bytes() {
+            MfmTrackEncoder::push_mfm_byte(bits, byte, last_bit);
+        }
+    }
+
+    /// Encodes a single Amiga sector (sync 0x44894489, header, label, header CRC, data, data CRC, inter-sector gap 0xAAAA)
+    fn encode_amiga_sector(
+        cyl: u8,
+        head: u8,
+        sec_id: u8,
+        fs_mode: FsInitMode,
+        payload_buf: &mut [u8; 512],
+        bits: &mut Vec<bool>,
+        last_bit: &mut bool,
+    ) {
+        generate_sector_payload(
+            PresetProfile::Amiga35Dd,
+            cyl,
+            head,
+            sec_id,
+            fs_mode,
+            payload_buf,
+        );
+
+        let track_num = (cyl << 1) | (head & 1);
+
+        // 1. Sync: 2 raw words 0x44894489 (32 bits MFM)
+        Self::push_amiga_sync_word(bits, last_bit);
+        Self::push_amiga_sync_word(bits, last_bit);
+
+        // 2. Info longword: format (0xFF) | track_num | sec_id | secs_to_gap (11 - sec_id)
+        let format_byte = 0xFFu32;
+        let secs_to_gap = (11 - (sec_id % 11)) as u32;
+        let info = (format_byte << 24)
+            | ((track_num as u32) << 16)
+            | ((sec_id as u32) << 8)
+            | secs_to_gap;
+
+        let (even_info, odd_info) = Self::split_amiga_even_odd(info);
+        Self::push_amiga_mfm_halfword(bits, even_info, last_bit);
+        Self::push_amiga_mfm_halfword(bits, odd_info, last_bit);
+
+        // 3. Sector Label (16 bytes = 4 longwords of 0x00000000)
+        let label = [0x00000000u32; 4];
+        let mut even_labels = [0u32; 4];
+        let mut odd_labels = [0u32; 4];
+        for i in 0..4 {
+            let (e, o) = Self::split_amiga_even_odd(label[i]);
+            even_labels[i] = e;
+            odd_labels[i] = o;
+            Self::push_amiga_mfm_halfword(bits, even_labels[i], last_bit);
+        }
+        for &odd in &odd_labels {
+            Self::push_amiga_mfm_halfword(bits, odd, last_bit);
+        }
+
+        // 4. Header Checksum: XOR over info + labels masked to 0x55555555
+        let mut hdr_chk = even_info ^ odd_info;
+        for i in 0..4 {
+            hdr_chk ^= even_labels[i] ^ odd_labels[i];
+        }
+        hdr_chk &= 0x5555_5555;
+
+        let even_hdr_chk = 0u32;
+        let odd_hdr_chk = hdr_chk;
+        Self::push_amiga_mfm_halfword(bits, even_hdr_chk, last_bit);
+        Self::push_amiga_mfm_halfword(bits, odd_hdr_chk, last_bit);
+
+        // 5. Data Field: 512 bytes = 128 longwords
+        let mut data_lws = [0u32; 128];
+        for (i, lw) in data_lws.iter_mut().enumerate() {
+            let offset = i * 4;
+            *lw = u32::from_be_bytes([
+                payload_buf[offset],
+                payload_buf[offset + 1],
+                payload_buf[offset + 2],
+                payload_buf[offset + 3],
+            ]);
+        }
+
+        let mut even_data = [0u32; 128];
+        let mut odd_data = [0u32; 128];
+        let mut data_chk = 0u32;
+
+        for i in 0..128 {
+            let (e, o) = Self::split_amiga_even_odd(data_lws[i]);
+            even_data[i] = e;
+            odd_data[i] = o;
+            data_chk ^= e ^ o;
+        }
+        data_chk &= 0x5555_5555;
+
+        let even_data_chk = 0u32;
+        let odd_data_chk = data_chk;
+        Self::push_amiga_mfm_halfword(bits, even_data_chk, last_bit);
+        Self::push_amiga_mfm_halfword(bits, odd_data_chk, last_bit);
+
+        for &d in &even_data {
+            Self::push_amiga_mfm_halfword(bits, d, last_bit);
+        }
+        for &d in &odd_data {
+            Self::push_amiga_mfm_halfword(bits, d, last_bit);
+        }
+
+        // 6. Inter-sector gap: 1 byte of 0x00 MFM (16 bits / 2 bytes MFM 0xAAAA)
+        Self::push_mfm_repeat(bits, 0x00, 1, last_bit);
+    }
+
     /// Internal generator for AmigaDOS DD track format (11 sectors of 512B, Paula split even/odd MFM)
+    /// Continuous un-indexed track stream with overlap loop (approx 108,000 MFM bits ~ 1.08 rev)
     fn encode_amiga_track(
         cyl: u8,
         head: u8,
@@ -438,108 +575,15 @@ impl MfmTrackEncoder {
         bits: &mut Vec<bool>,
         last_bit: &mut bool,
     ) {
-        // Pre-track gap: 2 words of 0x0000
-        Self::push_u32_bits(bits, 0xAAAA_AAAA);
-
-        let track_num = (cyl << 1) | (head & 1);
         let mut payload = [0u8; 512];
+        let mut sec_idx = 0u8;
 
-        for sec_id in 0..11u8 {
-            generate_sector_payload(
-                PresetProfile::Amiga35Dd,
-                cyl,
-                head,
-                sec_id,
-                fs_mode,
-                &mut payload,
-            );
-
-            // 1. Sync: 2 words 0x44894489
-            Self::push_amiga_sync_word(bits, last_bit);
-            Self::push_amiga_sync_word(bits, last_bit);
-
-            // 2. Info longword: format (0xFF) | track_num | sec_id | secs_to_gap (11 - sec_id)
-            let format_byte = 0xFFu32;
-            let secs_to_gap = (11 - sec_id) as u32;
-            let info = (format_byte << 24)
-                | ((track_num as u32) << 16)
-                | ((sec_id as u32) << 8)
-                | secs_to_gap;
-
-            let even_info = (info >> 1) & 0x5555_5555;
-            let odd_info = info & 0x5555_5555;
-            Self::push_u32_bits(bits, even_info);
-            Self::push_u32_bits(bits, odd_info);
-
-            // 3. Sector Label (16 bytes = 4 longwords)
-            let label = [0x00000000u32; 4];
-            let mut even_labels = [0u32; 4];
-            let mut odd_labels = [0u32; 4];
-            for i in 0..4 {
-                even_labels[i] = (label[i] >> 1) & 0x5555_5555;
-                odd_labels[i] = label[i] & 0x5555_5555;
-                Self::push_u32_bits(bits, even_labels[i]);
-            }
-            for &odd in &odd_labels {
-                Self::push_u32_bits(bits, odd);
-            }
-
-            // 4. Header Checksum: XOR over info + labels masked to 0x55555555
-            let mut hdr_chk = even_info ^ odd_info;
-            for i in 0..4 {
-                hdr_chk ^= even_labels[i] ^ odd_labels[i];
-            }
-            hdr_chk &= 0x5555_5555;
-
-            let even_hdr_chk = (hdr_chk >> 1) & 0x5555_5555;
-            let odd_hdr_chk = hdr_chk & 0x5555_5555;
-            Self::push_u32_bits(bits, even_hdr_chk);
-            Self::push_u32_bits(bits, odd_hdr_chk);
-
-            // 5. Data Field: 512 bytes = 128 longwords
-            let mut data_lws = [0u32; 128];
-            for (i, lw) in data_lws.iter_mut().enumerate() {
-                let offset = i * 4;
-                *lw = u32::from_be_bytes([
-                    payload[offset],
-                    payload[offset + 1],
-                    payload[offset + 2],
-                    payload[offset + 3],
-                ]);
-            }
-
-            // If Blank mode, tag longword 0 with sector identifier for backward compatibility
-            if fs_mode == FsInitMode::Blank {
-                data_lws[0] = 0xE5E50000 | (sec_id as u32);
-            }
-
-            let mut even_data = [0u32; 128];
-            let mut odd_data = [0u32; 128];
-            let mut data_chk = 0u32;
-
-            for i in 0..128 {
-                even_data[i] = (data_lws[i] >> 1) & 0x5555_5555;
-                odd_data[i] = data_lws[i] & 0x5555_5555;
-                data_chk ^= even_data[i] ^ odd_data[i];
-            }
-            data_chk &= 0x5555_5555;
-
-            let even_data_chk = (data_chk >> 1) & 0x5555_5555;
-            let odd_data_chk = data_chk & 0x5555_5555;
-            Self::push_u32_bits(bits, even_data_chk);
-            Self::push_u32_bits(bits, odd_data_chk);
-
-            for &d in &even_data {
-                Self::push_u32_bits(bits, d);
-            }
-            for &d in &odd_data {
-                Self::push_u32_bits(bits, d);
-            }
-        }
-
-        // Post-track gap fill to nominal 50,000 bits + splice margin
-        while bits.len() < 50_800 {
-            Self::push_u32_bits(bits, 0xAAAA_AAAA);
+        // Encode consecutive sectors starting with 0..10 and repeating from start (overlap loop)
+        // until reaching target stream length of at least 108,000 MFM bits (~1.08 rev / ~216 ms)
+        while bits.len() < 108_000 {
+            let sec_id = sec_idx % 11;
+            Self::encode_amiga_sector(cyl, head, sec_id, fs_mode, &mut payload, bits, last_bit);
+            sec_idx = sec_idx.wrapping_add(1);
         }
     }
 }
@@ -553,7 +597,19 @@ impl MfmTrackEncoder {
 pub struct FluxSynthesizer;
 
 impl FluxSynthesizer {
+    /// Computes the base clock tick length at 72 MHz for a given preset profile
+    #[inline(always)]
+    pub fn base_tick_clock_for_preset(preset: PresetProfile) -> u32 {
+        match preset {
+            PresetProfile::Amiga35Dd => 142, // Amiga DD: ~1.973559 µs = 142 ticks @ 72 MHz (14 / 7.093790 MHz)
+            PresetProfile::Pc35Hd | PresetProfile::Pc525Hd => 72, // 500 kbps (1.0 µs = 72 ticks)
+            PresetProfile::Pc525DdOnHd => 120, // 300 kbps (1.667 µs = 120 ticks)
+            _ => 144, // 250 kbps (2.0 µs = 144 ticks)
+        }
+    }
+
     /// Computes the base clock tick length at 72 MHz for a given bitrate in kbps
+    #[allow(dead_code)]
     #[inline(always)]
     pub fn base_tick_clock(bitrate_kbps: u16) -> u32 {
         match bitrate_kbps {
@@ -565,14 +621,36 @@ impl FluxSynthesizer {
     }
 
     /// Synthesizes raw MFM bits into 72 MHz flux interval ticks with write pre-compensation
+    #[allow(dead_code)]
     pub fn bits_to_flux_ticks(
         bits: &[bool],
         bitrate_kbps: u16,
         cyl: u8,
         out_flux: &mut Vec<u32>,
     ) {
-        out_flux.clear();
         let tick_unit = Self::base_tick_clock(bitrate_kbps);
+        Self::bits_to_flux_ticks_with_unit(bits, tick_unit, cyl, out_flux);
+    }
+
+    /// Synthesizes raw MFM bits into 72 MHz flux interval ticks for a specific preset profile
+    pub fn bits_to_flux_ticks_for_preset(
+        bits: &[bool],
+        preset: PresetProfile,
+        cyl: u8,
+        out_flux: &mut Vec<u32>,
+    ) {
+        let tick_unit = Self::base_tick_clock_for_preset(preset);
+        Self::bits_to_flux_ticks_with_unit(bits, tick_unit, cyl, out_flux);
+    }
+
+    /// Internal synthesizer mapping bit cells to 72 MHz ticks
+    pub fn bits_to_flux_ticks_with_unit(
+        bits: &[bool],
+        tick_unit: u32,
+        cyl: u8,
+        out_flux: &mut Vec<u32>,
+    ) {
+        out_flux.clear();
 
         // 1. Extract raw transition interval counts (in bit cells)
         let mut count = 0u32;
@@ -663,7 +741,7 @@ impl FluxSynthesizer {
         buffer: &mut MfmTrackBuffer,
     ) {
         MfmTrackEncoder::encode_track_into_with_fs(preset, cyl, head, fs_mode, buffer);
-        Self::bits_to_flux_ticks(&buffer.bits, preset.target_data_rate(), cyl, &mut buffer.flux_ticks);
+        Self::bits_to_flux_ticks_for_preset(&buffer.bits, preset, cyl, &mut buffer.flux_ticks);
         Self::flux_ticks_to_gw_bytes(&buffer.flux_ticks, &mut buffer.gw_flux_bytes);
     }
 
@@ -748,10 +826,20 @@ mod tests {
     }
 
     #[test]
-    fn test_flux_synthesizer_timings_250k_300k_500k() {
+    fn test_split_amiga_even_odd() {
+        let val = 0x1234_5678;
+        let (even, odd) = MfmTrackEncoder::split_amiga_even_odd(val);
+        assert_eq!(even, (val >> 1) & 0x5555_5555);
+        assert_eq!(odd, val & 0x5555_5555);
+        assert_eq!(((even & 0x5555_5555) << 1) | (odd & 0x5555_5555), val);
+    }
+
+    #[test]
+    fn test_flux_synthesizer_timings_250k_300k_500k_and_amiga() {
         assert_eq!(FluxSynthesizer::base_tick_clock(500), 72);
         assert_eq!(FluxSynthesizer::base_tick_clock(300), 120);
         assert_eq!(FluxSynthesizer::base_tick_clock(250), 144);
+        assert_eq!(FluxSynthesizer::base_tick_clock_for_preset(PresetProfile::Amiga35Dd), 142);
     }
 
     #[test]
@@ -791,6 +879,9 @@ mod tests {
         let mut buffer = MfmTrackBuffer::new();
         MfmTrackEncoder::encode_track_into(PresetProfile::Amiga35Dd, 12, 1, &mut buffer);
 
+        // Bitstream must reach ~108,000 to 115,000 bits (continuous stream with overlap loop)
+        assert!(buffer.bits.len() >= 108_000, "Bitstream must be at least 108k bits, got {}", buffer.bits.len());
+
         let sectors = decode_amiga_sectors_from_bits(&buffer.bits);
         assert_eq!(sectors.len(), 11, "Should decode exactly 11 Amiga sectors");
 
@@ -798,8 +889,42 @@ mod tests {
             assert_eq!(sec.cyl, 12);
             assert_eq!(sec.head, 1);
             assert_eq!(sec.sec_id, i as u8);
+            assert_eq!(sec.status, crate::hw::SectorStatus::Ok);
             assert!(sec.crc_ok, "Amiga sector {} checksum should be valid", i);
         }
+    }
+
+    #[test]
+    fn test_amiga_track_synthesis_os_ready_roundtrip() {
+        let mut buffer = MfmTrackBuffer::new();
+        FluxSynthesizer::synthesize_track_with_fs(PresetProfile::Amiga35Dd, 40, 0, FsInitMode::OsReady, &mut buffer);
+
+        assert!(buffer.bits.len() >= 108_000);
+        assert!(!buffer.flux_ticks.is_empty());
+        assert_eq!(&buffer.gw_flux_bytes[buffer.gw_flux_bytes.len() - 2..], &[0x00, 0x00]);
+
+        let sectors = decode_amiga_sectors_from_bits(&buffer.bits);
+        assert_eq!(sectors.len(), 11, "Should decode 11 sectors in OS-Ready format");
+        for (i, sec) in sectors.iter().enumerate() {
+            assert_eq!(sec.cyl, 40);
+            assert_eq!(sec.head, 0);
+            assert_eq!(sec.sec_id, i as u8);
+            assert_eq!(sec.status, crate::hw::SectorStatus::Ok);
+            assert!(sec.crc_ok);
+        }
+    }
+
+    #[test]
+    fn test_amiga_track_encoding_length_and_margin() {
+        let mut buffer = MfmTrackBuffer::new();
+        MfmTrackEncoder::encode_track_into(PresetProfile::Amiga35Dd, 0, 0, &mut buffer);
+
+        // Continuous stream with overlap loop reaches >= 108_000 bits (~1.08 rev)
+        assert!(buffer.bits.len() >= 108_000, "Bitstream should reach at least 108k bits, got {}", buffer.bits.len());
+
+        // Decode sectors and verify all 11 are valid
+        let sectors = decode_amiga_sectors_from_bits(&buffer.bits);
+        assert_eq!(sectors.len(), 11);
     }
 
     #[test]

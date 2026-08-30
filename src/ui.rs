@@ -1943,12 +1943,40 @@ pub fn build_format_progress_lines(status: &crate::hw::DriveStatus) -> Vec<Line<
         }
 
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("Timing Stats   : ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("Elapsed: {:.1}s", prog.elapsed_secs), Style::default().fg(Color::White)),
-            Span::styled(" | Estimated Remaining: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:.1}s", prog.eta_secs), Style::default().fg(Color::Yellow)),
-        ]));
+        if prog.step == crate::hw::FormatStep::Completed {
+            let total_secs = prog.elapsed_secs.max(0.0) as u64;
+            let dur_h = total_secs / 3600;
+            let dur_m = (total_secs % 3600) / 60;
+            let dur_s = total_secs % 60;
+            let total_duration_str = format!("{:02}:{:02}:{:02}", dur_h, dur_m, dur_s);
+
+            lines.push(Line::from(vec![
+                Span::styled("Timing Stats   : ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Completed Successfully", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+                Span::styled(" | Total Duration: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(total_duration_str, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            ]));
+        } else {
+            let now_sys = std::time::SystemTime::now();
+            let start_sys = prog.start_time.unwrap_or_else(|| {
+                now_sys.checked_sub(std::time::Duration::from_secs_f64(prog.elapsed_secs.max(0.0))).unwrap_or(now_sys)
+            });
+            let est_end_sys = now_sys + std::time::Duration::from_secs_f64(prog.eta_secs.max(0.0));
+
+            let start_str = chrono::DateTime::<chrono::Local>::from(start_sys).format("%H:%M:%S").to_string();
+            let now_str = chrono::DateTime::<chrono::Local>::from(now_sys).format("%H:%M:%S").to_string();
+            let est_end_str = chrono::DateTime::<chrono::Local>::from(est_end_sys).format("%H:%M:%S").to_string();
+
+            lines.push(Line::from(vec![
+                Span::styled("Timing Stats   : ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Start: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(start_str, Style::default().fg(Color::White)),
+                Span::styled(" | Now: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(now_str, Style::default().fg(Color::White)),
+                Span::styled(" | Est. End: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(est_end_str, Style::default().fg(Color::Yellow)),
+            ]));
+        }
 
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
