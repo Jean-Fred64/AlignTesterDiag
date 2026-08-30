@@ -5466,6 +5466,8 @@ pub fn hw_thread(
                                                 }
                                             } else {
                                                 status.rpm = 0;
+                                                status.rpm_display = String::from("--- RPM");
+                                                status.rpm_measure.clear();
                                             }
                                         }
                                         RpmMode::Dual => {
