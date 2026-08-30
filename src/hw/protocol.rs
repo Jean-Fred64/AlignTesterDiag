@@ -691,6 +691,7 @@ pub struct FormatProgress {
     pub elapsed_secs: f64,
     pub eta_secs: f64,
     pub message: String,
+    pub start_time: Option<std::time::SystemTime>,
 }
 
 impl Default for FormatProgress {
@@ -712,6 +713,7 @@ impl Default for FormatProgress {
             elapsed_secs: 0.0,
             eta_secs: 0.0,
             message: String::new(),
+            start_time: None,
         }
     }
 }
